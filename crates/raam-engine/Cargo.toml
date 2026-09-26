@@ -6,3 +6,28 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+raam-model.workspace = true
+raam-core.workspace = true
+log.workspace = true
+# The library DB. Bundled: the amalgamation compiles with the target's
+# toolchain, so nothing depends on a frame's own libsqlite. Trimmed via
+# LIBSQLITE3_FLAGS in .cargo/config.toml (FTS/RTREE/etc compiled out).
+rusqlite = { version = "0.37", features = ["bundled"] }
+# Immich/weather parsing and the settings rows: the `Value` API only.
+serde_json = "1"
+# Blocking HTTP without an async runtime. rustls with ring; roots are
+# bundled (webpki) because API 23's system trust store is stale.
+ureq = { version = "3", features = ["json"] }
+# One JPEG decoder for previews and local photos; its 1/2-1/8 DCT-domain
+# scaling is why it's here (a 12 MP JPEG never decodes at full size).
+jpeg-decoder = { version = "0.3", default-features = false }
+# Dependency-free encoder for the q88 local previews (replaces `image`).
+jpeg-encoder = "0.6"
+# EXIF orientation + DateTimeOriginal; the edge cases are cheap insurance.
+kamadak-exif = "0.6"
+# SHA-1 for Immich checksum matching; ring is already under rustls.
+ring = "0.17"
+# statvfs (free space) and mktime (EXIF local times); native-only crate.
+libc = "0.2"

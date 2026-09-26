@@ -1,0 +1,6 @@
+[env]
+# Trims the bundled SQLite (libsqlite3-sys reads this in its build script):
+# full-text search, R-tree and the stats vtabs are dead weight on a photo
+# frame (~0.5 MB of .text). JSON stays - the curation export uses
+# json_group_array.
+LIBSQLITE3_FLAGS = "-USQLITE_ENABLE_FTS3 -USQLITE_ENABLE_FTS3_PARENTHESIS -USQLITE_ENABLE_FTS5 -USQLITE_ENABLE_RTREE -USQLITE_ENABLE_STAT4 -USQLITE_ENABLE_DBSTAT_VTAB -USQLITE_SOUNDEX"

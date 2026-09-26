@@ -6,12 +6,14 @@
 //! types living in GPU and UI modules; this crate is what breaks them, so
 //! it exists from day one and stays a leaf forever (docs/ARCHITECTURE.md).
 
+mod error;
 pub mod limits;
 mod media;
 mod settings;
 mod stats;
 mod time;
 
+pub use error::*;
 pub use media::*;
 pub use settings::*;
 pub use stats::*;

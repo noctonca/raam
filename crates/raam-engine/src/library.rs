@@ -1,0 +1,1174 @@
+//! 024: keeping the DB in step with the providers (provider.rs), on two
+//! threads.
+//!
+//! The library thread does the slow work, provider-agnostically:
+//! - it syncs each enabled provider's `list()` into `asset` rows (upserted
+//!   by the provider's id; items that are gone go, with their files): the
+//!   local folder at start, every 5 minutes and on "Rescan", the Immich
+//!   album list and the picked albums every 30 minutes (every minute while
+//!   offline, and 2 s after the pick changes);
+//! - it materialises previews one at a time: every local photo gets an
+//!   upright preview (uncapped; it is derived from a file on the frame), and
+//!   every Immich photo is prefetched, with its faces, into the Immich cache
+//!   until the size cap. Playback adds on-demand fetches that evict the least
+//!   recently shown (`store_immich_preview`).
+//!
+//! The writer thread takes the render thread's writes (settings, curation,
+//! source toggles, the server) so they land at once even while the library
+//! thread is mid-download: curation must survive the frame losing power a
+//! second later. After each curation change it rewrites the JSON export.
+//!
+//! The fetch thread reads the DB directly; `generation` tells it when the
+//! set of showable photos changed.
+//!
+//! 025: the Immich provider plays the union of the albums picked in
+//! settings (`collection`), not the hard-coded Favorites. Picking an album
+//! syncs it 2 s later (so a run of taps is one sync); un-picking one drops
+//! its assets at once on the writer thread, offline too, unless another
+//! picked album holds them. Every sync first checks the key still reads the
+//! same Immich user: another server or user is another library, which
+//! starts over from the default album. Cached files are removed only after
+//! the DB lock is let go.
+use crate::db::{self, Db};
+use crate::immich;
+use crate::provider::{ImmichProvider, LocalFolder, Provider};
+use crate::{Host, Paths};
+use raam_core::{clock, schedule};
+use raam_model::limits::{
+    DEFAULT_CAP_MB, LRU_BATCH_ENFORCE, LRU_BATCH_STORE, PREVIEW_SHORT_SIDE, SCAN_EVERY, SYNC_EVERY,
+    SYNC_RETRY,
+};
+use raam_model::{MediaRef, ProviderError, ScaleMode, SourceKind, Stats};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+pub enum Cmd {
+    // To the writer thread.
+    SaveSettings {
+        rows: Vec<(&'static str, serde_json::Value)>,
+        sleep: (bool, u32, u32),
+    },
+    SetScale(String, Option<ScaleMode>),
+    SetHidden(String, bool),
+    SetSourceEnabled(SourceKind, bool),
+    SetServer(immich::Config),
+    ExportCuration,
+    /// 025: pick or un-pick an album (Immich album id).
+    SelectAlbum(String, bool),
+    /// 027: the frame couldn't decode this clip (asset id, why).
+    SetUnplayable(i64, String),
+    // To the library thread.
+    SetCap(u32),
+    ClearCache,
+    Rescan,
+    SyncNow,
+    ServerChanged,
+    Refresh,
+    /// 025: the pick changed; sync shortly.
+    AlbumsChanged,
+}
+
+pub struct Library {
+    pub db: Db,
+    writer_tx: Mutex<Sender<Cmd>>,
+    library_tx: Mutex<Sender<Cmd>>,
+    generation: AtomicU64,
+    online: AtomicBool,
+    immich_on: AtomicBool,
+    local_on: AtomicBool,
+    cap_bytes: AtomicU64,
+    config: Mutex<immich::Config>,
+    stats: Mutex<(u64, Stats)>,
+    export_note: Mutex<String>,
+    pub cache_dir: PathBuf,
+    pub local_preview_dir: PathBuf,
+    pub local_dir: String,
+    pub host: Host,
+    pub paths: Paths,
+}
+
+impl Library {
+    /// Which photos may be shown changed (sync, scan, toggle, hide, online).
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    pub fn bump(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.host.waker.wake();
+    }
+
+    pub fn online(&self) -> bool {
+        self.online.load(Ordering::Relaxed)
+    }
+
+    /// Reachability as last seen by a sync or an on-demand fetch. Offline,
+    /// the queue only holds Immich photos that are in the cache.
+    pub fn set_online(&self, online: bool) {
+        if self.online.swap(online, Ordering::AcqRel) != online {
+            log::info!(
+                "library: Immich now {}",
+                if online {
+                    "online"
+                } else {
+                    "OFFLINE, playing from the cache"
+                }
+            );
+            self.bump();
+        }
+    }
+
+    pub fn enabled(&self, kind: SourceKind) -> bool {
+        match kind {
+            SourceKind::Immich => self.immich_on.load(Ordering::Relaxed),
+            SourceKind::Local => self.local_on.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Persisted by the writer thread, which then bumps the generation.
+    pub fn set_enabled(&self, kind: SourceKind, on: bool) {
+        let flag = match kind {
+            SourceKind::Immich => &self.immich_on,
+            SourceKind::Local => &self.local_on,
+        };
+        if flag.swap(on, Ordering::AcqRel) != on {
+            self.send(Cmd::SetSourceEnabled(kind, on));
+        }
+    }
+
+    pub fn cap_bytes(&self) -> u64 {
+        self.cap_bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn config(&self) -> immich::Config {
+        self.config.lock().unwrap().clone()
+    }
+
+    pub fn send(&self, cmd: Cmd) {
+        let to_writer = matches!(
+            cmd,
+            Cmd::SaveSettings { .. }
+                | Cmd::SetScale(..)
+                | Cmd::SetHidden(..)
+                | Cmd::SetSourceEnabled(..)
+                | Cmd::SetServer(_)
+                | Cmd::ExportCuration
+                | Cmd::SelectAlbum(..)
+                | Cmd::SetUnplayable(..)
+        );
+        let tx = if to_writer {
+            &self.writer_tx
+        } else {
+            &self.library_tx
+        };
+        let _ = tx.lock().unwrap().send(cmd);
+    }
+
+    /// (version, stats): the version changes whenever the stats do.
+    pub fn stats(&self) -> (u64, Stats) {
+        self.stats.lock().unwrap().clone()
+    }
+
+    fn publish(&self, s: Stats) {
+        let mut cur = self.stats.lock().unwrap();
+        if cur.1 != s {
+            cur.0 += 1;
+            cur.1 = s;
+            drop(cur);
+            self.host.waker.wake();
+        }
+    }
+}
+
+pub fn spawn(db: Db, paths: Paths, cap_mb: u32, host: Host) -> Arc<Library> {
+    let (writer_tx, writer_rx) = std::sync::mpsc::channel();
+    let (library_tx, library_rx) = std::sync::mpsc::channel();
+    let cache_dir = paths.files_dir.join("immich-cache");
+    let local_preview_dir = paths.files_dir.join("local-previews");
+    for d in [&cache_dir, &local_preview_dir] {
+        if let Err(e) = std::fs::create_dir_all(d) {
+            log::error!("library: create {}: {e}", d.display());
+        }
+    }
+    let (immich_row, local_row, key) = {
+        let conn = db.lock().unwrap();
+        (
+            db::source(&conn, SourceKind::Immich),
+            db::source(&conn, SourceKind::Local),
+            db::immich_key(&conn),
+        )
+    };
+    let lib = Arc::new(Library {
+        db,
+        writer_tx: Mutex::new(writer_tx),
+        library_tx: Mutex::new(library_tx),
+        generation: AtomicU64::new(1),
+        online: AtomicBool::new(false),
+        immich_on: AtomicBool::new(immich_row.enabled),
+        local_on: AtomicBool::new(local_row.enabled),
+        cap_bytes: AtomicU64::new(cap_mb as u64 * 1_048_576),
+        config: Mutex::new(immich::Config {
+            url: immich_row.base_url,
+            key,
+        }),
+        stats: Mutex::new((0, Stats::default())),
+        export_note: Mutex::new(String::new()),
+        cache_dir,
+        local_preview_dir,
+        local_dir: if local_row.base_url.is_empty() {
+            paths.local_dir_default.clone()
+        } else {
+            local_row.base_url
+        },
+        host,
+        paths,
+    });
+    let l = lib.clone();
+    std::thread::spawn(move || writer_loop(l, writer_rx));
+    let l = lib.clone();
+    std::thread::spawn(move || library_loop(l, library_rx));
+    lib
+}
+
+/// The first-run cap: 1 GB, or a quarter of the free space if that is less.
+pub fn default_cap_mb(files_dir: &Path) -> u32 {
+    let free_mb = free_bytes(files_dir) / 1_048_576;
+    if free_mb == 0 {
+        DEFAULT_CAP_MB
+    } else {
+        DEFAULT_CAP_MB.min((free_mb / 4) as u32).max(50)
+    }
+}
+
+fn free_bytes(path: &Path) -> u64 {
+    let Ok(c) = std::ffi::CString::new(path.to_string_lossy().as_bytes()) else {
+        return 0;
+    };
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return 0;
+    }
+    st.f_bavail as u64 * st.f_frsize as u64
+}
+
+// ---- the writer thread -----------------------------------------------------
+
+fn writer_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
+    for cmd in rx {
+        let t = clock::now();
+        let conn = lib.db.lock().unwrap();
+        let mut curation_changed = false;
+        // Removed after the lock is let go.
+        let mut stale_files = Vec::new();
+        match cmd {
+            Cmd::SaveSettings { rows, sleep } => match db::save_settings(&conn, &rows, sleep) {
+                Ok(()) => log::info!(
+                    "db: settings saved ({} keys + sleep schedule) in {:?}",
+                    rows.len(),
+                    clock::elapsed(t)
+                ),
+                Err(e) => log::error!("db: saving settings failed: {e}"),
+            },
+            Cmd::SetScale(key, mode) => match db::set_scale(&conn, &key, mode) {
+                Ok(_) => {
+                    log::info!(
+                        "db: {key} Fill/Fit override -> {mode:?} in {:?}",
+                        clock::elapsed(t)
+                    );
+                    curation_changed = true;
+                }
+                Err(e) => log::error!("db: Fill/Fit override for {key} failed: {e}"),
+            },
+            Cmd::SetHidden(key, hidden) => match db::set_hidden(&conn, &key, hidden) {
+                Ok(_) => {
+                    log::info!(
+                        "db: {key} {} in {:?}",
+                        if hidden { "hidden" } else { "unhidden" },
+                        clock::elapsed(t)
+                    );
+                    curation_changed = true;
+                    lib.bump();
+                }
+                Err(e) => log::error!("db: hiding {key} failed: {e}"),
+            },
+            Cmd::SetSourceEnabled(kind, on) => {
+                if let Err(e) = db::set_source_enabled(&conn, kind, on) {
+                    log::error!("db: source toggle failed: {e}");
+                }
+                log::info!(
+                    "library: source {} {}",
+                    kind.as_str(),
+                    if on { "enabled" } else { "disabled" }
+                );
+                lib.bump();
+                // Catch up on what changed while it was off.
+                let _ = lib
+                    .library_tx
+                    .lock()
+                    .unwrap()
+                    .send(if on && kind == SourceKind::Local {
+                        Cmd::Rescan
+                    } else if on {
+                        Cmd::SyncNow
+                    } else {
+                        Cmd::Refresh
+                    });
+            }
+            Cmd::SetServer(config) => {
+                if let Err(e) = db::set_immich_server(&conn, &config.url, &config.key) {
+                    log::error!("db: saving the server failed: {e}");
+                }
+                // Never log the key.
+                log::info!(
+                    "library: Immich server changed to {}, resyncing",
+                    config.url
+                );
+                *lib.config.lock().unwrap() = config;
+                let _ = lib.library_tx.lock().unwrap().send(Cmd::ServerChanged);
+            }
+            Cmd::ExportCuration => curation_changed = true,
+            Cmd::SetUnplayable(asset, reason) => {
+                log::warn!("library: asset {asset} can't be played here ({reason}), left out");
+                stale_files = db::mark_unplayable(&conn, asset, &reason);
+                lib.bump();
+                let _ = lib.library_tx.lock().unwrap().send(Cmd::Refresh);
+            }
+            Cmd::SelectAlbum(album, on) => match db::select_album(&conn, &album, on) {
+                Ok((dropped, files)) => {
+                    log::info!(
+                        "library: album {album} {}, {dropped} assets dropped in {:?}",
+                        if on { "picked" } else { "un-picked" },
+                        clock::elapsed(t)
+                    );
+                    stale_files = files;
+                    if dropped > 0 {
+                        lib.bump();
+                    }
+                    // A sync either way: a pick needs its assets, and an
+                    // un-pick refreshes the album list and the status.
+                    let _ = lib.library_tx.lock().unwrap().send(Cmd::AlbumsChanged);
+                }
+                Err(e) => log::error!("db: picking album {album} failed: {e}"),
+            },
+            _ => {}
+        }
+        // Small, and rewritten whole after each change: the frame has no
+        // other backup of it.
+        let json = curation_changed.then(|| db::curation_json(&conn));
+        drop(conn);
+        if !stale_files.is_empty() {
+            let t = clock::now();
+            db::remove_files(&stale_files);
+            log::info!(
+                "library: {} cached files removed in {:?}, outside the DB lock",
+                stale_files.len(),
+                clock::elapsed(t)
+            );
+        }
+        if let Some(json) = json {
+            let export = &lib.paths.curation_export;
+            let note = match write_atomic(export, json.as_bytes()) {
+                Ok(()) => format!("exported to {}", export.display()),
+                Err(e) => {
+                    log::error!("curation export: {e}");
+                    format!("export failed: {e}")
+                }
+            };
+            *lib.export_note.lock().unwrap() = note;
+            let _ = lib.library_tx.lock().unwrap().send(Cmd::Refresh);
+        }
+    }
+}
+
+// ---- the library thread ----------------------------------------------------
+
+struct Loop {
+    immich: ImmichProvider,
+    local: LocalFolder,
+    next_scan: Duration,
+    next_sync: Duration,
+    /// Nothing left to materialise (or the cache is at its cap).
+    idle: bool,
+    /// Assets whose preview failed this run, not retried until the next sync.
+    failed: std::collections::HashSet<i64>,
+    local_note: String,
+    immich_note: String,
+    prefetch_note: String,
+    albums_note: String,
+    test_cap: Option<u32>,
+    /// The cap from settings, put back when the debug override is cleared.
+    setting_cap: u64,
+}
+
+fn library_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
+    // The fresh-start hand-over (docs/plan/migration.md): an empty curation
+    // table is seeded once from the lab frame's JSON export, if one is
+    // there.
+    match db::import_curation(&lib.db.lock().unwrap(), &lib.paths.curation_export) {
+        Ok(0) => {}
+        Ok(n) => {
+            log::info!(
+                "library: curation imported: {n} items from {}",
+                lib.paths.curation_export.display()
+            );
+            lib.bump();
+        }
+        Err(e) => log::warn!("library: curation import: {e}"),
+    }
+    let known_local = {
+        let conn = lib.db.lock().unwrap();
+        let t = clock::now();
+        let (rows, files) = db::sweep(&conn, &[&lib.cache_dir, &lib.local_preview_dir]);
+        log::info!(
+            "library: startup sweep dropped {rows} rows with no file and {files} files with no row in {:?}",
+            clock::elapsed(t)
+        );
+        db::local_known(&conn)
+    };
+    let mut st = Loop {
+        immich: ImmichProvider::new(),
+        local: LocalFolder::new(
+            lib.local_dir.clone(),
+            known_local,
+            lib.host.probe.clone(),
+            lib.host.grant_storage.clone(),
+        ),
+        next_scan: clock::now(),
+        next_sync: clock::now(),
+        idle: false,
+        failed: Default::default(),
+        local_note: String::new(),
+        immich_note: "not synced yet".into(),
+        prefetch_note: String::new(),
+        albums_note: "saved list, not refreshed yet".into(),
+        test_cap: None,
+        setting_cap: lib.cap_bytes(),
+    };
+    loop {
+        // Test-only: `debug.video.cap_mb` overrides the cap setting.
+        let test_cap = lib
+            .host
+            .switches
+            .get("debug.video.cap_mb")
+            .trim()
+            .parse::<u32>()
+            .ok();
+        if test_cap != st.test_cap {
+            log::info!("library: debug cap override {test_cap:?} MB");
+            st.test_cap = test_cap;
+            lib.cap_bytes.store(
+                test_cap.map_or(st.setting_cap, |mb| mb as u64 * 1_048_576),
+                Ordering::Relaxed,
+            );
+            enforce_cap(&lib);
+            st.idle = false;
+        }
+
+        if clock::now() >= st.next_scan {
+            if lib.enabled(SourceKind::Local) {
+                let t = clock::now();
+                match sync_provider(&lib, &mut st.local) {
+                    Ok(n) => {
+                        st.local_note = format!("scanned {}", hm_now());
+                        log::info!(
+                            "library: scanned {}: {n} in {:?}",
+                            lib.local_dir,
+                            clock::elapsed(t)
+                        );
+                    }
+                    Err(e) => {
+                        log::error!("library: scan failed: {e}");
+                        st.local_note = e;
+                    }
+                }
+                st.idle = false;
+            }
+            st.next_scan = clock::now() + SCAN_EVERY;
+        }
+        // Offline (a failed fetch counts too): retry the sync every minute,
+        // which is also how the queue comes back online.
+        if !lib.online() && st.next_sync > clock::now() + SYNC_RETRY {
+            st.next_sync = clock::now() + SYNC_RETRY;
+        }
+        if clock::now() >= st.next_sync {
+            // A fresh install has no server yet: nothing to sync (or spam
+            // the log with) until settings provide one.
+            if lib.enabled(SourceKind::Immich) && lib.config().url.trim().is_empty() {
+                st.immich_note = "no server configured".into();
+                st.albums_note = "no server configured".into();
+            } else if lib.enabled(SourceKind::Immich) {
+                let t = clock::now();
+                // The album list first (the picker's, and which picked
+                // albums still exist), then the union of the picked ones.
+                let result = st
+                    .immich
+                    .with_config(lib.config())
+                    .map_err(|e| e.to_string())
+                    .and_then(|p| {
+                        // Which library this is (another server or user starts
+                        // over). A key that may not read the user is left
+                        // unchecked rather than failing the sync.
+                        match p.user_id() {
+                            Ok(user) => {
+                                let stale = db::check_library(&lib.db.lock().unwrap(), &user)
+                                    .map_err(|e| e.to_string())?;
+                                if let Some(files) = stale {
+                                    db::remove_files(&files);
+                                    lib.bump();
+                                }
+                            }
+                            Err(e) => log::warn!(
+                                "library: can't tell which library the key reads ({e}), not checked"
+                            ),
+                        }
+                        let albums = p.albums().map_err(|e| e.to_string())?;
+                        let picked = db::update_albums(&lib.db.lock().unwrap(), &albums)
+                            .map_err(|e| e.to_string())?;
+                        log::info!(
+                            "library: {} albums on the server, {} picked, listed in {:?}",
+                            albums.len(),
+                            picked.len(),
+                            clock::elapsed(t)
+                        );
+                        let none = picked.is_empty();
+                        p.set_albums(picked);
+                        sync_provider(&lib, p).map(|n| (n, none))
+                    });
+                match result {
+                    Ok((n, none)) => {
+                        log::info!("library: album sync: {n} in {:?}", clock::elapsed(t));
+                        st.albums_note = format!("updated {}", hm_now());
+                        st.immich_note = if none {
+                            "no album picked".to_string()
+                        } else {
+                            format!("synced {}", hm_now())
+                        };
+                        st.failed.clear();
+                        lib.set_online(true);
+                    }
+                    Err(e) => {
+                        log::error!("library: album sync failed: {e}");
+                        if lib.online() || !st.immich_note.starts_with("offline") {
+                            st.immich_note = format!("offline since {}", hm_now());
+                            st.albums_note = format!(
+                                "can't reach the server ({}), showing the saved list",
+                                hm_now()
+                            );
+                        }
+                        lib.set_online(false);
+                    }
+                }
+                st.idle = false;
+            }
+            st.next_sync = clock::now() + if lib.online() { SYNC_EVERY } else { SYNC_RETRY };
+        }
+        let worked = !st.idle && materialise_one(&lib, &mut st);
+        if !worked {
+            st.idle = true;
+        }
+        publish_stats(&lib, &st);
+
+        let wait = if worked {
+            Duration::ZERO
+        } else {
+            st.next_scan
+                .min(st.next_sync)
+                .saturating_sub(clock::now())
+                .min(Duration::from_secs(5))
+        };
+        let first = match rx.recv_timeout(wait) {
+            Ok(c) => Some(c),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+        for cmd in first.into_iter().chain(rx.try_iter()) {
+            handle(&lib, &mut st, cmd);
+        }
+    }
+}
+
+fn hm_now() -> String {
+    schedule::fmt_hm(schedule::local_now().0 / 60)
+}
+
+fn handle(lib: &Library, st: &mut Loop, cmd: Cmd) {
+    match cmd {
+        Cmd::SetCap(mb) => {
+            st.setting_cap = mb as u64 * 1_048_576;
+            if st.test_cap.is_none() {
+                lib.cap_bytes.store(st.setting_cap, Ordering::Relaxed);
+            }
+            log::info!("library: cache cap {mb} MB");
+            enforce_cap(lib);
+            st.idle = false;
+        }
+        Cmd::ClearCache => {
+            let t = clock::now();
+            let conn = lib.db.lock().unwrap();
+            let ids: Vec<i64> = conn
+                .prepare(
+                    "SELECT c.asset_id FROM cached_file c JOIN asset a ON a.id = c.asset_id
+                     JOIN source s ON s.id = a.source_id WHERE s.kind = 'immich'",
+                )
+                .and_then(|mut s| s.query_map([], |r| r.get(0))?.collect())
+                .unwrap_or_default();
+            let files: Vec<PathBuf> = ids
+                .iter()
+                .flat_map(|id| db::drop_cached(&conn, *id))
+                .collect();
+            // 027: clips found unplayable are tried again after a clear (the
+            // server may have transcoded them since).
+            let _ = conn.execute(
+                "UPDATE asset SET playable = NULL, unplayable_reason = NULL
+                 WHERE source_id = (SELECT id FROM source WHERE kind = 'immich')",
+                [],
+            );
+            drop(conn);
+            db::remove_files(&files);
+            log::info!(
+                "library: Immich cache cleared, {} previews in {:?}",
+                ids.len(),
+                clock::elapsed(t)
+            );
+            st.idle = false;
+            st.failed.clear();
+            lib.bump();
+        }
+        Cmd::Rescan => st.next_scan = clock::now(),
+        Cmd::SyncNow | Cmd::ServerChanged => {
+            st.next_sync = clock::now();
+            st.idle = false;
+            st.failed.clear();
+        }
+        Cmd::Refresh => st.idle = false,
+        Cmd::AlbumsChanged => {
+            // Another tap within 2 s pushes it back, so a run of taps is
+            // one sync.
+            st.next_sync = clock::now() + Duration::from_secs(2);
+            st.idle = false;
+            st.failed.clear();
+        }
+        _ => {}
+    }
+}
+
+fn publish_stats(lib: &Library, st: &Loop) {
+    let conn = lib.db.lock().unwrap();
+    let (immich_assets, immich_cached) = db::counts(&conn, SourceKind::Immich);
+    let (local_assets, local_ready) = db::counts(&conn, SourceKind::Local);
+    let cache_bytes = db::cached_bytes(&conn, SourceKind::Immich);
+    let shared = db::shared_count(&conn);
+    let hidden = db::hidden_list(&conn);
+    let albums = db::albums(&conn);
+    let (videos, videos_ready, videos_unplayable, unplayable_reasons) = db::video_counts(&conn);
+    drop(conn);
+    lib.publish(Stats {
+        immich_assets,
+        immich_cached,
+        cache_bytes,
+        cap_bytes: lib.cap_bytes() as i64,
+        local_assets,
+        local_ready,
+        shared,
+        local_dir: lib.local_dir.clone(),
+        local_note: st.local_note.clone(),
+        immich_note: st.immich_note.clone(),
+        prefetch_note: st.prefetch_note.clone(),
+        // Rounded so the panel doesn't redraw for every block written.
+        free_bytes: free_bytes(&lib.cache_dir) / 10_485_760 * 10_485_760,
+        hidden,
+        export_note: lib.export_note.lock().unwrap().clone(),
+        albums,
+        albums_note: st.albums_note.clone(),
+        videos,
+        videos_ready,
+        videos_unplayable,
+        unplayable_reasons,
+    });
+}
+
+/// Brings a provider's `asset` rows in line with its `list()`. Items are
+/// upserted by the provider's id; for the local folder that is the content
+/// hash, so a renamed or moved file only updates `location`. Whatever the
+/// provider no longer lists goes, with its files. Curation is untouched.
+fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, String> {
+    let kind = provider.kind();
+    let mut items = provider.list().map_err(|e| e.to_string())?;
+    let conn = lib.db.lock().unwrap();
+    let source = db::source_id(&conn, kind).ok_or("no source row")?;
+    if kind == SourceKind::Immich {
+        // An album un-picked while the list was downloading must not come
+        // back: keep only what the albums picked now hold.
+        let picked: std::collections::HashSet<String> =
+            db::selected_albums(&conn).into_iter().collect();
+        let listed = items.len();
+        for m in &mut items {
+            m.collections.retain(|c| picked.contains(c));
+        }
+        items.retain(|m| !m.collections.is_empty());
+        if items.len() != listed {
+            log::info!(
+                "library: {} listed assets left out, their album was un-picked mid-sync",
+                listed - items.len()
+            );
+        }
+    }
+    let mut existing: std::collections::HashMap<String, (i64, u32, u32, Option<String>)> = conn
+        .prepare("SELECT remote_id, id, width, height, location FROM asset WHERE source_id = ?1")
+        .and_then(|mut s| {
+            s.query_map([source], |r| {
+                Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            })?
+            .collect()
+        })
+        .map_err(|e| e.to_string())?;
+    let (mut added, mut changed, mut moved) = (0, 0, 0);
+    let now = db::now_ms();
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    for m in &items {
+        let (bytes, mtime) = m.stamp.map_or((None, None), |(b, t)| (Some(b), Some(t)));
+        match existing.remove(&m.id) {
+            Some((_, w, h, loc)) if (w, h) == (m.width, m.height) && loc == m.location => {}
+            Some((id, w, h, loc)) => {
+                if (w, h) == (m.width, m.height) {
+                    log::info!("library: asset {id} moved {loc:?} -> {:?}", m.location);
+                    moved += 1;
+                } else {
+                    changed += 1;
+                }
+                let _ = tx.execute(
+                    "UPDATE asset SET width = ?2, height = ?3, taken_at_ms = ?4, location = ?5, file_bytes = ?6,
+                       file_mtime_ms = ?7, hash = ?8 WHERE id = ?1",
+                    rusqlite::params![id, m.width, m.height, m.taken_at_ms, m.location, bytes, mtime, m.sha1],
+                );
+            }
+            None => {
+                let _ = tx.execute(
+                    "INSERT INTO asset (source_id, remote_id, hash, location, kind, width, height, taken_at_ms,
+                       added_at_ms, file_bytes, file_mtime_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    rusqlite::params![
+                        source,
+                        m.id,
+                        m.sha1,
+                        m.location,
+                        m.kind.as_str(),
+                        m.width,
+                        m.height,
+                        m.taken_at_ms,
+                        now,
+                        bytes,
+                        mtime
+                    ],
+                );
+                added += 1;
+            }
+        }
+    }
+    // A focus the provider already knows (none of today's two do in
+    // `list`: Immich's faces are fetched lazily, the folder has none).
+    for m in items.iter().filter(|m| m.focus.is_some()) {
+        let _ = tx.execute(
+            "UPDATE asset SET focus_x = ?3, focus_y = ?4, faces_checked = 1 WHERE source_id = ?1 AND remote_id = ?2",
+            rusqlite::params![source, m.id, m.focus.unwrap().centre.0, m.focus.unwrap().centre.1],
+        );
+    }
+    let removed = existing.len();
+    for (id, _, _, loc) in existing.values() {
+        if let Some(loc) = loc {
+            log::info!("library: {loc} is gone, dropping asset {id}");
+        }
+    }
+    let gone: Vec<i64> = existing.values().map(|v| v.0).collect();
+    let files = db::delete_assets(&tx, &gone).map_err(|e| format!("dropping assets: {e}"))?;
+    if kind == SourceKind::Immich {
+        db::set_memberships(&tx, source, &items).map_err(|e| format!("memberships: {e}"))?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    drop(conn);
+    db::remove_files(&files);
+    if added + changed + moved + removed > 0 {
+        lib.bump();
+    }
+    Ok(format!(
+        "{} items ({added} new, {changed} changed, {moved} moved, {removed} removed)",
+        items.len()
+    ))
+}
+
+/// Makes one missing preview: local photos first (they are always kept),
+/// then Immich prefetch, with faces, until the cap. Returns whether there
+/// was work to do.
+fn materialise_one(lib: &Library, st: &mut Loop) -> bool {
+    let local_on = lib.enabled(SourceKind::Local);
+    let immich_on = lib.enabled(SourceKind::Immich) && lib.online();
+    let next: Option<(i64, SourceKind, String, Option<String>, bool, bool)> = {
+        let conn = lib.db.lock().unwrap();
+        // 027: an Immich clip's "preview" is its playback transcode; a
+        // local clip plays from where it is and needs nothing made. Photos
+        // first, then clips (bigger, and fewer).
+        let mut stmt = match conn.prepare(&format!(
+            "SELECT a.id, s.kind, a.remote_id, a.location, a.faces_checked, a.kind = 'video'
+             FROM asset a JOIN source s ON s.id = a.source_id
+             LEFT JOIN cached_file c ON c.asset_id = a.id AND c.variant = {}
+             WHERE c.asset_id IS NULL AND COALESCE(a.playable, 1) = 1
+               AND ((s.kind = 'local' AND ?1 AND a.kind != 'video') OR (s.kind = 'immich' AND ?2))
+             ORDER BY s.kind = 'immich', a.kind = 'video', a.id",
+            db::VARIANT_SQL
+        )) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let rows: Vec<(i64, String, String, Option<String>, bool, bool)> = stmt
+            .query_map(rusqlite::params![local_on, immich_on], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
+            .map(|i| i.flatten().collect())
+            .unwrap_or_default();
+        rows.into_iter()
+            .find(|r| !st.failed.contains(&r.0))
+            .map(|r| {
+                (
+                    r.0,
+                    if r.1 == "local" {
+                        SourceKind::Local
+                    } else {
+                        SourceKind::Immich
+                    },
+                    r.2,
+                    r.3,
+                    r.4,
+                    r.5,
+                )
+            })
+    };
+    let Some((asset, kind, remote_id, location, faces_checked, is_video)) = next else {
+        if immich_on && st.prefetch_note != "complete" {
+            log::info!("library: every photo has its preview (Immich prefetch complete)");
+            st.prefetch_note = "complete".into();
+        }
+        return false;
+    };
+    let media = MediaRef::stored(remote_id, location);
+    let t = clock::now();
+    if is_video {
+        // Only Immich clips get here (a prefetch; nothing is evicted for it).
+        let provider = match st.immich.with_config(lib.config()) {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("library: {e}");
+                return false;
+            }
+        };
+        return match fetch_immich_video(lib, provider, asset, &media, false) {
+            Ok(Some(_)) => {
+                st.prefetch_note = "running".into();
+                log::info!(
+                    "library: prefetched clip {asset} in {:?}",
+                    clock::elapsed(t)
+                );
+                true
+            }
+            Ok(None) => {
+                if st.prefetch_note != "stopped at the cap" {
+                    log::info!(
+                        "library: prefetch stopped at the {} MB cap",
+                        lib.cap_bytes() / 1_048_576
+                    );
+                }
+                st.prefetch_note = "stopped at the cap".into();
+                false
+            }
+            Err(e) => {
+                log::warn!("library: clip {asset}: {e}");
+                st.failed.insert(asset);
+                if e.is_transport() {
+                    lib.set_online(false);
+                }
+                true
+            }
+        };
+    }
+    let provider: &mut dyn Provider = match kind {
+        SourceKind::Local => &mut st.local,
+        SourceKind::Immich => match st.immich.with_config(lib.config()) {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("library: {e}");
+                return false;
+            }
+        },
+    };
+    let bytes = match provider.fetch_preview(&media, PREVIEW_SHORT_SIDE) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("library: preview of asset {asset} failed: {e}");
+            st.failed.insert(asset);
+            if kind == SourceKind::Immich && e.is_transport() {
+                lib.set_online(false);
+            }
+            return true;
+        }
+    };
+    if !faces_checked {
+        match provider.fetch_focus(&media) {
+            Ok(focus) => {
+                let _ = db::set_focus(&lib.db.lock().unwrap(), asset, focus);
+            }
+            Err(e) => log::warn!("library: focus for asset {asset}: {e}"),
+        }
+    }
+    match kind {
+        SourceKind::Local => {
+            let path = lib.local_preview_dir.join(format!("{asset}.jpg"));
+            if let Err(e) = write_atomic(&path, &bytes) {
+                log::error!("library: {e}");
+                st.failed.insert(asset);
+                return true;
+            }
+            let _ = db::insert_cached(
+                &lib.db.lock().unwrap(),
+                asset,
+                &path,
+                bytes.len() as i64,
+                db::now_ms(),
+            );
+            // A new local photo just became showable.
+            lib.bump();
+            true
+        }
+        SourceKind::Immich => match store_immich_preview(lib, asset, &bytes, false) {
+            Ok(true) => {
+                st.prefetch_note = "running".into();
+                log::info!(
+                    "library: prefetched asset {asset} ({} KB) in {:?}",
+                    bytes.len() / 1024,
+                    clock::elapsed(t)
+                );
+                true
+            }
+            Ok(false) => {
+                if st.prefetch_note != "stopped at the cap" {
+                    log::info!(
+                        "library: prefetch stopped at the {} MB cap",
+                        lib.cap_bytes() / 1_048_576
+                    );
+                }
+                st.prefetch_note = "stopped at the cap".into();
+                false
+            }
+            Err(e) => {
+                log::error!("library: storing asset {asset}: {e}");
+                st.failed.insert(asset);
+                true
+            }
+        },
+    }
+}
+
+/// Writes an Immich preview into the cache and records it. With `evict`
+/// (on-demand, for a photo about to be shown) the least recently shown
+/// previews make room; without it (prefetch) nothing is written once the
+/// cap would be passed, so prefetch never churns the cache. Ok(false) =
+/// not stored.
+pub fn store_immich_preview(
+    lib: &Library,
+    asset: i64,
+    bytes: &[u8],
+    evict: bool,
+) -> Result<bool, String> {
+    let cap = lib.cap_bytes() as i64;
+    let len = bytes.len() as i64;
+    if len > cap {
+        return Ok(false);
+    }
+    if !evict && db::cached_bytes(&lib.db.lock().unwrap(), SourceKind::Immich) + len > cap {
+        return Ok(false);
+    }
+    let path = lib.cache_dir.join(format!("{asset}.jpg"));
+    write_atomic(&path, bytes)?;
+    let conn = lib.db.lock().unwrap();
+    let mut evicted = Vec::new();
+    if evict {
+        let mut total = db::cached_bytes(&conn, SourceKind::Immich);
+        while total + len > cap {
+            let victims = db::lru_immich(&conn, asset, LRU_BATCH_STORE);
+            if victims.is_empty() {
+                break;
+            }
+            for (id, b) in victims {
+                if total + len <= cap {
+                    break;
+                }
+                evicted.extend(db::drop_cached(&conn, id));
+                total -= b;
+                log::info!(
+                    "library: evicted asset {id} ({} KB), least recently shown",
+                    b / 1024
+                );
+            }
+        }
+    }
+    let stored = db::insert_cached(&conn, asset, &path, len, db::now_ms());
+    drop(conn);
+    db::remove_files(&evicted);
+    if let Err(e) = stored {
+        // Typically the asset went while its preview downloaded (its album
+        // was un-picked): the file has no row to belong to.
+        db::remove_files(&[path]);
+        return Err(e.to_string());
+    }
+    Ok(true)
+}
+
+/// 027: downloads an Immich clip (its playback transcode) into the cache,
+/// checks the frame's decoder can take it, and records it. `evict`: make
+/// room by evicting the least recently shown (on demand, for a clip about
+/// to play); without it (prefetch) a clip that would pass the cap isn't
+/// kept. Ok(None) = not kept (the cap). A clip that can't be played here is
+/// marked so (out of the queue) and its file removed: an Err.
+pub fn fetch_immich_video(
+    lib: &Library,
+    provider: &mut ImmichProvider,
+    asset: i64,
+    media: &MediaRef,
+    evict: bool,
+) -> Result<Option<(PathBuf, raam_model::ClipInfo)>, ProviderError> {
+    // The fetch thread (on demand) and the library thread (prefetch) may
+    // both be after the same clip; each writes its own part file.
+    let tmp = lib.cache_dir.join(format!(
+        "{asset}.mp4.{}.part",
+        if evict { "fetch" } else { "prefetch" }
+    ));
+    let t = clock::now();
+    let len = match provider.fetch_video(media, &tmp) {
+        Ok(n) => n as i64,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
+    let info = lib.host.probe.probe(&tmp.to_string_lossy());
+    let why = match &info {
+        Ok(i) => lib.host.probe.unplayable(i),
+        Err(e) => Some(format!("unreadable: {e}")),
+    };
+    log::info!(
+        "library: clip {asset}: {} KB in {:?}: {}",
+        len / 1024,
+        clock::elapsed(t),
+        match &info {
+            Ok(i) => format!(
+                "{} {}x{} rotation {}, {:.1}s, audio {:?}",
+                i.mime,
+                i.coded_w,
+                i.coded_h,
+                i.rotation,
+                i.duration_us as f64 / 1e6,
+                i.audio
+            ),
+            Err(e) => e.clone(),
+        }
+    );
+    if let Some(why) = why {
+        let _ = std::fs::remove_file(&tmp);
+        let files = db::mark_unplayable(&lib.db.lock().unwrap(), asset, &why);
+        db::remove_files(&files);
+        lib.bump();
+        return Err(ProviderError::Failed(format!(
+            "can't be played here: {why}"
+        )));
+    }
+    let info = info.unwrap();
+    let cap = lib.cap_bytes() as i64;
+    if len > cap
+        || (!evict && db::cached_bytes(&lib.db.lock().unwrap(), SourceKind::Immich) + len > cap)
+    {
+        let _ = std::fs::remove_file(&tmp);
+        return Ok(None);
+    }
+    let path = lib.cache_dir.join(format!("{asset}.mp4"));
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| ProviderError::Failed(format!("rename {}: {e}", path.display())))?;
+    let conn = lib.db.lock().unwrap();
+    let mut evicted = Vec::new();
+    if evict {
+        let mut total = db::cached_bytes(&conn, SourceKind::Immich);
+        while total + len > cap {
+            let victims = db::lru_immich(&conn, asset, LRU_BATCH_STORE);
+            if victims.is_empty() {
+                break;
+            }
+            for (id, b) in victims {
+                if total + len <= cap {
+                    break;
+                }
+                evicted.extend(db::drop_cached(&conn, id));
+                total -= b;
+                log::info!(
+                    "library: evicted asset {id} ({} KB), least recently shown",
+                    b / 1024
+                );
+            }
+        }
+    }
+    let stored = db::insert_cached_variant(&conn, asset, "video", &path, len, db::now_ms());
+    let _ = db::set_playable(&conn, asset);
+    drop(conn);
+    db::remove_files(&evicted);
+    if let Err(e) = stored {
+        // The asset went while its clip downloaded (its album un-picked).
+        db::remove_files(std::slice::from_ref(&path));
+        return Err(ProviderError::Failed(e.to_string()));
+    }
+    lib.bump();
+    Ok(Some((path, info)))
+}
+
+/// Brings the cache under a lowered cap, least recently shown first.
+fn enforce_cap(lib: &Library) {
+    let conn = lib.db.lock().unwrap();
+    let cap = lib.cap_bytes() as i64;
+    let mut total = db::cached_bytes(&conn, SourceKind::Immich);
+    let mut dropped = 0;
+    let mut files = Vec::new();
+    while total > cap {
+        let victims = db::lru_immich(&conn, -1, LRU_BATCH_ENFORCE);
+        if victims.is_empty() {
+            break;
+        }
+        for (id, b) in victims {
+            if total <= cap {
+                break;
+            }
+            files.extend(db::drop_cached(&conn, id));
+            total -= b;
+            dropped += 1;
+        }
+    }
+    drop(conn);
+    db::remove_files(&files);
+    if dropped > 0 {
+        log::info!(
+            "library: {dropped} previews evicted to fit the {} MB cap",
+            cap / 1_048_576
+        );
+        lib.bump();
+    }
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))
+}

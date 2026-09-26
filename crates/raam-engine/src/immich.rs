@@ -1,0 +1,370 @@
+//! The Immich REST client, shared by the fetch thread (on-demand
+//! previews) and the library thread (album sync, prefetch), against a
+//! server URL and key that live in the DB (entered in settings) and can
+//! change at runtime. Nothing about the server is compiled in.
+//!
+//! Blocking HTTP over ureq (rustls). Roots are bundled (webpki): the
+//! frame is API 23 and its system trust store is stale. Errors are typed:
+//! `ProviderError::Transport` is the offline signal, never a string match.
+use raam_model::ProviderError;
+use raam_model::limits;
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct Config {
+    pub url: String,
+    pub key: String,
+}
+
+pub struct Client {
+    http: ureq::Agent,
+    pub config: Config,
+}
+
+/// A photo's (fill-crop centre, largest face centre), both 0..1.
+pub type FaceFocus = ((f32, f32), Option<(f32, f32)>);
+
+/// An album as the picker lists it.
+#[derive(Clone, Debug)]
+pub struct RemoteAlbum {
+    pub id: String,
+    pub name: String,
+    pub asset_count: i64,
+}
+
+pub struct RemoteAsset {
+    pub id: String,
+    pub width: u32,
+    pub height: u32,
+    pub taken_at_ms: Option<i64>,
+    /// `checksum`: base64 SHA-1 of the original file (checked on live
+    /// assets in the experiments, a video included), as lowercase hex.
+    pub sha1_hex: Option<String>,
+    pub is_video: bool,
+}
+
+/// The agent both clients here share the shape of: bundled webpki roots,
+/// manual status handling (a 404 is an answer, not a transport failure).
+pub fn agent(timeout: std::time::Duration, user_agent: &str) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .http_status_as_error(false)
+        .user_agent(user_agent)
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::WebPki)
+                .build(),
+        )
+        .build()
+        .into()
+}
+
+impl Client {
+    pub fn new(config: Config) -> Result<Self, ProviderError> {
+        let url = config.url.trim_end_matches('/').to_string();
+        let http = agent(
+            limits::IMMICH_HTTP_TIMEOUT,
+            concat!("raam/", env!("CARGO_PKG_VERSION")),
+        );
+        Ok(Self {
+            http,
+            config: Config {
+                url,
+                key: config.key,
+            },
+        })
+    }
+
+    /// The key's user (`GET /api/users/me`, its UUID `id`): which library
+    /// the frame syncs, whatever URL reaches it.
+    pub fn user_id(&self) -> Result<String, ProviderError> {
+        let me = self.get_json("/api/users/me")?;
+        me.get("id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| ProviderError::Failed("/api/users/me: no id".into()))
+    }
+
+    /// Every album the key can see: `GET /api/albums` (owned and shared
+    /// with the user). Only what the picker shows is kept.
+    pub fn albums(&self) -> Result<Vec<RemoteAlbum>, ProviderError> {
+        let albums = self.get_json("/api/albums")?;
+        Ok(albums
+            .as_array()
+            .ok_or(ProviderError::Failed("/api/albums: not a list".into()))?
+            .iter()
+            .filter_map(|a| {
+                Some(RemoteAlbum {
+                    id: a.get("id")?.as_str()?.to_string(),
+                    name: a.get("albumName")?.as_str()?.to_string(),
+                    asset_count: a.get("assetCount").and_then(|v| v.as_i64()).unwrap_or(0),
+                })
+            })
+            .collect())
+    }
+
+    /// One album's assets with their oriented size and taken time.
+    ///
+    /// `GET /api/albums/{id}` has no `assets` array on the tested server
+    /// (Immich 3.2.2), so the album is listed through
+    /// `POST /api/search/metadata` with `albumIds`, a page at a time. One
+    /// album a call: several `albumIds` in one call return only the photos
+    /// in ALL of them (probed live), not the union. Each asset's top-level
+    /// `width`/`height` is already oriented (probed too).
+    pub fn album_assets(&self, album_id: &str) -> Result<Vec<RemoteAsset>, ProviderError> {
+        let mut out = Vec::new();
+        let mut page = 1;
+        loop {
+            let body = self.post_json(
+                "/api/search/metadata",
+                &serde_json::json!({ "albumIds": [album_id], "size": limits::IMMICH_PAGE_SIZE, "page": page }),
+            )?;
+            let assets = body.get("assets");
+            if let Some(items) = assets
+                .and_then(|a| a.get("items"))
+                .and_then(|a| a.as_array())
+            {
+                out.extend(items.iter().filter_map(|a| {
+                    Some(RemoteAsset {
+                        id: a.get("id")?.as_str()?.to_string(),
+                        width: a.get("width")?.as_u64()? as u32,
+                        height: a.get("height")?.as_u64()? as u32,
+                        taken_at_ms: a
+                            .get("fileCreatedAt")
+                            .and_then(|v| v.as_str())
+                            .and_then(parse_iso_ms),
+                        sha1_hex: a
+                            .get("checksum")
+                            .and_then(|v| v.as_str())
+                            .and_then(base64_to_hex),
+                        is_video: a.get("type").and_then(|v| v.as_str()) == Some("VIDEO"),
+                    })
+                }));
+            }
+            match assets
+                .and_then(|a| a.get("nextPage"))
+                .and_then(|p| p.as_str())
+                .and_then(|p| p.parse().ok())
+            {
+                Some(next) if next > page => page = next,
+                _ => break,
+            }
+        }
+        Ok(out)
+    }
+
+    /// The preview JPEG's bytes, as the server sends them.
+    pub fn preview(&self, id: &str) -> Result<Vec<u8>, ProviderError> {
+        let mut resp = self
+            .http
+            .get(format!(
+                "{}/api/assets/{id}/thumbnail?size=preview",
+                self.config.url
+            ))
+            .header("x-api-key", &self.config.key)
+            .call()
+            .map_err(|e| ProviderError::Transport(format!("preview request: {}", chain(&e))))?;
+        let status = resp.status();
+        let bytes = resp
+            .body_mut()
+            .with_config()
+            .limit(limits::HTTP_BODY_LIMIT_BYTES)
+            .read_to_vec()
+            .map_err(|e| ProviderError::Transport(format!("preview body: {e}")))?;
+        if !status.is_success() {
+            return Err(ProviderError::Failed(format!(
+                "preview request failed: {status}"
+            )));
+        }
+        Ok(bytes)
+    }
+
+    /// The clip Immich plays in its own web and mobile apps,
+    /// `GET /api/assets/{id}/video/playback`: the H.264 transcode when the
+    /// server made one, otherwise the original file as uploaded. Streamed
+    /// to `dest`, never held in memory (clips run 2-28 MB against a few MB
+    /// free). Returns the bytes written.
+    pub fn download_video(&self, id: &str, dest: &std::path::Path) -> Result<u64, ProviderError> {
+        let mut resp = self
+            .http
+            .get(format!(
+                "{}/api/assets/{id}/video/playback",
+                self.config.url
+            ))
+            .header("x-api-key", &self.config.key)
+            .config()
+            .timeout_global(Some(limits::IMMICH_VIDEO_TIMEOUT))
+            .build()
+            .call()
+            .map_err(|e| ProviderError::Transport(format!("video request: {}", chain(&e))))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(ProviderError::Failed(format!(
+                "video request failed: {status}"
+            )));
+        }
+        let mut file = std::fs::File::create(dest)
+            .map_err(|e| ProviderError::Failed(format!("create {}: {e}", dest.display())))?;
+        let n = std::io::copy(&mut resp.body_mut().as_reader(), &mut file)
+            .map_err(|e| ProviderError::Transport(format!("video body: {e}")))?;
+        file.sync_all()
+            .map_err(|e| ProviderError::Failed(format!("sync {}: {e}", dest.display())))?;
+        Ok(n)
+    }
+
+    /// `GET /api/faces?id=` (probed live in the experiments): each face's
+    /// bounding box in whatever resolution the ML pass used
+    /// (`imageWidth/Height`, per asset), so every centre is taken as a
+    /// fraction of that. Returns the fill-crop centre and the largest
+    /// face's centre (0..1, `v=0` at the top). `Err` only when the server
+    /// couldn't be asked; a photo with no faces is `Ok(((0.5, 0.5), None))`.
+    pub fn faces(&self, id: &str) -> Result<FaceFocus, ProviderError> {
+        let faces = self.get_json(&format!("/api/faces?id={id}"))?;
+        let mut found: Vec<(f32, (f32, f32))> = Vec::new();
+        for face in faces.as_array().into_iter().flatten() {
+            let get = |k: &str| face.get(k).and_then(|v| v.as_f64()).map(|v| v as f32);
+            let (Some(x1), Some(y1), Some(x2), Some(y2), Some(iw), Some(ih)) = (
+                get("boundingBoxX1"),
+                get("boundingBoxY1"),
+                get("boundingBoxX2"),
+                get("boundingBoxY2"),
+                get("imageWidth"),
+                get("imageHeight"),
+            ) else {
+                continue;
+            };
+            if iw <= 0.0 || ih <= 0.0 {
+                continue;
+            }
+            found.push((
+                (x2 - x1) * (y2 - y1),
+                ((x1 + x2) / 2.0 / iw, (y1 + y2) / 2.0 / ih),
+            ));
+        }
+        let largest = found.iter().max_by(|a, b| a.0.total_cmp(&b.0)).map(|f| f.1);
+        Ok((fill_centre(&found), largest))
+    }
+
+    fn get_json(&self, path: &str) -> Result<serde_json::Value, ProviderError> {
+        let resp = self
+            .http
+            .get(format!("{}{path}", self.config.url))
+            .header("x-api-key", &self.config.key)
+            .call()
+            .map_err(|e| {
+                ProviderError::Transport(format!("GET {}: {}", strip_query(path), chain(&e)))
+            })?;
+        read_json(resp, path)
+    }
+
+    fn post_json(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, ProviderError> {
+        let resp = self
+            .http
+            .post(format!("{}{path}", self.config.url))
+            .header("x-api-key", &self.config.key)
+            .send_json(body)
+            .map_err(|e| ProviderError::Transport(format!("POST {path}: {}", chain(&e))))?;
+        read_json(resp, path)
+    }
+}
+
+fn read_json(
+    mut resp: ureq::http::Response<ureq::Body>,
+    path: &str,
+) -> Result<serde_json::Value, ProviderError> {
+    let status = resp.status();
+    let body = resp
+        .body_mut()
+        .with_config()
+        .limit(limits::HTTP_BODY_LIMIT_BYTES)
+        .read_to_string()
+        .map_err(|e| ProviderError::Transport(format!("{}: body: {e}", strip_query(path))))?;
+    if !status.is_success() {
+        return Err(ProviderError::Failed(format!(
+            "{}: {status}",
+            strip_query(path)
+        )));
+    }
+    serde_json::from_str(&body)
+        .map_err(|e| ProviderError::Failed(format!("{}: json: {e}", strip_query(path))))
+}
+
+fn strip_query(path: &str) -> &str {
+    path.split('?').next().unwrap_or(path)
+}
+
+/// Frameo's rule: the mean of all face centres, with `v` moved 0.05
+/// lower (headroom above the faces) and capped at 1.0.
+fn fill_centre(faces: &[(f32, (f32, f32))]) -> (f32, f32) {
+    if faces.is_empty() {
+        return (0.5, 0.5);
+    }
+    let n = faces.len() as f32;
+    let u = faces.iter().map(|f| f.1.0).sum::<f32>() / n;
+    let v = faces.iter().map(|f| f.1.1).sum::<f32>() / n;
+    (u, (v + 0.05).min(1.0))
+}
+
+/// Standard base64 (with padding) to lowercase hex.
+fn base64_to_hex(s: &str) -> Option<String> {
+    let mut bits: u32 = 0;
+    let mut n = 0;
+    let mut out = String::new();
+    for c in s.bytes().filter(|&c| c != b'=') {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        } as u32;
+        bits = (bits << 6) | v;
+        n += 6;
+        if n >= 8 {
+            n -= 8;
+            out.push_str(&format!("{:02x}", (bits >> n) & 0xff));
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// "2024-05-01T10:20:30.000Z" (Immich's UTC timestamps) to epoch ms.
+fn parse_iso_ms(s: &str) -> Option<i64> {
+    let (date, time) = s.split_once('T')?;
+    let mut d = date.split('-').map(|p| p.parse::<i64>());
+    let (y, m, day) = (d.next()?.ok()?, d.next()?.ok()?, d.next()?.ok()?);
+    let time = time.trim_end_matches('Z');
+    let time = time.split(['+']).next()?;
+    let mut t = time.split(':');
+    let (hh, mm) = (
+        t.next()?.parse::<i64>().ok()?,
+        t.next()?.parse::<i64>().ok()?,
+    );
+    let ss: f64 = t.next().unwrap_or("0").parse().ok()?;
+    Some((days_from_civil(y, m, day) * 86_400 + hh * 3600 + mm * 60) * 1000 + (ss * 1000.0) as i64)
+}
+
+/// Howard Hinnant's days-from-civil, for UTC dates without a date crate.
+pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+pub fn chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut source = e.source();
+    while let Some(s) = source {
+        out.push_str(" <- ");
+        out.push_str(&s.to_string());
+        source = s.source();
+    }
+    out
+}

@@ -269,7 +269,7 @@ impl FontAtlas {
             .horizontal_line_metrics(px)
             .expect("font has no horizontal line metrics");
         log::info!(
-            "video: built {px}px atlas {ATLAS_WIDTH}x{atlas_h} ({} KB) in {:.1}ms (blur r={} {:.1}ms)",
+            "built {px}px atlas {ATLAS_WIDTH}x{atlas_h} ({} KB) in {:.1}ms (blur r={} {:.1}ms)",
             ATLAS_WIDTH * atlas_h / 1024,
             clock::elapsed(t0).as_secs_f64() * 1000.0,
             shadow.radius,

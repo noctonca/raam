@@ -143,7 +143,7 @@ impl Painter {
             }
             if mesh.vertices.len() > u16::MAX as usize {
                 log::warn!(
-                    "video: mesh has {} vertices (> u16::MAX), skipping",
+                    "mesh has {} vertices (> u16::MAX), skipping",
                     mesh.vertices.len()
                 );
                 continue;
@@ -215,7 +215,7 @@ impl Painter {
             let stride = std::mem::size_of::<GpuVertex>() as i32;
             for cmd in &self.cmds {
                 let Some(&tex) = self.textures.get(&cmd.texture) else {
-                    log::warn!("video: no GL texture for {:?}, skipping mesh", cmd.texture);
+                    log::warn!("no GL texture for {:?}, skipping mesh", cmd.texture);
                     continue;
                 };
                 let base = cmd.vert_byte_offset;

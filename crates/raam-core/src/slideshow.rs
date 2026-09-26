@@ -595,7 +595,7 @@ impl<V: VideoSeam> Pipeline<V> {
 
             let transitions = TransitionProgram::all();
             log::info!(
-                "video: {} transitions linked: {}",
+                "{} transitions linked: {}",
                 transitions.len(),
                 transitions
                     .iter()
@@ -608,7 +608,7 @@ impl<V: VideoSeam> Pipeline<V> {
             let margin_px = dp(HALF_SEPARATOR_DP).max(1);
             let highlight_px = dp(HIGHLIGHT_DP).max(1);
             log::info!(
-                "video: density {density_dpi}dpi -> half separator {margin_px}px, highlight {highlight_px}px"
+                "density {density_dpi}dpi -> half separator {margin_px}px, highlight {highlight_px}px"
             );
 
             Self {
@@ -787,7 +787,7 @@ impl<V: VideoSeam> Pipeline<V> {
             ScaleMode::Fit => ScaleMode::Fill,
         };
         let stored = (mode != self.default_scale()).then_some(mode);
-        log::info!("video: per-photo scaling for asset {id} -> {mode:?} (override {stored:?})");
+        log::info!("per-photo scaling for asset {id} -> {mode:?} (override {stored:?})");
         match stored {
             Some(m) => self.overrides.insert(key.clone(), m),
             None => self.overrides.remove(&key),
@@ -816,7 +816,7 @@ impl<V: VideoSeam> Pipeline<V> {
         {
             let r = self.ready.take().unwrap();
             log::info!(
-                "video: dropping built plan {} (it holds the hidden photo)",
+                "dropping built plan {} (it holds the hidden photo)",
                 r.plan.seq
             );
             unsafe { r.destroy() };
@@ -826,7 +826,7 @@ impl<V: VideoSeam> Pipeline<V> {
         // the source is waiting to hand over its tiles.
         self.hidden.insert(key.to_string());
         log::info!(
-            "video: forgot hidden photo {key}: history {before} -> {}",
+            "forgot hidden photo {key}: history {before} -> {}",
             self.history.len()
         );
         if self
@@ -903,17 +903,17 @@ impl<V: VideoSeam> Pipeline<V> {
     }
 
     pub fn request_next(&mut self) {
-        log::info!("video: next requested");
+        log::info!("next requested");
         self.skip = Some(Skip::Next);
     }
 
     pub fn request_prev(&mut self, source: &dyn TileSource) {
         let Some(plan) = self.history.pop_back() else {
-            log::info!("video: prev requested but history is empty");
+            log::info!("prev requested but history is empty");
             return;
         };
         log::info!(
-            "video: prev requested -> {} {:?} ({} left in history)",
+            "prev requested -> {} {:?} ({} left in history)",
             plan.layout.map_or("single", |i| collage::LAYOUTS[i].name),
             plan.ids(),
             self.history.len()
@@ -931,11 +931,11 @@ impl<V: VideoSeam> Pipeline<V> {
             // wait's `consumed` would abandon it.
             self.gpu_retry_at = None;
             if let Some(b) = self.building.take() {
-                log::info!("video: dropping unfinished plan {}", b.plan.seq);
+                log::info!("dropping unfinished plan {}", b.plan.seq);
                 Self::destroy_building(b);
             }
             if let Some(r) = self.ready.take() {
-                log::info!("video: dropping built but unshown plan {}", r.plan.seq);
+                log::info!("dropping built but unshown plan {}", r.plan.seq);
                 unsafe { r.destroy() };
             }
             let rects = match plan.layout {
@@ -948,7 +948,7 @@ impl<V: VideoSeam> Pipeline<V> {
                 }],
             };
             log::info!(
-                "video: building plan {} ({}): {:?}",
+                "building plan {} ({}): {:?}",
                 plan.seq,
                 plan.layout.map_or("single", |i| collage::LAYOUTS[i].name),
                 rects
@@ -966,7 +966,7 @@ impl<V: VideoSeam> Pipeline<V> {
         if let Some(failed) = source.take_failed()
             && self.building.as_ref().is_some_and(|b| b.plan.seq == failed)
         {
-            log::warn!("video: plan {failed} failed, dropping it");
+            log::warn!("plan {failed} failed, dropping it");
             self.drop_building();
         }
         if self.building.as_ref().is_some_and(|b| b.probe.is_some()) {
@@ -980,7 +980,7 @@ impl<V: VideoSeam> Pipeline<V> {
             if self.video.backing_off() {
                 source.take_tile(seq);
                 log::warn!(
-                    "video: plan {seq} dropped: its clip comes while backing off after a decoder failure"
+                    "plan {seq} dropped: its clip comes while backing off after a decoder failure"
                 );
                 self.drop_building();
                 source.consumed();
@@ -1010,7 +1010,7 @@ impl<V: VideoSeam> Pipeline<V> {
                     });
                 }
                 Err(e) => {
-                    log::error!("video: clip {}: can't open a player: {e}", meta.asset_id);
+                    log::error!("clip {}: can't open a player: {e}", meta.asset_id);
                     self.drop_building();
                 }
             }
@@ -1050,7 +1050,7 @@ impl<V: VideoSeam> Pipeline<V> {
             return;
         };
         if matches!(&self.skip, Some(Skip::Prev(ids)) if *ids == b.plan.ids()) {
-            log::warn!("video: that was the prev request, dropping it too");
+            log::warn!("that was the prev request, dropping it too");
             self.skip = None;
         }
         Self::destroy_building(b);
@@ -1062,7 +1062,7 @@ impl<V: VideoSeam> Pipeline<V> {
     fn drop_building_gpu(&mut self, why: &str) {
         let seq = self.building.as_ref().map(|b| b.plan.seq);
         log::error!(
-            "video: plan {seq:?} dropped: {why}, MemFree {:?}KB; next plan in {GPU_RETRY:?}",
+            "plan {seq:?} dropped: {why}, MemFree {:?}KB; next plan in {GPU_RETRY:?}",
             (self.mem_free_kb)()
         );
         self.drop_building();
@@ -1080,7 +1080,7 @@ impl<V: VideoSeam> Pipeline<V> {
             ProbeStatus::Failed => {
                 let seq = b.plan.seq;
                 self.drop_building();
-                log::warn!("video: plan {seq} dropped");
+                log::warn!("plan {seq} dropped");
                 source.consumed();
                 return;
             }
@@ -1102,7 +1102,7 @@ impl<V: VideoSeam> Pipeline<V> {
         };
         let (w, h) = probe.clip.info.display();
         log::info!(
-            "video: clip {} first frame composed ({}x{} shown, {} {}x{} rotation {}) {:.0} ms after opening, compose {:?}",
+            "clip {} first frame composed ({}x{} shown, {} {}x{} rotation {}) {:.0} ms after opening, compose {:?}",
             probe.meta.asset_id,
             w,
             h,
@@ -1132,7 +1132,7 @@ impl<V: VideoSeam> Pipeline<V> {
         let tiles: Vec<Tile> = b.tiles.into_iter().map(Option::unwrap).collect();
         let bytes: usize = tiles.iter().map(Tile::bytes).sum();
         log::info!(
-            "video: plan {} ready: {} tiles in {:?} (render-thread compose {:?} total), {:.1} MB of tile textures, MemFree {:?}KB",
+            "plan {} ready: {} tiles in {:?} (render-thread compose {:?} total), {:.1} MB of tile textures, MemFree {:?}KB",
             b.plan.seq,
             tiles.len(),
             clock::elapsed(b.started),
@@ -1141,10 +1141,7 @@ impl<V: VideoSeam> Pipeline<V> {
             (self.mem_free_kb)(),
         );
         if b.plan.assets.iter().any(|a| self.hidden.contains(&a.key)) {
-            log::info!(
-                "video: dropping plan {}: it holds a hidden photo",
-                b.plan.seq
-            );
+            log::info!("dropping plan {}: it holds a hidden photo", b.plan.seq);
             for t in tiles {
                 unsafe { t.destroy() };
             }
@@ -1173,11 +1170,7 @@ impl<V: VideoSeam> Pipeline<V> {
         self.pull(source);
         if self.current.is_none() {
             if let Some(c) = self.ready.take() {
-                log::info!(
-                    "video: bootstrapped first collage {} ({})",
-                    c.plan.seq,
-                    c.name()
-                );
+                log::info!("bootstrapped first collage {} ({})", c.plan.seq, c.name());
                 self.current = Some(c);
                 self.state = State::Idle {
                     dwell_start: self.clock.now(),
@@ -1311,7 +1304,7 @@ impl<V: VideoSeam> Pipeline<V> {
         self.compose_tile(source.texture, &target, &meta, comp);
         let kb = self.new_kb(&meta, comp, rect.w, rect.h);
         log::info!(
-            "video: tile {} {}x{} -> source {sw}x{sh} ({steps} halvings), tile {}x{} as {comp:?} in {:?} (upload {:?}) - MemFree {mem_before:?}KB -> {:?}KB",
+            "tile {} {}x{} -> source {sw}x{sh} ({steps} halvings), tile {}x{} as {comp:?} in {:?} (upload {:?}) - MemFree {mem_before:?}KB -> {:?}KB",
             meta.asset_id,
             meta.width,
             meta.height,
@@ -1499,7 +1492,7 @@ impl<V: VideoSeam> Pipeline<V> {
             let bg = tile.video.as_ref().and_then(|v| v.bg.as_ref());
             self.compose_video_target(tile.source.texture, &tile.target, &tile.meta, bg);
             log::info!(
-                "video: still recomposed from the frame on screen in {:?}",
+                "still recomposed from the frame on screen in {:?}",
                 clock::elapsed(t0)
             );
             self.current = Some(current);
@@ -1521,7 +1514,7 @@ impl<V: VideoSeam> Pipeline<V> {
             tile.kb
                 .refocus(kb_focal(&tile.meta, comp, tile.rect.w, tile.rect.h));
             log::info!(
-                "video: recomposed {} as {comp:?} (was {:?}) in {:?}",
+                "recomposed {} as {comp:?} (was {:?}) in {:?}",
                 tile.meta.asset_id,
                 tile.comp,
                 clock::elapsed(t0)
@@ -1551,7 +1544,7 @@ impl<V: VideoSeam> Pipeline<V> {
             }
         };
         log::info!(
-            "video: starting transition '{}' to plan {} ({}, {} tiles: {:?}) backwards={backwards}",
+            "starting transition '{}' to plan {} ({}, {} tiles: {:?}) backwards={backwards}",
             self.transitions[transition_idx].name,
             incoming.plan.seq,
             incoming.name(),
@@ -1775,14 +1768,14 @@ impl<V: VideoSeam> Pipeline<V> {
                 Ok(pair) => {
                     self.scratch = Some(pair);
                     log::info!(
-                        "video: allocated two {}x{} transition scratch targets",
+                        "allocated two {}x{} transition scratch targets",
                         self.screen_w,
                         self.screen_h
                     );
                 }
                 Err(e) => {
                     log::error!(
-                        "video: no transition scratch ({e}), MemFree {:?}KB: cutting instead",
+                        "no transition scratch ({e}), MemFree {:?}KB: cutting instead",
                         (self.mem_free_kb)()
                     );
                     cut = true;
@@ -1912,7 +1905,7 @@ impl<V: VideoSeam> Pipeline<V> {
                     }
                 }
                 log::info!(
-                    "video: transition '{}' complete, history={}",
+                    "transition '{}' complete, history={}",
                     self.transitions[transition_idx].name,
                     self.history.len()
                 );

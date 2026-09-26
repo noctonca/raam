@@ -148,7 +148,7 @@ impl ClockOverlay {
             let mut vbo = 0;
             glGenBuffers(1, &mut vbo);
             log::info!(
-                "video: overlay ready (4 atlases) in {:.1}ms",
+                "overlay ready (4 atlases) in {:.1}ms",
                 clock::elapsed(t0).as_secs_f64() * 1000.0
             );
             Self {

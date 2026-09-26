@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+
+# Pre-commit hook: rustfmt check on staged Rust files. Each file's staged
+# BLOB (`git show :<file>`) is piped through rustfmt, not the working-tree
+# copy, so unrelated unstaged edits don't get blamed and partial-stage
+# workflows still work. The policy is CI's (cargo fmt --all --check), so
+# local == CI.
+#
+# Enable once per clone:
+#   git config core.hooksPath scripts/git-hooks
+#
+# Bypass for a single commit: git commit --no-verify
+# Bypass for the session:     SKIP_FORMAT=1 git commit ...
+
+set -euo pipefail
+
+if [ "${SKIP_FORMAT:-0}" = "1" ]; then
+    exit 0
+fi
+
+if ! command -v rustfmt >/dev/null 2>&1; then
+    echo "pre-commit: rustfmt not found; skipping format check." >&2
+    echo "            rustup component add rustfmt, or SKIP_FORMAT=1 to silence." >&2
+    exit 0
+fi
+
+# Staged, added/copied/modified/renamed files only (skip deletes).
+mapfile -d '' -t staged < <(
+    git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs'
+)
+
+if [ "${#staged[@]}" -eq 0 ]; then
+    exit 0
+fi
+
+status=0
+bad=()
+for file in "${staged[@]}"; do
+    # The edition matches the workspace's (Cargo.toml workspace.package).
+    if ! git show ":$file" | rustfmt --check --edition 2024 >/dev/null 2>&1; then
+        bad+=("$file")
+        status=1
+    fi
+done
+
+if [ "$status" -ne 0 ]; then
+    echo "pre-commit: rustfmt issues in staged content:" >&2
+    for f in "${bad[@]}"; do
+        echo "  $f" >&2
+    done
+    echo >&2
+    echo "Fix with: cargo fmt --all && git add -u" >&2
+    echo "Bypass:   git commit --no-verify   (or SKIP_FORMAT=1)" >&2
+fi
+
+exit "$status"

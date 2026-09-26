@@ -32,7 +32,9 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 
 PR titles follow Conventional Commits (`feat`, `fix`, `perf`,
 `refactor`, `docs`, `test`, `build`, `ci`, `chore`) — CI checks this.
-`cargo fmt` and clippy (`-D warnings`) gate merges.
+`cargo fmt` and clippy (`-D warnings`) gate merges. A local pre-commit
+hook checks the staged blobs against the same rustfmt policy — opt in
+with `git config core.hooksPath scripts/git-hooks`.
 
 ## Bugs and ideas
 

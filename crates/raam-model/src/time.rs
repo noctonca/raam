@@ -5,6 +5,7 @@
 pub struct LocalTime {
     pub hour: i32,
     pub min: i32,
+    pub sec: i32,
     pub mday: i32,
     /// 0-based, as `tm_mon` is.
     pub mon: i32,

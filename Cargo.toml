@@ -30,5 +30,6 @@ rust-version = "1.88"
 raam-model = { path = "crates/raam-model" }
 raam-core = { path = "crates/raam-core" }
 raam-engine = { path = "crates/raam-engine" }
+log = "0.4"
 # Every dependency added here must first earn its row in
 # docs/ARCHITECTURE.md "The dependency register".

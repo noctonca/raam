@@ -295,7 +295,7 @@ basis; its replacements are adopted as decisions:
 | `kamadak-exif` | engine | Orientation + DateTimeOriginal; EXIF edge cases are cheap insurance |
 | SHA-1 via `ring::digest` | engine | Immich checksum matching; ring is already there under rustls |
 | `fontdue` | core (overlay) | Clock/weather atlas rasterisation; revisit merging onto egui's skrifa |
-| `android-activity`, `ndk`, `ndk-sys`, `jni` 0.22, `android_logger` (no defaults), `libc` | android | The platform glue; one jni version; no regex logger filter |
+| `android-activity`, `ndk`, `ndk-sys`, `jni` 0.21, `android_logger` (no defaults), `libc` | android | The platform glue; no regex logger filter. jni stays on 0.21 until its 0.22 API redesign is ported deliberately (it duplicates android-activity's 0.22, ~56 KB) |
 | `libc` | engine | `statvfs` (free space for the cache cap) and `mktime` (EXIF local times); the engine is native-only by design |
 | OpenSL bindings, checked in | android | Pre-generated and pruned; no bindgen, no libclang at build time |
 | `winit`, `glutin`, `glutin-winit`, `egui-winit` (no `links`), `png` | raam (desktop) | The window host and the screenshot tool |

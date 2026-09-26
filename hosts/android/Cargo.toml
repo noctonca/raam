@@ -1,0 +1,15 @@
+[package]
+name = "raam-android"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+# Android dependencies go under [target.'cfg(target_os = "android")'.dependencies]
+# so `cargo check --workspace` stays green on the dev machine
+# (workspace-check option B in the design inputs).

@@ -1,0 +1,34 @@
+[package]
+name = "raam"
+description = "Turn a cheap Android photo frame into something you own: a fast, open slideshow for your own photos, with or without Immich"
+readme = "README.md"
+keywords = ["photo-frame", "immich", "slideshow", "egui", "android"]
+categories = ["multimedia::images"]
+# Ship only code, README and licences (the docs live in the repo).
+include = ["src/**", "README.md", "LICENSE-*"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# The `raam` binary is the desktop/Linux host: the UX-iteration window on a
+# dev machine, and the frame itself on a Linux box (Raspberry Pi under
+# X/Wayland). See docs/ARCHITECTURE.md "Hosts".
+
+[workspace]
+members = ["crates/*", "hosts/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/noctonca/raam"
+rust-version = "1.88"
+
+[workspace.dependencies]
+raam-model = { path = "crates/raam-model" }
+raam-core = { path = "crates/raam-core" }
+raam-engine = { path = "crates/raam-engine" }
+# Every dependency added here must first earn its row in
+# docs/ARCHITECTURE.md "The dependency register".

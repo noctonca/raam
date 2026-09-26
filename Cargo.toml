@@ -33,3 +33,11 @@ raam-engine = { path = "crates/raam-engine" }
 log = "0.4"
 # Every dependency added here must first earn its row in
 # docs/ARCHITECTURE.md "The dependency register".
+
+# Profiles live at the workspace root only (Cargo ignores them in
+# members). 027's release shape: LTO earns its keep on the frame (binary
+# size and the GL/decode hot paths). A [profile.web] joins it when the
+# web host adopts the core (migration step 7).
+[profile.release]
+opt-level = 3
+lto = true

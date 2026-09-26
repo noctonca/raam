@@ -1,0 +1,165 @@
+//! Every named limit in the product, in one file, each with where its
+//! value comes from (measured, chosen, or hardware). Style and geometry
+//! tuning (Ken Burns zoom, margins, colours) stays with its module — those
+//! are aesthetics, not limits.
+//!
+//! Device capability data (the RK decoder's 1920x1088 ceiling) is NOT here:
+//! the host provides it (docs/ARCHITECTURE.md, "The seams").
+
+use core::time::Duration;
+
+// ---- memory budget (docs/ARCHITECTURE.md "Memory budget") ---------------
+// The design target is the measured envelope of the final experiment on
+// the real frame (lab repo, docs/raam-prep/memory-baseline.md).
+
+/// App total (PSS + GPU + window buffers), steady state. Measured ~67 MB.
+pub const APP_TOTAL_STEADY_MB: u32 = 80;
+/// Mali peak. Measured 63.5 MB peak.
+pub const MALI_PEAK_MB: u32 = 64;
+/// Tile textures per plan. Measured max 12.2 MB.
+pub const TILE_TEXTURES_PER_PLAN_MB: u32 = 12;
+/// Transition scratch: screen-sized render targets, ~4 MB each at 1280x800.
+pub const TRANSITION_SCRATCH_TARGETS: u32 = 2;
+
+// ---- sleep schedule ------------------------------------------------------
+
+/// Default sleep window, chosen: 23:00-05:00 local.
+pub const DEFAULT_SLEEP_MIN: u32 = 23 * 60;
+pub const DEFAULT_WAKE_MIN: u32 = 5 * 60;
+/// Awake by hand during sleep hours: back to sleep after this long
+/// untouched. Chosen.
+pub const DEFAULT_MANUAL_IDLE: Duration = Duration::from_secs(10 * 60);
+
+// ---- the app controller (input, overlay, saving) --------------------------
+
+/// A press that moves less than this is a tap, not a swipe. Chosen for
+/// fingers on the 8" panel.
+pub const TAP_SLOP_PX: f32 = 40.0;
+/// The menu closes on its own this long after the last input. Chosen to
+/// match the vendor app's feel.
+pub const AUTO_DISMISS: Duration = Duration::from_secs(15);
+/// With the menu open, never block in the host loop longer than this, so
+/// egui's cursor and repaint stay live. Chosen.
+pub const MAX_EGUI_WAIT: Duration = Duration::from_secs(1);
+/// How long "Undo hide" stays available. Chosen.
+pub const UNDO_HIDE: Duration = Duration::from_secs(8);
+/// Settings writes are debounced this long after the last change. Chosen.
+pub const SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
+
+// ---- slideshow pipeline ----------------------------------------------------
+
+/// Transition length. Chosen in the experiments; the measured 1.33-1.51 s
+/// on-frame includes compose overhead.
+pub const TRANSITION_DURATION: Duration = Duration::from_millis(1300);
+/// The blur working buffer's width, px. Chosen in experiment 008: the
+/// smallest that still looks like Frameo's background blur.
+pub const BLUR_WIDTH_PX: i32 = 128;
+/// How many shown collages Prev can walk back through. Chosen.
+pub const HISTORY_LEN: usize = 10;
+/// After a GPU allocation failed (Mali out of memory), the next plan is
+/// asked for this much later. Chosen: long enough for pressure to pass.
+pub const GPU_RETRY: Duration = Duration::from_secs(5);
+
+// ---- video (probe, live player, backoff) -----------------------------------
+
+/// A clip's first frame: how long a probe or the live player may take.
+/// Chosen; the frame's decoder usually delivers in ~0.4 s.
+pub const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the live clip waits for the previous decoder's release
+/// (one decoder at a time on this class of VPU). Chosen.
+pub const LIVE_DECODER_WAIT: Duration = Duration::from_secs(5);
+/// A decoder not released this long after its player stopped: the VPU is
+/// wedged (a stop that never returns). Chosen.
+pub const DECODER_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Decoder-failure backoff: base doubling to the cap (30 s, 1, 2, 4, 8,
+/// then 10 min). Chosen against the RK VPU running out of ion memory.
+pub const DECODER_BACKOFF_BASE_SECS: u64 = 30;
+pub const DECODER_BACKOFF_CAP_SECS: u64 = 600;
+
+// ---- the Android player's A/V clock ----------------------------------------
+
+/// A video frame this late against the media clock is dropped, not shown.
+/// Chosen in experiment 011.
+pub const DROP_LATE_US: i64 = 60_000;
+/// PCM handed to the audio output per batch: 0.1 s of 44.1 kHz stereo
+/// s16 (hardware-derived).
+pub const PCM_BATCH_BYTES: usize = 35_280;
+/// How long the video thread waits for audio's first batch before starting
+/// without it. Chosen.
+pub const AUDIO_ALIGN_TIMEOUT: Duration = Duration::from_millis(1000);
+/// OpenSL buffer-queue depth. Chosen in experiment 006.
+pub const AUDIO_OUT_BUFFERS: u32 = 4;
+
+// ---- library (sync, cache) ---------------------------------------------------
+
+/// The cache cap's ceiling default: 1 GB, or a quarter of free space if
+/// that is less (`default_cap_mb`). Chosen.
+pub const DEFAULT_CAP_MB: u32 = 1024;
+pub const CAP_CHOICES_MB: [u32; 6] = [50, 250, 500, 1024, 2048, 4096];
+/// Local folder rescan cadence. Chosen.
+pub const SCAN_EVERY: Duration = Duration::from_secs(300);
+/// Immich sync cadence while online. Chosen.
+pub const SYNC_EVERY: Duration = Duration::from_secs(1800);
+/// Sync retry cadence while offline — also how the queue comes back
+/// online. Chosen.
+pub const SYNC_RETRY: Duration = Duration::from_secs(60);
+/// Local previews: the short side at least this, like Immich's 1440
+/// preview.
+pub const PREVIEW_SHORT_SIDE: u32 = 1440;
+/// LRU eviction batch sizes: making room for one incoming file, and
+/// enforcing a lowered cap. Chosen.
+pub const LRU_BATCH_STORE: usize = 16;
+pub const LRU_BATCH_ENFORCE: usize = 32;
+
+// ---- fetch thread (planning, tile handover) ---------------------------------
+
+/// Polling cadences of the fetch loop's slot handshake. Chosen; the fetch
+/// thread has no condvar (a step-5b candidate).
+pub const FETCH_SLOT_POLL: Duration = Duration::from_millis(50);
+pub const FETCH_TILE_POLL: Duration = Duration::from_millis(20);
+pub const FETCH_EMPTY_WAIT: Duration = Duration::from_millis(500);
+pub const FETCH_BACKOFF_WAIT: Duration = Duration::from_millis(500);
+pub const FETCH_SKIP_WAIT: Duration = Duration::from_millis(100);
+/// After a plan's fetch failed (not a Prev request): breathe before the
+/// next attempt. Chosen.
+pub const FETCH_FAILED_WAIT: Duration = Duration::from_secs(2);
+
+// ---- HTTP ---------------------------------------------------------------------
+
+/// Immich API calls. Chosen.
+pub const IMMICH_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+/// An Immich clip download (2-28 MB on the frame's line). Chosen.
+pub const IMMICH_VIDEO_TIMEOUT: Duration = Duration::from_secs(300);
+/// `POST /api/search/metadata` page size (the server's maximum).
+pub const IMMICH_PAGE_SIZE: u32 = 1000;
+/// The largest response body read into memory (previews run ~0.2-2 MB;
+/// clips stream to disk and never pass through here). Chosen.
+pub const HTTP_BODY_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+/// Weather and geolocation calls. Chosen.
+pub const WEATHER_HTTP_TIMEOUT: Duration = Duration::from_secs(20);
+
+// ---- weather cadence ----------------------------------------------------------
+
+/// Open-Meteo poll cadence. Chosen: courteous to a free API.
+pub const WEATHER_REFRESH: Duration = Duration::from_secs(15 * 60);
+pub const WEATHER_RETRY_MIN: Duration = Duration::from_secs(5);
+pub const WEATHER_RETRY_MAX: Duration = Duration::from_secs(5 * 60);
+
+// ---- collage -------------------------------------------------------------------
+
+/// The largest layout's slot count. A collage test asserts the layout
+/// table agrees.
+pub const LARGEST_LAYOUT: usize = 4;
+
+// ---- overlay glyph atlas --------------------------------------------------------
+
+/// The clock/weather glyph atlas texture width, px. Chosen: fits both
+/// fonts' charsets at the largest size with room to spare.
+pub const ATLAS_WIDTH: usize = 1024;
+
+// ---- UI steppers ------------------------------------------------------------------
+
+/// The lip-sync stepper's default and range (ms), like a TV's. +180 was
+/// measured on the SNUG frame with a filmed flash/beep.
+pub const AUDIO_DELAY_DEFAULT_MS: i32 = 180;
+pub const AUDIO_DELAY_RANGE: (i32, i32) = (-100, 400);

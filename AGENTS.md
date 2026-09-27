@@ -11,9 +11,10 @@ discipline is [TIGERSTYLE.md](TIGERSTYLE.md). Read both before touching
   frame with a GLES2-only GPU and nobody watching the log. Desktop and
   web exist to serve that device, not the other way round.
 - **One renderer, one pixel truth.** The same GL code and shaders run
-  on all three targets; the desktop goldens and the web diff enforce
-  it. A change that renders differently per host is wrong even if it
-  looks fine.
+  on all three targets; the desktop goldens and the web diff will
+  enforce it (the golden suite is next in
+  [docs/plan/next.md](docs/plan/next.md)). A change that renders
+  differently per host is wrong even if it looks fine.
 - **The design is written down.** If a change contradicts
   ARCHITECTURE.md, the doc changes first (or the change is wrong).
 

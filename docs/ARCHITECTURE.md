@@ -11,13 +11,14 @@ document is the contract; work still to come is in
 Raam (Afrikaans for *frame*) turns a cheap Android photo frame into
 something you own: a fast slideshow of your own photos — collages, Ken
 Burns, GPU transitions, video clips, a clock — fed by
-[Immich](https://immich.app), a USB stick, or photos uploaded from a
-phone. It replaces the vendor app on frames like the SNUG 8″
-(RK3126C, Android 6, Mali-400, 493 MB RAM), which is the first and the
-minimum device.
+[Immich](https://immich.app) or a folder on the frame (a USB stick or
+SD card in v1, photos uploaded from a phone later). It replaces the
+vendor app on frames like the SNUG 10.1″ (RK3126, Android 6, Mali-400
+MP2, 493 MB RAM), which is the first and the minimum device.
 
 **Roles.** Android is the product. The desktop host exists for UX
-iteration (it starts instantly) and doubles as the Linux frame host. The
+iteration (it starts instantly) and is meant to double as the Linux
+frame host. The
 web build is the demo: the real UI in a browser before anyone installs.
 
 ## Fixed decisions
@@ -124,7 +125,7 @@ not sleep-polling.
 | Host | Keeps |
 |---|---|
 | `hosts/android` (the product) | NativeActivity, EGL, input events, the decoders behind `VideoPlayer` (MediaCodec onto a SurfaceTexture, OpenSL audio and its A/V alignment, the process-wide decoder count, the reaper thread), power (wake alarm, wake lock, screen off), root helpers, storage paths |
-| `raam` at the root (desktop/Linux) | winit/glutin window, the mouse as a finger, the engine's paths (the app-data dir, a photos folder), `NoVideo` and a probe that says so, env-var debug switches (`RAAM_DEBUG_VIDEO_FAIL=rt`); `--page` is the preset host with the screenshot tooling (`--exact` goldens). On a Pi it runs under X/Wayland; a bare KMS/DRM host is a possible later addition, not v1 |
+| `raam` at the root (desktop/Linux) | winit/glutin window, the mouse as a finger, the engine's paths (the app-data dir, a photos folder), `NoVideo` and a probe that says so, env-var debug switches (`RAAM_DEBUG_VIDEO_FAIL=rt`); `--page` is the preset host with the screenshot tooling (`--exact` goldens). On a Pi it is meant to run under X/Wayland (untested; the window asks for desktop GL 3.2); a bare KMS/DRM host is a possible later addition, not v1 |
 | `hosts/web` (the demo) | canvas + rAF loop, its own synchronous `TileSource` over bundled sample photos (the browser decodes them; faces come from a checked-in `faces.json`), `NoVideo`, URL-query debug switches; later, "try with Immich" against demo.immich.app (CORS-open) |
 
 ## The seams
@@ -299,7 +300,7 @@ Four layers, cheapest first:
    then the slideshow recovers once it is cleared).
 
 **CI** (GitHub Actions): fmt, clippy (`-D warnings`), `cargo test
---workspace`, and a wasm build, on every push and PR. PR titles follow
+--workspace`, and clippy for the wasm target, on every push and PR. PR titles follow
 Conventional Commits, CI-enforced. APK builds stay manual until
 releases are automated.
 
@@ -332,8 +333,8 @@ Notably absent, by decision: wgpu, glow, tokio, reqwest, `image`,
 bindgen-at-build-time, material-colors-at-runtime, clap (hosts parse
 their few flags by hand), any async runtime.
 
-Licences: all permissive; ship the notices (Apache-2.0 fonts, ring,
-webpki-roots' CDLA-Permissive-2.0).
+Licences: all permissive; ship the notices (Roboto's OFL-1.1, Material
+Symbols' Apache-2.0, ring, webpki-roots' CDLA-Permissive-2.0).
 
 ## What this design deliberately defers
 

@@ -35,7 +35,7 @@ pub const DEFAULT_MANUAL_IDLE: Duration = Duration::from_secs(10 * 60);
 // ---- the app controller (input, overlay, saving) --------------------------
 
 /// A press that moves less than this is a tap, not a swipe. Chosen for
-/// fingers on the 8" panel.
+/// fingers on the 10.1" panel.
 pub const TAP_SLOP_PX: f32 = 40.0;
 /// The menu closes on its own this long after the last input. Chosen to
 /// match the vendor app's feel.

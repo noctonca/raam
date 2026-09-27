@@ -6,6 +6,7 @@
 //! `player::video_decoders`.
 use crate::player::{self, Player};
 use android_activity::AndroidAppWaker;
+use raam_core::switches::{self, Fail};
 use raam_core::video::{Role, VideoPlayer};
 use raam_model::VideoClip;
 
@@ -32,6 +33,10 @@ impl VideoPlayer for Decoders {
     type Clip = Player;
 
     fn open(&self, clip: &VideoClip, asset_id: i64, role: Role) -> Result<Player, String> {
+        // Test-only: `debug.video.fail=open`.
+        if switches::fail() == Fail::Open {
+            return Err("test failure (debug.video.fail=Open)".into());
+        }
         let (label, sound, latency) = match role {
             Role::Probe => (format!("clip {asset_id} (probe)"), None, 0),
             Role::Live { sound } => {

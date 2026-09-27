@@ -19,6 +19,9 @@ pub enum Fail {
     /// `hang`: the live decoder fails and holds its release 15 s, as a
     /// wedged stop does (player.rs).
     Hang,
+    /// `open`: opening a player fails at once, as a failed SurfaceTexture
+    /// setup does (the Android host's video.rs).
+    Open,
     /// `panic`: panic right after startup (lib.rs).
     Panic,
 }
@@ -32,6 +35,7 @@ pub fn set_fail(prop: &str) {
         "probe" => Fail::Probe,
         "live" => Fail::Live,
         "hang" => Fail::Hang,
+        "open" => Fail::Open,
         "panic" => Fail::Panic,
         _ => Fail::None,
     };
@@ -44,6 +48,7 @@ pub fn fail() -> Fail {
         x if x == Fail::Probe as u8 => Fail::Probe,
         x if x == Fail::Live as u8 => Fail::Live,
         x if x == Fail::Hang as u8 => Fail::Hang,
+        x if x == Fail::Open as u8 => Fail::Open,
         x if x == Fail::Panic as u8 => Fail::Panic,
         _ => Fail::None,
     }

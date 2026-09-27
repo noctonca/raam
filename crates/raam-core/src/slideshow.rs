@@ -1110,8 +1110,16 @@ impl<P: VideoPlayer> Pipeline<P> {
                     });
                 }
                 Err(e) => {
+                    // The source waits for `consumed` before it plans
+                    // again, so a dropped plan must say so; the backoff
+                    // keeps a host that can't open players at all (or a
+                    // frame under pressure) from retrying clip after clip.
                     log::error!("clip {}: can't open a player: {e}", meta.asset_id);
+                    self.video
+                        .record_failure(&format!("clip {} open: {e}", meta.asset_id));
                     self.drop_building();
+                    log::warn!("plan {seq} dropped");
+                    source.consumed();
                 }
             }
             return;

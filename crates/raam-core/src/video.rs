@@ -118,9 +118,11 @@ pub trait OpenClip {
     fn stop(self);
 }
 
-/// The player of a host without video (desktop, web): nothing ever opens,
-/// so a clip's plan is dropped at its probe and the slideshow goes on with
-/// photos.
+/// The player of a host without video (desktop, web). Nothing ever opens:
+/// a clip that reaches its probe drops its plan and backs clips off as a
+/// decoder failure would, so the slideshow goes on with photos. Such a
+/// host should keep clips out of its queue in the first place (its
+/// `MediaProbe` reports every clip unplayable, or its source offers none).
 pub struct NoVideo;
 
 /// `NoVideo`'s clip, which can't exist.

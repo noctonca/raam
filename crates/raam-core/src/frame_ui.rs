@@ -1465,9 +1465,7 @@ fn display_page(ui: &mut Ui, st: &mut AppState) {
     let options: Vec<&str> = ClockStyle::ALL.iter().map(|c| c.label()).collect();
     let row = ListItem::new("Clock overlay")
         .icon(icons::SCHEDULE)
-        .supporting(
-            "Time and weather over the photos · Simple is big and bold, Detailed adds the forecast",
-        )
+        .supporting("Time and weather over the photos")
         .trailing(Trailing::Segmented {
             selected: &mut clock,
             options: &options,

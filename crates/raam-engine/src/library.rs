@@ -1172,3 +1172,13 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     std::fs::write(&tmp, bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))
 }
+
+/// The controller's read-only view (raam-core app.rs).
+impl raam_core::app::LibraryInfo for Library {
+    fn stats(&self) -> (u64, raam_model::Stats) {
+        Library::stats(self)
+    }
+    fn online(&self) -> bool {
+        Library::online(self)
+    }
+}

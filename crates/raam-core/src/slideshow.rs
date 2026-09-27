@@ -1958,3 +1958,70 @@ fn fit_scale(pw: u32, ph: u32, sw: i32, sh: i32) -> (f32, f32) {
     let scale = (sw as f32 / pw as f32).min(sh as f32 / ph as f32);
     (pw as f32 * scale / sw as f32, ph as f32 * scale / sh as f32)
 }
+
+// ---- the controller's view (app.rs) ------------------------------------
+
+/// The App controller drives the pipeline through this narrow surface, so
+/// controller tests run against a fake with no GL behind it.
+impl<V: VideoSeam> crate::app::Slideshow for Pipeline<V> {
+    fn settings_mut(&mut self) -> &mut SlideshowSettings {
+        &mut self.settings
+    }
+    fn set_clock_paused(&mut self, paused: bool) {
+        self.clock.set_paused(paused);
+    }
+    fn pause_video(&mut self) {
+        self.video.pause_now();
+    }
+    fn set_menu_open(&mut self, open: bool) {
+        Pipeline::set_menu_open(self, open);
+    }
+    fn clear_selection(&mut self) {
+        Pipeline::clear_selection(self);
+    }
+    fn select_at(&mut self, x: f32, y: f32) -> Option<usize> {
+        Pipeline::select_at(self, x, y)
+    }
+    fn update(&mut self, source: &dyn TileSource) {
+        Pipeline::update(self, source);
+    }
+    fn request_next(&mut self) {
+        Pipeline::request_next(self);
+    }
+    fn request_prev(&mut self, source: &dyn TileSource) {
+        Pipeline::request_prev(self, source);
+    }
+    fn toggle_shown_scale(&mut self) -> Option<(String, Option<ScaleMode>)> {
+        Pipeline::toggle_shown_scale(self)
+    }
+    fn shown_photo(&self) -> Option<(String, i64)> {
+        Pipeline::shown_photo(self)
+    }
+    fn forget(&mut self, key: &str, source: &dyn TileSource) {
+        Pipeline::forget(self, key, source);
+    }
+    fn unforget(&mut self, key: &str) {
+        Pipeline::unforget(self, key);
+    }
+    fn shown_scale_mode(&self) -> Option<ScaleMode> {
+        Pipeline::shown_scale_mode(self)
+    }
+    fn shown_is_video(&self) -> bool {
+        Pipeline::shown_is_video(self)
+    }
+    fn shown_layout(&self) -> String {
+        Pipeline::shown_layout(self)
+    }
+    fn history_len(&self) -> usize {
+        Pipeline::history_len(self)
+    }
+    fn is_animating(&self) -> bool {
+        Pipeline::is_animating(self)
+    }
+    fn recompose_pending(&self) -> bool {
+        Pipeline::recompose_pending(self)
+    }
+    fn next_deadline(&self) -> Option<Duration> {
+        Pipeline::next_deadline(self)
+    }
+}

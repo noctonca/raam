@@ -113,4 +113,8 @@ pub trait VideoSeam {
     /// Ends a backoff that's over, and watches for a decoder whose release
     /// never finishes (a wedged VPU). `probing`: a probe of ours is up.
     fn watch_decoders(&mut self, probing: bool);
+
+    /// The app went hidden: a playing clip (and its sound) stops where it
+    /// is. A stub player has nothing to pause.
+    fn pause_now(&self);
 }

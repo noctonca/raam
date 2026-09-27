@@ -25,3 +25,20 @@ pub trait MediaProbe: Send + Sync {
 pub trait DebugSwitches: Send + Sync {
     fn get(&self, name: &str) -> String;
 }
+
+/// The screen and the wake alarm, for the controller's sleep/wake state
+/// machine. The Android host implements it over JNI and root (power.rs);
+/// a host without the concept (desktop, web) passes no power at all and
+/// the schedule stays off.
+pub trait Power {
+    /// Arms the RTC wake alarm for `epoch_ms`. An error keeps the app
+    /// awake (the controller logs and retries next pass).
+    fn set_wake_alarm(&mut self, epoch_ms: i64) -> Result<(), String>;
+    /// Turns the screen off now; called only after the alarm is armed.
+    fn sleep_screen(&mut self);
+    /// Lights the screen. The host may make it flags-only per its wake
+    /// mechanism; failures are the controller's to log.
+    fn wake_screen(&mut self) -> Result<(), String>;
+    /// Whether the screen is interactive, for the wake logs.
+    fn is_interactive(&self) -> Result<bool, String>;
+}

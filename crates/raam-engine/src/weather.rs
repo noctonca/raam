@@ -190,3 +190,21 @@ fn current_weather(client: &ureq::Agent, loc: &Location) -> Result<Current, Stri
         is_day: c["is_day"].as_i64().unwrap_or(1) != 0,
     })
 }
+
+/// The controller's read-only view (raam-core app.rs), in seam terms.
+impl raam_core::app::WeatherInfo for WeatherShared {
+    fn version(&self) -> u64 {
+        WeatherShared::version(self)
+    }
+    fn snapshot(&self) -> (Option<String>, Option<raam_core::app::WeatherNow>) {
+        let (city, current) = WeatherShared::snapshot(self);
+        (
+            city,
+            current.map(|c| raam_core::app::WeatherNow {
+                temp_c: c.temp_c,
+                code: c.code,
+                is_day: c.is_day,
+            }),
+        )
+    }
+}

@@ -14,8 +14,7 @@ density.
 Scope: [files and functions this fixer owns]. Another agent is editing
 [other files/functions] at the same time; don't touch those. If the build
 breaks in code you didn't touch, wait 30 s and retry. Re-read a shared
-file right before each edit. Don't touch [other experiments]. Don't
-commit.
+file right before each edit. Don't commit.
 
 Iterate with the desktop host: `cargo build --release -p raam`, then
 `target/release/raam --theme dark|light --page <page> --exact
@@ -43,8 +42,8 @@ animation smoothness), but don't try to check it.
 
 Final report, concise: for each finding, what changed (file:line) with
 measurements before and after; what you didn't fix and why; the new
-findings you fixed; the frame-only list. `cargo build --release` in the
-host must pass without warnings.
+findings you fixed; the frame-only list. `cargo build --release -p raam`
+must pass without warnings.
 ```
 
 For round two onwards, send only the new findings to the same fixer with

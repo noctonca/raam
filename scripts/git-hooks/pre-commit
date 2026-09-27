@@ -10,7 +10,9 @@
 #   git config core.hooksPath scripts/git-hooks
 #
 # Bypass for a single commit: git commit --no-verify
-# Bypass for the session:     SKIP_FORMAT=1 git commit ...
+# Skip the check (the hook exits at once while SKIP_FORMAT=1):
+#   for one command:  SKIP_FORMAT=1 git commit ...
+#   for a shell:      export SKIP_FORMAT=1
 
 set -euo pipefail
 

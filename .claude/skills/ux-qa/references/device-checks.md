@@ -1,7 +1,7 @@
-# The owner's checks on the frame
+# The maintainer's checks on the frame
 
-Put the frame on the page first (with the app's `page` and `theme`
-props). Ask everything in one `AskUserQuestion`, with a sentence of
+Put the frame on the page first (by hand or with scripted taps; raam has
+no page props). Ask everything in one `AskUserQuestion`, with a sentence of
 instructions in each question. These are the things the desktop can't
 settle; everything else was measured already.
 

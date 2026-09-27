@@ -9,7 +9,7 @@ Commands (coordinates are device pixels, 1 px = 1 dp on the frame):
       Screenshot every page x theme x scroll with a desktop host into OUT as
       <page>-<theme>-<scroll>.png (or <page>-<theme>-tall.png with --tall,
       a 1280xH window so a whole page fits in one capture; H is capped
-      near the Mac screen's height, about 1900).
+      near a laptop screen's height, about 1900).
   frame OUT --prop PREFIX [--pages a,b] [--themes dark,light] [--wait S]
       The same set captured on the device over adb by setting
       PREFIX.page / PREFIX.theme, as

@@ -17,7 +17,7 @@
 use crate::platform::{self, EnvSwitches};
 use crate::{Args, Gl, Step, save_png};
 use glutin::surface::GlSurface;
-use raam_core::app::{App, Deps, Effect, Event, Inputs, Overrides, Stage, Touch};
+use raam_core::app::{App, Deps, Event, Inputs, Overrides, Stage, Touch};
 use raam_core::frame_ui::AppState;
 use raam_core::gl::glDisableVertexAttribArray;
 use raam_core::overlay::ClockOverlay;
@@ -26,7 +26,7 @@ use raam_core::seams::{DebugSwitches, MediaProbe};
 use raam_core::slideshow::{Pipeline, SlideshowSettings};
 use raam_core::video::NoVideo;
 use raam_core::{clock, collage, switches};
-use raam_engine::{db, fetch, immich, library, weather};
+use raam_engine::{db, fetch, library, weather};
 use raam_model::limits::LARGEST_LAYOUT;
 use raam_model::{ClipInfo, FitBackground, GapColour, ScaleMode, SourceKind};
 use std::collections::HashMap;
@@ -498,7 +498,8 @@ impl Live {
                 power: None,
             },
         );
-        run_effects(out.effects, &self.lib, &run.fetch, &run.weather);
+        // No clip plays here, so there is no sound for out.music_volume.
+        raam_engine::run_effects(out.effects, &self.lib, Some(&run.fetch), Some(&run.weather));
         self.next_run = out.wait.and_then(|w| Instant::now().checked_add(w));
         if out.skip_draw {
             return;
@@ -592,39 +593,6 @@ impl Live {
                 self.next_run = Some(Instant::now());
             }
             _ => {}
-        }
-    }
-}
-
-/// The controller's effects, mapped onto the engine as the Android host
-/// maps them.
-fn run_effects(
-    effects: Vec<Effect>,
-    lib: &library::Library,
-    fetch: &fetch::FetchShared,
-    weather: &weather::WeatherShared,
-) {
-    for effect in effects {
-        match effect {
-            Effect::SaveSettings { rows, sleep } => {
-                lib.send(library::Cmd::SaveSettings { rows, sleep })
-            }
-            Effect::SetScale(key, mode) => lib.send(library::Cmd::SetScale(key, mode)),
-            Effect::SetHidden(key, hidden) => lib.send(library::Cmd::SetHidden(key, hidden)),
-            Effect::SetSourceEnabled(kind, on) => lib.set_enabled(kind, on),
-            Effect::SetServer { url, key } => {
-                lib.send(library::Cmd::SetServer(immich::Config { url, key }))
-            }
-            Effect::ExportCuration => lib.send(library::Cmd::ExportCuration),
-            Effect::SelectAlbum(album, on) => lib.send(library::Cmd::SelectAlbum(album, on)),
-            Effect::SetCap(cap) => lib.send(library::Cmd::SetCap(cap)),
-            Effect::ClearCache => lib.send(library::Cmd::ClearCache),
-            Effect::Rescan => lib.send(library::Cmd::Rescan),
-            Effect::SyncNow => lib.send(library::Cmd::SyncNow),
-            Effect::SetMaxGroup(max) => fetch.set_max_group(max),
-            // No clip plays here, so there is no sound to turn up.
-            Effect::SetMusicVolume(_) => {}
-            Effect::SetWeather(on) => weather.set_enabled(on),
         }
     }
 }

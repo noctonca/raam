@@ -12,7 +12,7 @@
 //! egui's clock is the pass count, a pass every animation frame, and the
 //! passes stop once egui has settled, so the canvas holds still for the
 //! test and its pixels can't depend on when it's read. The golden suite's
-//! web diff shoots this way.
+//! web diff (scripts/web-diff.py) shoots this way.
 
 use raam_core::clock;
 use raam_core::frame_ui::{self, SHOT_PASS, SHOT_SETTLED};

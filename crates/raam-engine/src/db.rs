@@ -258,6 +258,16 @@ pub fn set_source_enabled(
     )
 }
 
+/// The local source's folder (the desktop's `--photos`). The next scan
+/// lists it and drops what the old folder held; curation, keyed by the
+/// photo, stays.
+pub fn set_local_dir(conn: &Connection, dir: &str) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE source SET base_url = ?1 WHERE kind = 'local'",
+        [dir],
+    )
+}
+
 pub fn set_immich_server(conn: &Connection, url: &str, key: &str) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE source SET base_url = ?1 WHERE kind = 'immich'",

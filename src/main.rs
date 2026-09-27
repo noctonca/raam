@@ -1,11 +1,37 @@
-//! The `raam` binary: the desktop/Linux host. Today it is the preset
-//! host - the widget gallery and every frame_ui screen by name, rendered
-//! by the core's own GLES2 painter (gl.rs bridges the shaders to the 4.1
-//! core context), so theme, kit and screen changes are iterated and
-//! QA'd on the Mac before the frame. It adopts the whole slideshow
-//! pipeline at migration step 8.
+//! The `raam` binary: the desktop/Linux host (docs/ARCHITECTURE.md
+//! "Hosts"), drawing with the core's own GLES2 renderer (gl.rs bridges
+//! the shaders to the 4.1 core context). Two modes:
 //!
-//! Options:
+//! - **The slideshow** (no `--page`; live.rs): the product as the frame
+//!   runs it, on the engine, with no video player. The mouse is a finger.
+//! - **The preset host** (`--page`; preset.rs): the widget gallery and
+//!   every frame_ui screen by name, over a stand-in for the slideshow, so
+//!   theme, kit and screen changes are iterated and QA'd on the Mac
+//!   before the frame.
+//!
+//! The slideshow's options:
+//! - `--data <dir>`: the DB and caches (default: the app-data dir,
+//!   `~/Library/Application Support/raam` on macOS, else
+//!   `$XDG_DATA_HOME/raam`)
+//! - `--photos <dir>`: the photos folder, remembered in the data dir (a
+//!   fresh one watches `~/Pictures/Raam`, made if missing). Immich is set
+//!   up in the settings, as on the frame
+//! - `--size WxH`: the screen in device pixels (default 1280x800); the
+//!   window is always exact, as `--exact` makes the presets
+//! - `--click X,Y` / `--press X,Y`: scripted taps, the first once the
+//!   first collage is up and still, each 1.5 s after the step before
+//! - `--set NAME=VALUE`: a scripted step that sets a debug switch, as F5
+//!   does (`--set debug.video.fail=rt`; `NAME=` clears it)
+//! - `--wait S`: a scripted pause of S seconds more before the next step
+//! - `--screenshot <file.png>`: save 1.5 s after the last step (or the
+//!   first collage) and exit
+//! - the frame's `debug.*` props as env vars, upper-cased with dots as
+//!   underscores: `RAAM_DEBUG_VIDEO_FAIL=rt`
+//!
+//! Keys: F5 GPU-failure injection on/off (`debug.video.fail=rt`), F12
+//! screenshot into `shots/`.
+//!
+//! The preset host's options:
 //! - `--theme dark|light`, `--text egui|off|shader|boost`
 //! - `--page <name>`: a gallery page (settings | components | colours |
 //!   type | icons | targets | probe) or a frame_ui preset
@@ -47,6 +73,8 @@
 //!
 //! Keys: F1 theme, F2 next text mode, F12 screenshot into `shots/`.
 mod backdrop;
+mod live;
+mod platform;
 mod preset;
 
 use egui::Theme;
@@ -69,6 +97,17 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::raw_window_handle::HasWindowHandle;
 use winit::window::Window;
 
+/// A scripted step of the slideshow's, run in the order given.
+#[derive(Clone)]
+enum Step {
+    /// --click (released) or --press (held down).
+    Tap(egui::Pos2, bool),
+    /// --set: a debug switch, as F5 flips `debug.video.fail`.
+    Set(String, String),
+    /// --wait: an extra pause before the next step.
+    Wait(Duration),
+}
+
 /// What `--page` named: a gallery page or a frame_ui preset.
 #[derive(Clone)]
 enum PageArg {
@@ -77,6 +116,11 @@ enum PageArg {
 }
 
 struct Args {
+    /// No `--page`: the slideshow.
+    live: bool,
+    /// --data and --photos (the slideshow).
+    data: Option<PathBuf>,
+    photos: Option<PathBuf>,
     theme: Theme,
     text: TextMode,
     page: PageArg,
@@ -88,6 +132,8 @@ struct Args {
     scroll: f32,
     /// (point, release): --click releases, --press holds. In order.
     taps: Vec<(egui::Pos2, bool)>,
+    /// The slideshow's taps, --set and --wait, in order.
+    script: Vec<Step>,
     /// --hold: the touch's point and how long it stays down.
     hold: Option<(egui::Pos2, Duration)>,
 }
@@ -105,6 +151,9 @@ fn text_mode(s: &str) -> Option<TextMode> {
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args {
+        live: true,
+        data: None,
+        photos: None,
         theme: Theme::Dark,
         text: TextMode::Shader,
         page: PageArg::Gallery(gallery::Page::Settings),
@@ -115,10 +164,22 @@ fn parse_args() -> Result<Args, String> {
         screenshot: None,
         scroll: 0.0,
         taps: Vec::new(),
+        script: Vec::new(),
         hold: None,
     };
+    // The first flag given that the other mode has no use for.
+    let (mut preset_only, mut live_only) = (None, None);
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--theme" | "--text" | "--backdrop" | "--ppp" | "--scroll" | "--hold" => {
+                preset_only.get_or_insert(flag.clone());
+            }
+            "--data" | "--photos" | "--set" | "--wait" => {
+                live_only.get_or_insert(flag.clone());
+            }
+            _ => {}
+        }
         let mut val = || it.next().ok_or(format!("{flag} needs a value"));
         match flag.as_str() {
             "--version" | "-V" => {
@@ -136,7 +197,10 @@ fn parse_args() -> Result<Args, String> {
                 let v = val()?;
                 a.text = text_mode(&v).ok_or(format!("unknown text mode {v:?}"))?;
             }
+            "--data" => a.data = Some(val()?.into()),
+            "--photos" => a.photos = Some(val()?.into()),
             "--page" => {
+                a.live = false;
                 let v = val()?;
                 a.page = match gallery::Page::from_name(&v) {
                     Some(p) => PageArg::Gallery(p),
@@ -185,6 +249,20 @@ fn parse_args() -> Result<Args, String> {
                     y.parse().map_err(|e| format!("{flag}: {e}"))?,
                 );
                 a.taps.push((p, flag == "--click"));
+                a.script.push(Step::Tap(p, flag == "--click"));
+            }
+            "--set" => {
+                let v = val()?;
+                let (name, value) = v
+                    .split_once('=')
+                    .ok_or(format!("--set wants NAME=VALUE, got {v:?}"))?;
+                a.script.push(Step::Set(name.into(), value.into()));
+            }
+            "--wait" => {
+                let v = val()?;
+                let secs: f32 = v.parse().map_err(|e| format!("--wait: {e}"))?;
+                a.script
+                    .push(Step::Wait(Duration::from_secs_f32(secs.max(0.0))));
             }
             "--hold" => {
                 let v = val()?;
@@ -205,7 +283,13 @@ fn parse_args() -> Result<Args, String> {
             }
         }
     }
-    Ok(a)
+    match (a.live, preset_only, live_only) {
+        (true, Some(f), _) => Err(format!(
+            "{f} is the preset host's (--page); the slideshow takes its look from its settings"
+        )),
+        (false, _, Some(f)) => Err(format!("{f} is the slideshow's (no --page)")),
+        _ => Ok(a),
+    }
 }
 
 /// The window and its GL context, current on this thread.
@@ -333,9 +417,23 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let event_loop = EventLoop::new().expect("event loop");
-    let mut app = preset::Preset::new(args);
-    if let Err(e) = event_loop.run_app(&mut app) {
+    let result = if args.live {
+        let event_loop = EventLoop::<live::Wake>::with_user_event()
+            .build()
+            .expect("event loop");
+        let mut live = match live::Live::new(args, event_loop.create_proxy()) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        };
+        event_loop.run_app(&mut live)
+    } else {
+        let event_loop = EventLoop::new().expect("event loop");
+        event_loop.run_app(&mut preset::Preset::new(args))
+    };
+    if let Err(e) = result {
         log::error!("event loop: {e}");
     }
 }

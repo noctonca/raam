@@ -58,8 +58,11 @@
 //! - `--size WxH`: the device screen in pixels (default 1280x800)
 //! - `--exact`: one device pixel per screen pixel, so a retina window is
 //!   half size but its pixels match `adb screencap`
-//! - `--screenshot <file.png>`: draw until egui is idle (nothing due
-//!   within 200 ms), save, and exit
+//! - `--screenshot <file.png>`: draw until egui has settled (nothing due
+//!   within 200 ms), save, and exit. The run is hermetic: a virtual clock
+//!   steps 1/60 s a pass, and the window neither takes the focus nor
+//!   passes the real mouse or keyboard to egui, so the shot depends on the
+//!   flags alone, not on load, the display or where the pointer rests
 //! - `--scroll <px>`: scroll the detail pane down this far first, so a
 //!   screenshot can reach what's below the fold
 //! - `--click X,Y` / `--press X,Y`: a tap (or a press held down) at that
@@ -303,11 +306,13 @@ pub struct Gl {
 /// A `size` window with a current GL context and the core's desktop
 /// linkage ready (gl.rs). `exact` asks for that many device pixels, so a
 /// retina window is half size but its pixels match `adb screencap`.
-fn create_gl(el: &ActiveEventLoop, size: [u32; 2], exact: bool) -> Result<Gl, String> {
+/// `focus`: the window takes the keyboard focus as it opens.
+fn create_gl(el: &ActiveEventLoop, size: [u32; 2], exact: bool, focus: bool) -> Result<Gl, String> {
     let [w, h] = size;
     let attrs = Window::default_attributes()
         .with_title("raam")
-        .with_inner_size(LogicalSize::new(w, h));
+        .with_inner_size(LogicalSize::new(w, h))
+        .with_active(focus);
     let template = ConfigTemplateBuilder::new();
     let (window, config) = DisplayBuilder::new()
         .with_window_attributes(Some(attrs))

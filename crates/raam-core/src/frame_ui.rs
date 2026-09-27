@@ -22,6 +22,7 @@ use raam_model::{
     TransitionChoice, VideoPlayback,
 };
 use std::collections::HashMap;
+use std::time::Duration;
 
 /// Sleep and wake times move in steps of this many minutes.
 const TIME_STEP: u32 = 15;
@@ -383,6 +384,15 @@ pub const PAGES: &[&str] = &[
     "set-server-cache",
     "set-server-clear",
 ];
+
+/// A screenshot run (the desktop's `--screenshot`, the web's `shot=1`)
+/// steps a virtual clock this far a pass, as a 60 Hz display would, so a
+/// shot can't depend on the machine's load or the display's refresh rate.
+pub const SHOT_PASS: Duration = Duration::from_micros(16_667);
+
+/// A screenshot is taken once egui asks for no pass sooner than this. Not
+/// "never": a focused field's cursor blinks, asking every 500 ms forever.
+pub const SHOT_SETTLED: Duration = Duration::from_millis(200);
 
 /// The state a preset name shows, or `None` if there's no such preset.
 pub fn preset(name: &str) -> Option<AppState> {

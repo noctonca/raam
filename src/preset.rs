@@ -4,13 +4,20 @@
 //! iterated and QA'd on the desktop before the frame. Input is egui's own
 //! from winit, plus the scripted taps, holds and scroll of the flags in
 //! main.rs, and `--screenshot` saves once egui is idle.
+//!
+//! A shot run (`--screenshot`) is hermetic: egui's clock is the
+//! pass count, passes run back to back, and nothing from the machine
+//! reaches egui but the window's size, so the golden suite's shots are
+//! the same whatever the load, the display's refresh rate or scale, or
+//! where the mouse rests. The web host's `shot=1` runs the same way.
 use crate::{Args, Gl, PageArg, backdrop, save_png};
 use egui::Theme;
 use glutin::surface::GlSurface;
+use raam_core::frame_ui::{self, SHOT_PASS, SHOT_SETTLED};
+use raam_core::gallery;
 use raam_core::gl::*;
 use raam_core::painter::Painter;
 use raam_core::theme::{self, Options, TextMode};
-use raam_core::{frame_ui, gallery};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -32,6 +39,8 @@ pub struct Preset {
     backdrop: Option<backdrop::Backdrop>,
     /// Whether the last frame drew the backdrop, to log when it's skipped.
     backdrop_drawn: Option<bool>,
+    /// A shot run: the virtual clock, no input from the machine.
+    hermetic: bool,
     start: Instant,
     info: gallery::ProbeInfo,
     gl: Option<Gl>,
@@ -50,8 +59,8 @@ pub struct Preset {
     tap_step: u8,
     /// Which of `args.taps` is under way.
     tap_idx: usize,
-    /// --hold: when the touch lifts.
-    release_at: Option<Instant>,
+    /// --hold: when the touch lifts, on `now`'s clock.
+    release_at: Option<Duration>,
     fps_frames: u32,
     fps_start: Instant,
 }
@@ -88,9 +97,11 @@ impl Preset {
             ppp: args.ppp,
             ..Default::default()
         };
+        let hermetic = args.screenshot.is_some();
         Self {
             ppp: args.ppp,
-            exit_after_shot: args.screenshot.is_some(),
+            exit_after_shot: hermetic,
+            hermetic,
             args,
             ctx,
             schemes,
@@ -125,8 +136,18 @@ impl Preset {
         }
     }
 
+    /// egui's clock: since the start, or in a shot run the virtual one,
+    /// a `SHOT_PASS` a pass.
+    fn now(&self) -> Duration {
+        if self.hermetic {
+            SHOT_PASS * self.passes
+        } else {
+            self.start.elapsed()
+        }
+    }
+
     fn create_window(&mut self, el: &ActiveEventLoop) -> Result<(), String> {
-        let gl = crate::create_gl(el, self.args.size, self.args.exact)?;
+        let gl = crate::create_gl(el, self.args.size, self.args.exact, !self.hermetic)?;
         self.info.gl_max_texture = gl.max_texture;
         let mut painter = unsafe { Painter::new() };
         painter.text_boost = self.opts.text_mode == TextMode::Shader;
@@ -177,6 +198,7 @@ impl Preset {
     }
 
     fn redraw(&mut self, el: &ActiveEventLoop) {
+        let now = self.now();
         let (Some(gl), Some(state), Some(painter)) =
             (self.gl.as_ref(), self.state.as_mut(), self.painter.as_mut())
         else {
@@ -187,6 +209,13 @@ impl Preset {
         // focused field as focused only while the window is, and a
         // screenshot run's window is usually behind the terminal.
         raw.focused = true;
+        if self.hermetic {
+            raw.events.clear();
+            raw.hovered_files.clear();
+            raw.system_theme = None;
+            raw.time = Some(now.as_secs_f64());
+            raw.predicted_dt = SHOT_PASS.as_secs_f32();
+        }
         // --scroll: a wheel over the detail pane once the first pass has
         // laid it out.
         if self.passes == 1 && self.args.scroll != 0.0 {
@@ -265,11 +294,11 @@ impl Preset {
                         button(true),
                         touch(egui::TouchPhase::Start),
                     ]);
-                    self.release_at = Some(Instant::now() + hold);
+                    self.release_at = Some(now + hold);
                     log::info!("hold: down at {pos:?} for {} ms", hold.as_millis());
                     self.tap_step = 2;
                 }
-                2 if self.release_at.is_some_and(|t| Instant::now() >= t) => {
+                2 if self.release_at.is_some_and(|t| now >= t) => {
                     raw.events.extend([
                         egui::Event::PointerMoved(pos),
                         button(false),
@@ -355,7 +384,7 @@ impl Preset {
                 let (prog, t) = if name == "still" {
                     ("fade", 0.0)
                 } else {
-                    (name, self.start.elapsed().as_secs_f32())
+                    (name, now.as_secs_f32())
                 };
                 animating = name != "still";
                 unsafe { b.draw(prog, t, w, h) };
@@ -380,14 +409,8 @@ impl Preset {
             .get(&egui::ViewportId::ROOT)
             .map(|v| v.repaint_delay)
             .unwrap_or(Duration::MAX);
-        // --screenshot: once egui has nothing more to animate. A slow
-        // repaint counts as idle too: a focused field's cursor blinks
-        // forever.
-        if self.passes > 2
-            && delay >= Duration::from_millis(200)
-            && !self.park_pointer
-            && self.shot.is_none()
-        {
+        // --screenshot: once egui has nothing more to animate.
+        if self.passes > 2 && delay >= SHOT_SETTLED && !self.park_pointer && self.shot.is_none() {
             if (!self.args.taps.is_empty() || self.args.hold.is_some()) && self.tap_step == 0 {
                 self.tap_step = 1;
                 self.next_run = Some(Instant::now());
@@ -433,11 +456,16 @@ impl Preset {
             self.next_run = Some(self.next_run.map_or(soon, |t| t.min(soon)));
         }
         if let Some(up) = self.release_at {
+            let up = self.start + up;
             self.next_run = Some(self.next_run.map_or(up, |t| t.min(up)));
         }
         if animating {
             let soon = Instant::now() + Duration::from_millis(16);
             self.next_run = Some(self.next_run.map_or(soon, |t| t.min(soon)));
+        }
+        if self.hermetic {
+            // The clock is the pass count: the next pass at once.
+            self.next_run = Some(Instant::now());
         }
         self.apply(&reqs);
     }
@@ -529,7 +557,7 @@ impl ApplicationHandler for Preset {
                         ..
                     },
                 ..
-            } => {
+            } if !self.hermetic => {
                 self.key(&logical_key.clone());
             }
             _ => {}

@@ -1,11 +1,11 @@
-//! 011's JNI bridge letting `MediaCodec` decode video straight into a GL
+//! The JNI bridge letting `MediaCodec` decode video straight into a GL
 //! texture: this device is API 23, so there's no `AImageReader` (API 24+),
 //! and the only route is a Java `android.graphics.SurfaceTexture` on a
 //! `GL_TEXTURE_EXTERNAL_OES` texture, wrapped in an `android.view.Surface`
 //! for the decoder, with `updateTexImage()` on the GL thread.
 //!
-//! 027 makes one per clip rather than one per process, so it also has to go
-//! away cleanly: every JNI object is made inside a local frame (the render
+//! There is one per clip, not one per process, so it also has to go away
+//! cleanly: every JNI object is made inside a local frame (the render
 //! thread is attached for good, so a stray local ref per clip would pile up
 //! towards the 512 limit), the `Surface` is kept as a global ref so it can
 //! be released, and `release` frees both Java objects. `timestamp` reads
@@ -21,7 +21,7 @@ pub struct VideoTexture {
     surface_texture: GlobalRef,
     surface: GlobalRef,
     /// The `float[16]` for `getTransformMatrix`, allocated once and reused
-    /// (011: a fresh array per frame would leak a local ref per frame).
+    /// (a fresh array per frame would leak a local ref per frame).
     matrix_array: GlobalRef,
 }
 

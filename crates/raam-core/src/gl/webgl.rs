@@ -1,12 +1,12 @@
-//! The WebGL1 linkage (experiment 028's shim): the GLES2 entry points the
-//! rest of the core calls, with the same names and signatures, forwarded to
-//! the canvas's WebGL1 context. GLES2 names objects with integers and WebGL
-//! with JS objects, so each kind gets a table indexed by the integer handed
-//! out (0 stays "none", as in GL). Pointer arguments are wasm linear
-//! memory: buffer and texture data become slices sized from the call's own
-//! arguments, and attribute/index "pointers" are buffer offsets, as they
-//! are on the frame. The shaders are GLSL ES 1.00, WebGL1's own language,
-//! so they go in unchanged.
+//! The WebGL1 linkage: the GLES2 entry points the rest of the core calls,
+//! with the same names and signatures, forwarded to the canvas's WebGL1
+//! context. GLES2 names objects with integers and WebGL with JS objects,
+//! so each kind gets a table indexed by the integer handed out (0 stays
+//! "none", as in GL). Pointer arguments are wasm linear memory: buffer and
+//! texture data become slices sized from the call's own arguments, and
+//! attribute/index "pointers" are buffer offsets, as they are on the
+//! frame. The shaders are GLSL ES 1.00, WebGL1's own language, so they go
+//! in unchanged.
 //!
 //! The context is the host's to make (its attributes are the web host's
 //! EGL config): `make_current` hands it over once, before any GL call.

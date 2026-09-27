@@ -1,15 +1,14 @@
-//! The product's chrome, built on the kit (026's step 2.6, replacing the
-//! 025-era ui.rs at migration step 6). The controller (app.rs) hands it
-//! the `AppState` and applies the `Actions` it records; it never touches
-//! GL or a host.
+//! The product's chrome, built on the kit. The controller (app.rs) hands
+//! it the `AppState` and applies the `Actions` it records; it never
+//! touches GL or a host.
 //!
 //! - The menu is an M3 floating toolbar over the slideshow, bottom-centred,
 //!   with a one-line status in the person's words.
 //! - Settings are opaque and full screen, in the gallery's list/detail
 //!   shell: six sections (Photos, Slideshow, Videos, Display, Sleep,
 //!   Server), two sub-pages (albums, hidden photos) and the dialogs behind
-//!   Value rows. The host skips the slideshow under them (`AppState::
-//!   opaque`, 026's step 2.4 lever).
+//!   Value rows. The host skips the slideshow under them
+//!   (`AppState::opaque`).
 //!
 //! `presets` and the `Stats` fixtures are the QA surface: every screen
 //! reachable by name for the desktop host's `--page` and the ux-qa pass.
@@ -1236,7 +1235,7 @@ fn slideshow_page(ui: &mut Ui, st: &mut AppState) {
 
     kit::section_header(ui, "Pace");
     // A Value row like its neighbours (icon on 400, text on 440), opening
-    // the number picker: a slider here put its title on 400 (step 2.6 QA).
+    // the number picker: a slider here put its title on 400.
     let interval = fmt_secs(s.interval_secs);
     if kit::list_item(
         ui,
@@ -1475,8 +1474,8 @@ fn display_page(ui: &mut Ui, st: &mut AppState) {
         s.clock_style = ClockStyle::ALL[clock];
     }
     // No icons below: a digital clock is illegible at 24 px, and the
-    // overlay has the clock face (026's step 2.5). The empty slots keep
-    // the text on the text edge.
+    // overlay has the clock face. The empty slots keep the text on the
+    // text edge.
     ui.add_enabled_ui(s.clock_style != ClockStyle::Off, |ui| {
         let mut corner = Corner::ALL
             .iter()

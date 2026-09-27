@@ -11,15 +11,14 @@
 //! threads and the writer thread; the render thread never locks it (it
 //! reads everything once at startup and sends its writes to the writer).
 //! WAL with synchronous=NORMAL: a power cut can lose the last commit but
-//! never corrupt the file — the experiments' frame survived dozens of
-//! dirty power-offs this way. Files are never unlinked under the lock:
-//! the functions that drop cached files return their paths, and the
-//! caller removes them after letting go.
+//! never corrupt the file — the frame survived dozens of dirty
+//! power-offs this way. Files are never unlinked under the lock: the
+//! functions that drop cached files return their paths, and the caller
+//! removes them after letting go.
 //!
-//! The schema restarts at v1 for Raam (docs/plan/migration.md "Fresh
-//! start"): the experiments' four migrations folded into one, with no
-//! lineage obligation. Curation carries over through the JSON
-//! export/import (`import_curation`).
+//! The schema starts at v1, with no upgrade path from the prototype's
+//! database. Curation carries over through the JSON export/import
+//! (`import_curation`).
 use raam_core::clock;
 use raam_core::store::transition_str;
 use raam_model::limits;
@@ -35,8 +34,7 @@ use std::sync::{Arc, Mutex};
 pub type Db = Arc<Mutex<Connection>>;
 
 /// Schema versions, applied in order and recorded in `PRAGMA
-/// user_version`. v1 is the experiments' final shape (their v1-v4 folded
-/// together: albums, never-reused asset ids, clip playability).
+/// user_version`.
 const MIGRATIONS: &[&str] = &["CREATE TABLE source (
        id            INTEGER PRIMARY KEY,
        kind          TEXT NOT NULL CHECK (kind IN ('immich','local')),
@@ -148,9 +146,9 @@ pub fn open(path: &Path, local_dir: &str) -> Result<Db, String> {
         .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
         .map_err(|e| format!("journal_mode: {e}"))?;
     // Foreign keys stay off until the migrations are done: a table rebuild
-    // (schema 3) drops the old table, which with them on would cascade into
-    // every row that points at it. The pragma is a no-op inside a
-    // transaction, so it can't be switched per migration.
+    // drops the old table, which with them on would cascade into every row
+    // that points at it. The pragma is a no-op inside a transaction, so it
+    // can't be switched per migration.
     conn.execute_batch(
         "PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = OFF; PRAGMA cache_size = -1024;",
     )
@@ -419,10 +417,10 @@ pub fn save_settings(
     tx.commit()
 }
 
-// ---- albums (025) ----------------------------------------------------------
+// ---- albums --------------------------------------------------------------
 
-/// The first album list picks this one, so a new install plays what 024
-/// did.
+/// The first album list picks this one, so a new install has something to
+/// play before anyone opens the picker.
 pub const DEFAULT_ALBUM: &str = "Favorites";
 const ALBUMS_SEEDED: &str = "immich.albums_seeded";
 
@@ -735,11 +733,10 @@ pub fn curation_json(conn: &Connection) -> String {
     .unwrap_or_default()
 }
 
-/// The fresh-start import (docs/plan/migration.md): the lab frame's
-/// curation export seeds `curation` once, when the table is empty and the
-/// export file exists. Accepts Raam's own exports and the experiments'
-/// ("immich-frame-rs curation v1"), which is how the frame's curation
-/// crosses installs.
+/// The import of a curation export: it seeds `curation` once, when the
+/// table is empty and the export file exists. Accepts Raam's own exports
+/// and the prototype's ("immich-frame-rs curation v1"), which is how the
+/// frame's curation crosses installs.
 pub fn import_curation(conn: &Connection, path: &Path) -> Result<usize, String> {
     let have: i64 = conn
         .query_row("SELECT COUNT(*) FROM curation", [], |r| r.get(0))
@@ -974,7 +971,7 @@ pub fn cached_preview(conn: &Connection, asset: i64) -> Option<PathBuf> {
     .map(PathBuf::from)
 }
 
-/// 027: an Immich clip's cached playback transcode.
+/// An Immich clip's cached playback transcode.
 pub fn cached_video(conn: &Connection, asset: i64) -> Option<PathBuf> {
     conn.query_row(
         "SELECT path FROM cached_file WHERE asset_id = ?1 AND variant = 'video'",
@@ -987,7 +984,7 @@ pub fn cached_video(conn: &Connection, asset: i64) -> Option<PathBuf> {
     .map(PathBuf::from)
 }
 
-/// 027: the frame's decoder can't take this clip: out of the queue for
+/// The frame's decoder can't take this clip: out of the queue for
 /// good (until the cache is cleared), its cached file dropped. Returns the
 /// files to remove.
 pub fn mark_unplayable(conn: &Connection, asset: i64, reason: &str) -> Vec<PathBuf> {
@@ -1020,8 +1017,8 @@ pub fn set_playable(conn: &Connection, asset: i64) -> rusqlite::Result<usize> {
     )
 }
 
-/// 027: (videos, playable ones ready to play, unplayable, the unplayable
-/// ones' reasons) over the enabled sources.
+/// (videos, playable ones ready to play, unplayable, the unplayable ones'
+/// reasons) over the enabled sources.
 pub fn video_counts(conn: &Connection) -> (i64, i64, i64, Vec<String>) {
     let (total, ready, bad) = conn
         .query_row(
@@ -1066,8 +1063,8 @@ pub fn cached_bytes(conn: &Connection, kind: SourceKind) -> i64 {
 /// The single way cached files leave: their rows go, and their paths come
 /// back for `remove_files` once the caller has let go of the lock. A crash
 /// in between leaves files no row points at, which the startup sweep
-/// deletes; asset ids are never reused (schema 3), so no new asset can take
-/// such a file for its own first.
+/// deletes; asset ids are never reused (AUTOINCREMENT), so no new asset can
+/// take such a file for its own first.
 pub fn drop_cached(conn: &Connection, asset: i64) -> Vec<PathBuf> {
     let paths = cached_paths(conn, asset);
     let _ = conn.execute("DELETE FROM cached_file WHERE asset_id = ?1", [asset]);

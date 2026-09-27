@@ -1,4 +1,4 @@
-//! 026's widget gallery: every token and component in the current theme, in
+//! The widget gallery: every token and component in the current theme, in
 //! the list/detail layout the real settings use (sections on the left, the
 //! chosen one on the right). The design system's QA surface, not one of the
 //! product's screens. Host-agnostic: it takes a `ProbeInfo` from the host
@@ -83,7 +83,7 @@ pub struct ProbeInfo {
     /// Empty until the first measured switch.
     pub last_switch: String,
     pub gl_max_texture: i32,
-    /// 0 when the host can't tell (no /proc/meminfo, as on the Mac).
+    /// 0 when the host can't tell (no /proc/meminfo, as on macOS).
     pub mem_free_kb: u64,
     pub fps: f32,
 }
@@ -117,7 +117,7 @@ pub struct Gallery {
     chips: [bool; 4],
     combo: usize,
     dialog: bool,
-    // Kit inputs (step 2.2), beside egui's own for comparison.
+    // Kit inputs, beside egui's own for comparison.
     field_url: String,
     field_empty: String,
     field_key: String,
@@ -297,7 +297,7 @@ fn page_title(ui: &mut Ui, title: &str, sub: &str) {
     kit::page_title(ui, title, sub);
 }
 
-/// A realistic slice of the future settings, to judge the kit in context.
+/// A realistic slice of the settings, to judge the kit in context.
 fn settings(ui: &mut Ui, g: &mut Gallery, req: &mut Vec<Request>) {
     page_title(
         ui,

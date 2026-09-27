@@ -1,23 +1,25 @@
-//! 015's Ken Burns + gl-transitions pipeline with 019's chrome controls and
-//! 020's Frameo Fill/Fit scaling, now showing Frameo-style collages (see
-//! collage.rs for the layout rules) instead of one photo per slide.
+//! The slideshow pipeline: Frameo-style collages (see collage.rs for the
+//! layout rules) with Frameo's Fill/Fit scaling, a Ken Burns motion per
+//! tile, gl-transitions between slides (transitions.rs), and what the
+//! menu drives (Next, Prev, pause, the selected tile).
 //!
 //! Each collage tile keeps two GPU textures and no CPU pixels:
 //! - `source`: the photo copied down to the tile's cover scale when its
 //!   preview lands. Recomposing a tile after a Fill/Fit change reads this,
 //!   since `photo_tex` only ever holds the last upload.
-//! - `target`: the tile composed exactly as 020 composes a slide (Fill crop
-//!   with the face-derived centre, or Fit over a blurred or black
+//! - `target`: the tile composed as a full-screen slide would be (Fill
+//!   crop with the face-derived centre, or Fit over a blurred or black
 //!   background), at the tile's size.
 //!
 //! Each frame draws every tile's `target` through its own Ken Burns UV
 //! window into the tile's rect (the viewport clips it, so motion never
 //! crosses a separator), over a clear in the gap colour. A transition
 //! renders both collages, still animating, into two screen-sized scratch
-//! targets and feeds those to 015's transitions. A single-photo "collage"
-//! skips all of that and runs 020's path unchanged.
+//! targets and feeds those to the transition shader. A transition between
+//! two single photos skips the scratch targets: the shader samples the
+//! two tiles' `target`s directly, each through its Ken Burns window.
 //!
-//! 027: a slide can be a video clip (always alone). Transitions still blend
+//! A slide can be a video clip (always alone). Transitions only ever blend
 //! two still slides: a clip's slide is composed from its real first frame
 //! (decoded by a short-lived "probe" player, video.rs) over the blurred
 //! first frame, so the transition in lands on exactly what starts playing.
@@ -175,9 +177,7 @@ impl KenBurns {
         }
     }
 
-    /// Re-aims at a face after the slide under it was recomposed with a
-    /// different scaling. Keeps the zoom and timing so the motion carries on.
-    /// 027: no motion (a clip gets no Ken Burns).
+    /// No motion (a clip gets no Ken Burns).
     fn still(born: Duration) -> Self {
         Self {
             born,
@@ -188,6 +188,8 @@ impl KenBurns {
         }
     }
 
+    /// Re-aims at a face after the slide under it was recomposed with a
+    /// different scaling. Keeps the zoom and timing so the motion carries on.
     fn refocus(&mut self, focal: Option<(f32, f32)>) {
         if let Some(f) = focal {
             self.focal = f;
@@ -319,9 +321,9 @@ const FS_BLUR_SRC: &str = "precision mediump float; varying vec2 vUV; uniform sa
      }";
 
 /// Samples a decoded frame (`GL_TEXTURE_EXTERNAL_OES`) through its
-/// transform (the lab's 011 shaders). Linked on the first clip frame drawn:
-/// only a host with a real `VideoPlayer` ever needs it, and desktop GL has
-/// no external textures to compile it against.
+/// transform. Linked on the first clip frame drawn: only a host with a
+/// real `VideoPlayer` ever needs it, and desktop GL has no external
+/// textures to compile it against.
 const VS_OES_SRC: &str = "attribute vec2 aPos; attribute vec2 aUV; \
      uniform vec2 uScale; uniform mat4 uTexMatrix; varying vec2 vUV; \
      void main() { \
@@ -480,7 +482,7 @@ impl QuadProgram {
     }
 }
 
-/// 027: what a clip's tile keeps besides its composed still.
+/// What a clip's tile keeps besides its composed still.
 struct VideoTile {
     clip: VideoClip,
     /// The first frame's blur, at the blur chain's small size (same row
@@ -555,7 +557,7 @@ impl Collage {
             .map_or("single", |i| collage::LAYOUTS[i].name)
     }
 
-    /// 027: the clip, if this slide is one (always a single tile).
+    /// The clip, if this slide is one (always a single tile).
     fn video(&self) -> Option<&VideoTile> {
         if self.is_single() {
             self.tiles.first().and_then(|t| t.video.as_ref())
@@ -621,7 +623,7 @@ pub struct Pipeline<P: VideoPlayer> {
     building: Option<Building<P>>,
     ready: Option<Collage>,
     /// Per-photo Fill/Fit choices from the menu, by curation key (SHA-1).
-    /// 024: loaded from and saved to `curation` by lib.rs; a photo with no
+    /// Loaded from and saved to `curation` by the host; a photo with no
     /// entry follows "Fill frame by default".
     overrides: HashMap<String, ScaleMode>,
     /// Earlier collages' plans, oldest first. Going back pops from here and
@@ -800,8 +802,8 @@ impl<P: VideoPlayer> Pipeline<P> {
         let hit = self
             .displayed()
             .and_then(|c| c.tiles.iter().position(|t| t.rect.contains(x, y)));
-        // A tap on a separator selects the first tile, like the menu key's
-        // "first media of the page".
+        // A tap on a separator selects the first tile, as Frameo's menu
+        // key picks the first photo of the page.
         self.selected = Some(hit.unwrap_or(0));
         self.selected
     }
@@ -838,7 +840,7 @@ impl<P: VideoPlayer> Pipeline<P> {
             .map(|t| self.scale_mode(&t.meta.key))
     }
 
-    /// 027: the selected tile is a clip (no Fill/Fit for it, as in Frameo:
+    /// The selected tile is a clip (no Fill/Fit for it, as in Frameo:
     /// "'Fit to frame' / 'Fill frame' is not available for videos").
     pub fn shown_is_video(&self) -> bool {
         self.selected_tile().is_some_and(|t| t.video.is_some())
@@ -951,7 +953,7 @@ impl<P: VideoPlayer> Pipeline<P> {
     pub fn is_animating(&self) -> bool {
         self.is_transitioning()
             || (self.has_slide() && self.settings.ken_burns && !self.clock.paused())
-            // 027: a first frame on its way, or a clip playing (not paused).
+            // A first frame on its way, or a clip playing (not paused).
             || self.building.as_ref().is_some_and(|b| b.probe.is_some())
             || self.video.animating(self.video_paused())
     }
@@ -969,8 +971,8 @@ impl<P: VideoPlayer> Pipeline<P> {
         }
     }
 
-    /// 027: the video machinery's polling (video.rs), and the retry after
-    /// a GPU drop.
+    /// The video machinery's polling (video.rs), and the retry after a
+    /// GPU drop.
     fn video_deadline(&self) -> Option<Duration> {
         let gpu = self
             .gpu_retry_at
@@ -988,8 +990,8 @@ impl<P: VideoPlayer> Pipeline<P> {
         if !self.has_slide() || self.clock.paused() || self.skip.is_some() || self.menu_open {
             return None;
         }
-        // 027: a clip's slide ends with the clip; only "then wait" has a
-        // timer, started when it ended.
+        // A clip's slide ends with the clip; only "then wait" has a timer,
+        // started when it ended.
         if self.current.as_ref().is_some_and(|c| c.video().is_some())
             && !(self.video.done() && self.settings.video_playback == VideoPlayback::Wait)
         {
@@ -1023,8 +1025,8 @@ impl<P: VideoPlayer> Pipeline<P> {
     }
 
     /// Takes a newly parked plan and any tile for the one being built,
-    /// composing each tile as it lands. 027: a clip's tile waits for its
-    /// first frame (a probe player), polled here each frame.
+    /// composing each tile as it lands. A clip's tile waits for its first
+    /// frame (a probe player), polled here each frame.
     fn pull(&mut self, source: &dyn TileSource) {
         if let Some(plan) = source.take_plan() {
             // A new plan (a Prev request) during a GPU retry wait: that
@@ -1300,7 +1302,7 @@ impl<P: VideoPlayer> Pipeline<P> {
         let is_video = self.current.as_ref().is_some_and(|c| c.video().is_some());
         let due = self.skip.is_some()
             || if is_video {
-                // 027: a clip's slide ends with the clip (Continue, and Loop
+                // A clip's slide ends with the clip (Continue, and Loop
                 // once its last pass is over); "then wait" holds its last
                 // frame an interval more.
                 !self.menu_open
@@ -1359,11 +1361,11 @@ impl<P: VideoPlayer> Pipeline<P> {
         let sw = ((meta.width as f32 * s).round() as i32).max(1);
         let sh = ((meta.height as f32 * s).round() as i32).max(1);
         // The source already box-halves previews to within 2x of this
-        // size (fetch.rs `shrink_to_cover`), so this is normally one draw. If a
-        // photo ever arrives larger, one bilinear draw at 3-4x would skip
-        // texels and alias, so halve first (each halving draw averages 2x2
-        // texels) until the last step is under 2x. Every draw
-        // is flipped, which keeps the upload's orientation (row 0 = the
+        // size (source.rs `shrink_to_cover`), so this is normally one draw.
+        // If a photo ever arrives larger, one bilinear draw at 3-4x would
+        // skip texels and alias, so halve first (each halving draw averages
+        // 2x2 texels) until the last step is under 2x. Every draw is
+        // flipped, which keeps the upload's orientation (row 0 = the
         // photo's top), so the compose code treats `source` like photo_tex.
         let mut halvings: Vec<RenderTarget> = Vec::new();
         let (mut cur_tex, mut cw, mut ch) = (self.photo_tex, meta.width as i32, meta.height as i32);
@@ -1433,7 +1435,7 @@ impl<P: VideoPlayer> Pipeline<P> {
         })
     }
 
-    /// 027: a clip's tile, from the first frame on the probe's texture:
+    /// A clip's tile, from the first frame on the probe's texture:
     /// `source` gets the frame (cover-scaled, row 0 = top, like an uploaded
     /// photo), the blur chain runs on it once for the background, and the
     /// tile is composed as Fit over it. Fails like `make_tile`.
@@ -1559,7 +1561,7 @@ impl<P: VideoPlayer> Pipeline<P> {
         }
     }
 
-    /// 027: the clip on screen starts playing (its slide just became the
+    /// The clip on screen starts playing (its slide just became the
     /// current one).
     fn start_live(&mut self) {
         let cue = Self::live_cue(&self.current, &self.settings);
@@ -1639,7 +1641,7 @@ impl<P: VideoPlayer> Pipeline<P> {
     }
 
     fn start_transition(&mut self, incoming: Collage, backwards: bool) {
-        // Every tile's Ken Burns starts with the transition, as 020's slide did.
+        // Every tile's Ken Burns starts with the transition.
         let now = self.clock.now();
         let mut incoming = incoming;
         for t in incoming.tiles.iter_mut() {
@@ -1715,8 +1717,9 @@ impl<P: VideoPlayer> Pipeline<P> {
         }
     }
 
-    /// 020's slide composition, into a tile-sized `target` from `source`
-    /// (same orientation convention as `photo_tex`).
+    /// Composes a tile (Fill's crop, or Fit over a blurred or black
+    /// background) into its `target` from `source` (same orientation
+    /// convention as `photo_tex`).
     fn compose_tile(
         &self,
         source: GlUint,
@@ -1772,7 +1775,7 @@ impl<P: VideoPlayer> Pipeline<P> {
         }
     }
 
-    /// 020's blur chain, cover-cropped to the tile's aspect. The blur
+    /// Fit's blurred background, cover-cropped to the tile's aspect. The blur
     /// targets keep the screen's aspect; the tile draw stretches them back.
     fn run_blur_chain(&self, source: GlUint, photo_w: u32, photo_h: u32, tile_w: i32, tile_h: i32) {
         let [a, b] = &self.blur_targets;
@@ -1903,7 +1906,7 @@ impl<P: VideoPlayer> Pipeline<P> {
         let mut finished = false;
         match &self.state {
             State::Idle { .. } => unsafe {
-                // 027: the playing clip, over its static background
+                // The playing clip, over its static background
                 // (`live_frame` is None while `debug.video.show_still=1`
                 // asks for the composed still instead).
                 match (self.video.live_frame(), current.video()) {
@@ -1953,7 +1956,8 @@ impl<P: VideoPlayer> Pipeline<P> {
                 let ratio = self.screen_w as f32 / self.screen_h as f32;
                 let (from_tex, to_tex, from_kb, to_kb) =
                     if current.is_single() && incoming.is_single() {
-                        // 020's path: the slides themselves, each with its Ken Burns.
+                        // Two single photos: their tiles' targets, each
+                        // with its Ken Burns.
                         let (a, b) = (&current.tiles[0], &incoming.tiles[0]);
                         (
                             a.target.texture,

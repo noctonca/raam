@@ -1,10 +1,12 @@
-// LOCAL PATCH (experiment 018, immich-frame-rs): upstream's qwerty/colemak
-// layouts had no `-` or `_` key at all in either case - a real gap for this
-// project's server-URL and API-key fields (UUIDs and tokens routinely use
-// both). Added one `-` to each lowercase row 3 and one `_` to each uppercase
-// row 3, in the empty slot next to the existing `:`/`;`/trailing letter.
-// Everything else in this vendored copy is unmodified from crates.io
-// egui_keyboard 0.8.0 (github.com/podusowski/egui_keyboard, MIT).
+// LOCAL PATCH: upstream's qwerty/colemak layouts had no `-` or `_` key at
+// all in either case - a real gap for this project's server-URL and API-key
+// fields (UUIDs and tokens routinely use both). Added one `-` to each
+// lowercase row 3 and one `_` to each uppercase row 3, in the empty slot
+// next to the existing `:`/`;`/trailing letter. Everything else in this
+// file (and in README.md and clipboard.rs) is unmodified from crates.io
+// egui_keyboard 0.8.0 (github.com/podusowski/egui_keyboard, MIT); lib.rs
+// and Cargo.toml carry more local changes, marked LOCAL PATCH, LOCAL
+// ADDITION or LOCAL CHANGE.
 
 use super::Key;
 

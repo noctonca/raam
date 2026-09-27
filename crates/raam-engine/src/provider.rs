@@ -49,8 +49,8 @@ pub trait Provider {
 
 pub struct ImmichProvider {
     client: Option<immich::Client>,
-    /// 025: the picked albums that are on the server, set by the library
-    /// thread before each `list()`.
+    /// The picked albums that are on the server, set by the library thread
+    /// before each `list()`.
     albums: Vec<String>,
 }
 
@@ -369,8 +369,8 @@ fn is_video_name(path: &str) -> bool {
     VIDEO_EXTENSIONS.iter().any(|e| p.ends_with(e))
 }
 
-/// 027: a clip in the folder: its SHA-1 (curation key, and the match with
-/// an Immich original), its size as shown (after the container's rotation)
+/// A clip in the folder: its SHA-1 (curation key, and the match with an
+/// Immich original), its size as shown (after the container's rotation)
 /// and whether this frame can decode it at all. Undecodable clips are
 /// skipped here, so they never reach the queue.
 fn describe_video(
@@ -407,10 +407,10 @@ fn describe_video(
     })
 }
 
-/// 027: clips the folder also takes (only H.264 plays; see `describe_video`).
+/// Clips the folder also takes (only H.264 plays; see `describe_video`).
 const VIDEO_EXTENSIONS: [&str; 4] = [".mp4", ".m4v", ".mov", ".3gp"];
 
-/// Every .jpg/.jpeg (and, 027, clip) under `dir` (recursively, skipping
+/// Every .jpg/.jpeg (and clip) under `dir` (recursively, skipping
 /// dot-files) with its (bytes, mtime ms).
 fn list_jpegs(dir: &Path, out: &mut Vec<(String, (i64, i64))>) -> std::io::Result<()> {
     for e in std::fs::read_dir(dir)? {
@@ -490,8 +490,8 @@ fn make_preview(path: &Path, short_side: u32) -> Result<Preview, String> {
     })
 }
 
-/// The eight EXIF orientations applied to raw RGB rows (what the `image`
-/// crate did for us; forty lines beat its whole dependency tree).
+/// The eight EXIF orientations applied to raw RGB rows (forty lines beat
+/// the `image` crate's whole dependency tree).
 fn apply_orientation(orientation: u8, w: u32, h: u32, rgb: Vec<u8>) -> (u32, u32, Vec<u8>) {
     if orientation <= 1 || orientation > 8 {
         return (w, h, rgb);

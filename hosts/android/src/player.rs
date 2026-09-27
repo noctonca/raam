@@ -1,6 +1,6 @@
-//! 027: one clip's playback. 006's decode threads (MediaCodec video onto a
-//! surface, AAC to PCM for OpenSL ES) and 011's SurfaceTexture bridge,
-//! reorganised around what the slideshow needs:
+//! One clip's playback: the decode threads (MediaCodec video onto a
+//! surface, AAC to PCM for OpenSL ES) and the SurfaceTexture bridge,
+//! organised around what the slideshow needs:
 //!
 //! - **Frame 0 first, then wait.** The video thread renders the first frame
 //!   at once and waits for `play`. The render thread latches it, which is
@@ -40,8 +40,8 @@ use std::time::Duration;
 
 /// A frame later than this is dropped rather than shown late.
 use raam_model::limits::DROP_LATE_US;
-/// About 200 ms of 44.1 kHz stereo PCM per enqueue (006: the HAL has a
-/// fixed cost per `Enqueue`).
+/// About 200 ms of 44.1 kHz stereo PCM per enqueue, so `Enqueue` runs a
+/// few times a second rather than once per decoded buffer.
 use raam_model::limits::PCM_BATCH_BYTES;
 
 static VM: OnceLock<JavaVM> = OnceLock::new();
@@ -127,11 +127,11 @@ struct Ctl {
     /// so far, plus the running stretch.
     clock_acc_us: i64,
     clock_since: Option<Duration>,
-    /// Follow-up: with sound, the clock doesn't run on `play` (or on a
-    /// resume) but when OpenSL ES's position first moves, i.e. when the
-    /// first sample has really left the mixer; the audio thread then sets
-    /// it to that position less the output latency. Until then the
-    /// picture holds. Gives up after `ALIGN_TIMEOUT`.
+    /// With sound, the clock doesn't run on `play` (or on a resume) but
+    /// when OpenSL ES's position first moves, i.e. when the first sample
+    /// has really left the mixer; the audio thread then sets it to that
+    /// position less the output latency. Until then the picture holds.
+    /// Gives up after `ALIGN_TIMEOUT`.
     align: bool,
     align_since: Option<Duration>,
 }
@@ -638,7 +638,7 @@ const IDENTITY4: [f32; 16] = [
     0.0, 0.0, 0.0, 1.0,
 ];
 
-// ---- the decode threads (006/011's loops) ------------------------------------
+// ---- the decode threads ----------------------------------------------------
 
 fn video_thread(path: &str, window: NativeWindow, sh: &Shared) -> Result<(), PlayerError> {
     let t0 = clock::now();
@@ -925,9 +925,9 @@ fn video_thread(path: &str, window: NativeWindow, sh: &Shared) -> Result<(), Pla
 }
 
 fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
-    // Follow-up: THREAD_PRIORITY_AUDIO (-16), so decoding the sound keeps up
-    // while a 1080p clip and the render loop load the CPU. Android lets an
-    // app raise its own threads' priority this far (RLIMIT_NICE).
+    // THREAD_PRIORITY_AUDIO (-16), so decoding the sound keeps up while a
+    // 1080p clip and the render loop load the CPU. Android lets an app
+    // raise its own threads' priority this far (RLIMIT_NICE).
     let prio = unsafe { libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, -16) };
     log::info!(
         "{}: audio thread priority -16: {}",
@@ -1089,7 +1089,7 @@ fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
                 Ok(DequeuedOutputBufferInfoResult::Buffer(output)) => {
                     let info = *output.info();
                     let eos = info.flags() & (ndk_sys::AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) != 0;
-                    // 006: buffer() is the whole allocation; the PCM is
+                    // buffer() is the whole allocation; the PCM is
                     // [offset, offset + size).
                     let off = info.offset().max(0) as usize;
                     let sz = info.size().max(0) as usize;

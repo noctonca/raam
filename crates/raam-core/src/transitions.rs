@@ -1,4 +1,4 @@
-//! Ported gl-transitions (https://github.com/gl-transitions/gl-transitions)
+//! Ported gl-transitions (<https://github.com/gl-transitions/gl-transitions>)
 //! shaders, adapted to this project's raw GLES2 pipeline. gl-transitions
 //! itself only defines the *body* of each effect - `vec4 transition(vec2
 //! uv)` plus whatever extra uniforms that effect declares - and assumes a
@@ -19,33 +19,37 @@ use std::ffi::c_void;
 /// FBO texture; the transition pass just blends two already-composited
 /// full-frame textures).
 // vUV flips the V axis (1.0 - aUV.y) rather than passing aUV straight
-// through - `from`/`to` are always the *composed slide* RenderTargets
-// (never a directly-uploaded texture), and compositing a slide is itself
-// one GL render-to-texture pass. Every render-to-texture hop toggles which
-// v value ends up at the "top" of the content relative to the v=0-is-top
-// convention this codebase uses for directly-uploaded JPEG textures (see
-// 008's `gl.rs`/`lib.rs` doc comments); slides go through exactly one such
-// hop (compose_slide), an odd count, so reading them back needs exactly one
-// compensating flip. See EXPERIMENTS.md 014 for how this was found (the
-// first real screenshot came back upside-down) and the on-screen blit in
-// `lib.rs`'s `draw_frame` Idle arm needs the identical correction.
+// through - `from`/`to` are always RenderTargets (a tile's composed
+// `target`, or a scratch target a collage was drawn into), never a
+// directly-uploaded texture, and composing a tile is itself one GL
+// render-to-texture pass. Every render-to-texture hop toggles which v
+// value ends up at the "top" of the content relative to the v=0-is-top
+// convention this codebase uses for directly-uploaded JPEG textures
+// (chosen so decoded rows go up as they are, with no CPU-side flip); a
+// tile goes through exactly one such hop (slideshow.rs `compose_tile`),
+// an odd count, so reading it back needs exactly one compensating flip.
+// Found on the frame: without it the first screenshot came back
+// upside-down, because GL writes NDC y=-1 (the bottom of whatever is
+// drawn) to texel row 0 of an FBO's texture, the opposite of the upload
+// convention. slideshow.rs's on-screen `draw_collage` needs the identical
+// correction (`with_v_flip`).
 pub const VS_SRC: &str = "attribute vec2 aPos; attribute vec2 aUV; varying vec2 vUV; \
      void main() { vUV = vec2(aUV.x, 1.0 - aUV.y); gl_Position = vec4(aPos, 0.0, 1.0); }";
 
 // uFromScale/uFromOffset/uToScale/uToOffset carry each slide's own
-// independent Ken Burns pan/zoom window (experiment 015) - applied at the
-// sampling boundary inside getFromColor/getToColor rather than to `vUV`
-// itself, so every transition body above keeps working completely
-// unmodified: cube/crosswarp/swap already distort the `uv` argument they
-// pass into these two helpers (that distortion IS the transition effect),
-// and this composes Ken Burns on top of whatever distorted coordinate each
-// shader computes, exactly the way it would compose on top of an
-// undistorted straight sample for `fade`/`directionalwipe`. `vUV` (and thus
-// every `uv` derived from it) is already in the fixed-V-flip space this
-// file's own `VS_SRC` applies, so no further flip composition is needed
-// here - see `lib.rs`'s `draw_frame` for the one call site that *does* need
-// to compose Ken Burns with that flip by hand (it has no vertex-shader
-// stage of its own to bake the flip into).
+// independent Ken Burns pan/zoom window - applied at the sampling
+// boundary inside getFromColor/getToColor rather than to `vUV` itself, so
+// every transition body above keeps working completely unmodified:
+// cube/crosswarp/swap already distort the `uv` argument they pass into
+// these two helpers (that distortion IS the transition effect), and this
+// composes Ken Burns on top of whatever distorted coordinate each shader
+// computes, exactly the way it would compose on top of an undistorted
+// straight sample for `fade`/`directionalwipe`. `vUV` (and thus every
+// `uv` derived from it) is already in the fixed-V-flip space this file's
+// own `VS_SRC` applies, so no further flip composition is needed here -
+// see slideshow.rs's `draw_collage` for the call site that *does* need to
+// compose Ken Burns with that flip by hand (`with_v_flip`: it draws
+// through the shared blit program, which has no flip of its own).
 const PREAMBLE: &str = "precision mediump float;\nvarying vec2 vUV;\n\
      uniform sampler2D from;\nuniform sampler2D to;\n\
      uniform float progress;\nuniform float ratio;\n\
@@ -162,16 +166,16 @@ vec4 transition(vec2 op) {
 }
 ";
 
-// --- pixelize.glsl was the original 4th pick and does NOT compile on this
-// device: its ARM Mali-400 GLSL ES 1.00 compiler rejects two of its globals
-// (`dist`, `squareSize`) for reading the `progress`/`steps` uniforms in
-// their *global-scope* initializers - "S0012: Global variable initializer
-// must be a constant expression". See EXPERIMENTS.md for the exact logcat
-// panic. That restriction is real GLES2/WebGL divergence, not a bug in this
-// port: gl-transitions targets browsers' WebGL1 contexts (ANGLE on most
-// desktops), which are more permissive here than this embedded driver.
-// Swapped for crosswarp.glsl per the experiment's own ground rule (swap
-// rather than force an incompatible shader to work).
+// --- pixelize.glsl does NOT compile on this device: its ARM Mali-400
+// GLSL ES 1.00 compiler rejects two of its globals (`dist`, `squareSize`)
+// for reading the `progress`/`steps` uniforms in their *global-scope*
+// initializers - "S0012: Global variable initializer must be a constant
+// expression", the driver's log as `link_program`'s panic prints it to
+// logcat, labelled with the transition's name. That restriction is real
+// GLES2/WebGL divergence, not a bug in this port: gl-transitions targets
+// browsers' WebGL1 contexts (ANGLE on most desktops), which are more
+// permissive here than this embedded driver. crosswarp.glsl takes its
+// place, rather than forcing an incompatible shader to work.
 
 // --- crosswarp.glsl --- Author: Eke Péter <peterekepeter@gmail.com> --- License: MIT ---
 // A warped cross-dissolve: the wipe front is offset by each pixel's own x
@@ -260,8 +264,7 @@ vec4 transition (vec2 p) {
 /// needs to drive every frame (`progress`) and the ones it only needs to
 /// set once at creation (texture units, the effect's own tunables, at their
 /// gl-transitions-documented defaults, kept fixed rather than exposed as
-/// experiment controls - the point here is proving the port, not tuning
-/// each effect's feel).
+/// settings - each effect runs as upstream designed it, untuned).
 pub struct TransitionProgram {
     pub name: &'static str,
     program: GlUint,
@@ -334,9 +337,9 @@ impl TransitionProgram {
     /// bound, sampling `from_tex`/`to_tex` (each a full-screen composited
     /// slide) at the given `progress` (0.0-1.0) and screen `ratio`.
     /// `from_kb`/`to_kb` are each slide's own independent Ken Burns
-    /// (scale, offset) UV-window transform (experiment 015) - the outgoing
-    /// slide keeps animating on its own clock right up until this draw
-    /// finishes it off, it does not freeze the moment the transition began.
+    /// (scale, offset) UV-window transform - the outgoing slide keeps
+    /// animating on its own clock right up until this draw finishes it
+    /// off, it does not freeze the moment the transition began.
     #[allow(clippy::too_many_arguments)]
     ///
     /// # Safety

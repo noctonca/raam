@@ -2,8 +2,8 @@
 //! The controller compares rows to decide when settings are dirty and
 //! hands the same rows out in its save effect; raam-engine's writer puts
 //! them in the `setting` table, and other hosts keep them wherever they
-//! can (localStorage on the web). Moved from the engine's db.rs at
-//! migration step 5b so the dirty check needs no engine.
+//! can (localStorage on the web). The rows are built here, not in the
+//! engine, so the dirty check needs no engine.
 
 use raam_model::{ClockStyle, Corner, FitBackground, GapColour, Settings, TransitionChoice};
 

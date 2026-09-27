@@ -35,6 +35,7 @@ pub struct Paths {
     /// otherwise ("/sdcard/Pictures/Frame" on the frame).
     pub local_dir_default: String,
     /// The curation JSON export, next to the folder, not in it, so it is
-    /// never scanned. Also the fresh-start import (migration step 5).
+    /// never scanned. Also where a fresh install imports curation from
+    /// (`db::import_curation`).
     pub curation_export: PathBuf,
 }

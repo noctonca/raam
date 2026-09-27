@@ -120,7 +120,9 @@ impl Live {
         let controller = App::new(state, || None);
         let pipeline = unsafe { Pipeline::new(w, h, DENSITY_DPI, settings, NoVideo, || None) };
         let mut painter = unsafe { Painter::new() };
-        // The theme's text mode is the shader boost (026's probe).
+        // The theme's text mode is the shader boost, chosen on the frame:
+        // right for light and dark text alike, and a theme switch never
+        // rebuilds the font atlas.
         painter.text_boost = true;
         let overlay = unsafe { ClockOverlay::new() };
         let now = clock::now();

@@ -1,24 +1,24 @@
-//! The fetch thread: 021's collage planner, fed since 024 from the DB
-//! instead of a live album list. Every photo from the enabled sources (the
-//! Immich Favorites album and the local folder, library.rs) goes into one
-//! merged queue, so each source shows in proportion to its size. Pixels come
-//! from the local preview, the Immich cache, or (online, uncached) the
-//! server, which also caches them; offline, only cached Immich photos are
-//! queued. The shuffle is seeded and the seed plus the shown photo are saved
-//! in `playback`, so a relaunch (the wake alarm) resumes where it was.
+//! The fetch thread: the collage planner, fed from the DB. Every photo from
+//! the enabled sources (the Immich albums picked in settings and the local
+//! folder, library.rs) goes into one merged queue, so each source shows in
+//! proportion to its size. Pixels come from the local preview, the Immich
+//! cache, or (online, uncached) the server, which also caches them;
+//! offline, only cached Immich photos are queued. The shuffle is seeded and
+//! the seed plus the shown photo are saved in `playback`, so a relaunch
+//! (the wake alarm) resumes where it was.
 //!
 //! The queue is a shuffled list that is walked like Frameo walks its
 //! ordered media list: the next group is planned from the assets' oriented
 //! `width`/`height` (Immich already swaps them for EXIF rotation), using
 //! `collage::pick`, before any pixels are fetched. The plan is parked for
 //! the render thread, then its previews are fetched and handed over one
-//! tile at a time, so at most one decoded preview is in memory at once, as
-//! in 020. Prev asks for an earlier plan by its asset ids through a request
-//! slot; an `AndroidAppWaker` wakes the render loop whenever something lands.
+//! tile at a time, so at most one decoded preview is in memory at once.
+//! Prev asks for an earlier plan by its asset ids through a request slot;
+//! the host's `Waker` wakes the render loop whenever something lands.
 //!
-//! Step 3: the render thread reaches all this only through the `TileSource`
-//! seam (source.rs), which `FetchShared` implements; the seam's types
-//! (`Plan`, `MediaItem`, `Photo`, `TilePhoto`) live there too.
+//! The render thread reaches all this only through the core's `TileSource`
+//! seam (raam-core source.rs), which `FetchShared` implements; the seam's
+//! types (`Plan`, `MediaItem`, `Photo`, `TilePhoto`) live in raam-model.
 use crate::Host;
 use crate::db;
 use crate::library::{self, Library};
@@ -59,7 +59,7 @@ pub struct FetchShared {
     slot: Mutex<Slot>,
     /// The collage max setting (1 = off), read at each planning step.
     max_group: AtomicUsize,
-    /// 027: clips are passed over while the render thread backs off after
+    /// Clips are passed over while the render thread backs off after
     /// a decoder failure.
     skip_videos: AtomicBool,
 }
@@ -311,8 +311,8 @@ fn fetch_loop(shared: Arc<FetchShared>, host: Host, screen: Screen, lib: Arc<Lib
                 empty_logged = false;
                 let mut max = shared.max_group.load(Ordering::Relaxed).max(1);
                 let mut window = queue.peek(max.min(collage::LARGEST_LAYOUT));
-                // 027: backing off after a decoder failure: a clip at the
-                // front is passed over (the queue moves past it).
+                // Backing off after a decoder failure: a clip at the front
+                // is passed over (the queue moves past it).
                 if shared.skip_videos.load(Ordering::Relaxed)
                     && queue.entries.iter().all(|e| e.video)
                 {
@@ -332,10 +332,9 @@ fn fetch_loop(shared: Arc<FetchShared>, host: Host, screen: Screen, lib: Arc<Lib
                     std::thread::sleep(FETCH_SKIP_WAIT);
                     continue;
                 }
-                // 027: a clip is always shown alone, as Frameo shows it (its
-                // own page). A window starting with one is that clip; one
-                // further in ends the window before it, so it starts the
-                // next plan.
+                // A clip is always shown alone, as Frameo shows it (its own
+                // page). A window starting with one is that clip; one further
+                // in ends the window before it, so it starts the next plan.
                 match window.iter().position(|e| e.video) {
                     Some(0) => {
                         window.truncate(1);
@@ -602,7 +601,7 @@ fn load_photo(
 }
 
 /// Decodes a preview JPEG (RGB or grayscale) straight to the RGBA the GPU
-/// upload wants (what the `image` crate did for us).
+/// upload wants.
 fn decode_jpeg_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let mut dec = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
     let pixels = dec.decode().map_err(|err| format!("jpeg decode: {err}"))?;
@@ -621,7 +620,7 @@ fn decode_jpeg_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     Ok((w, h, rgba))
 }
 
-/// 027: a clip to play: the local file, the cached transcode, or (Immich,
+/// A clip to play: the local file, the cached transcode, or (Immich,
 /// online) the transcode downloaded now into the cache. Probed here, so the
 /// render thread gets its size as shown and a clip this frame can't decode
 /// never reaches it (it is marked, and left out of the queue from then on).

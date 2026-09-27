@@ -10,8 +10,9 @@ rust-version.workspace = true
 [dependencies]
 raam-model.workspace = true
 log.workspace = true
-# No default features (the register's end state): the theme ships its own
-# Roboto + Material Symbols subsets (-1.4 MB of default fonts).
+# No default features (as the dependency register in docs/ARCHITECTURE.md
+# has it): the theme ships its own Roboto + Material Symbols subsets
+# (-1.4 MB of default fonts).
 egui = { version = "=0.36.2", default-features = false }
 # The clock/weather overlay's glyph atlas rasterisation.
 fontdue = "0.9"

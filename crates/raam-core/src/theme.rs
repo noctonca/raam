@@ -1,4 +1,4 @@
-//! 026's design system, layer 1 and 2: Material 3 tokens, and one function
+//! The design system, layer 1 and 2: Material 3 tokens, and one function
 //! that writes them into egui's own `Style`/`Visuals` for both themes.
 //!
 //! Nothing here knows about a host or GL. Widgets never hold colours of
@@ -334,9 +334,10 @@ pub fn install_fonts(ctx: &Context) {
 // Tokens -> egui Style.
 // ---------------------------------------------------------------------------
 
-/// How text is made legible in each theme (026's probe; `Shader` won). egui's
-/// default gives dark and light different atlas curves, so switching rebuilds
-/// the font atlas. The other modes keep one atlas for both themes.
+/// How text is made legible in each theme (compared on the frame with the
+/// gallery's Probe page; `Shader` won). egui's default gives dark and light
+/// different atlas curves, so switching rebuilds the font atlas. The other
+/// modes keep one atlas for both themes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextMode {
     /// egui's defaults: dark `2c - c^2`, light raw coverage.
@@ -378,8 +379,8 @@ pub struct Options {
 }
 
 impl Default for Options {
-    /// What 026's probe settled on for the frame: the shader boost (one
-    /// atlas for both themes) with sub-pixel glyph binning.
+    /// Chosen on the frame: the shader boost (one atlas for both themes)
+    /// with sub-pixel glyph binning.
     fn default() -> Self {
         Self {
             text_mode: TextMode::Shader,

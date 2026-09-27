@@ -254,7 +254,8 @@ impl Live {
             self.lib.clone(),
         );
         let mut painter = unsafe { Painter::new() };
-        // The theme's text mode is the shader boost (026's probe).
+        // The theme's text mode is the shader boost
+        // (`theme::Options::default`).
         painter.text_boost = true;
         let overlay = unsafe { ClockOverlay::new() };
         let weather = weather::spawn(self.host.waker.clone());

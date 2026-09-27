@@ -1,10 +1,9 @@
-//! OpenSL ES audio output: 011's engine -> output mix -> buffer-queue player,
-//! reworked for a slideshow that plays many clips. 011 leaked every object
-//! for the process lifetime (one clip, then exit); here the engine and the
-//! output mix are made once and kept (OpenSL ES wants one engine per
-//! process), and each clip gets its own player, destroyed when the clip
-//! ends. The player also takes a volume, pauses, and reports how much it
-//! has played (the A/V drift measurement).
+//! OpenSL ES audio output: engine -> output mix -> buffer-queue player, for
+//! a slideshow that plays many clips. The engine and the output mix are
+//! made once and kept (OpenSL ES wants one engine per process), and each
+//! clip gets its own player, destroyed when the clip ends. The player also
+//! takes a volume, pauses, and reports how much it has played (the A/V
+//! drift measurement).
 use crate::sles;
 use std::ffi::c_void;
 use std::ptr;

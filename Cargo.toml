@@ -53,8 +53,8 @@ log = "0.4"
 # docs/ARCHITECTURE.md "The dependency register".
 
 # Profiles live at the workspace root only (Cargo ignores them in
-# members). 027's release shape: LTO earns its keep on the frame (binary
-# size and the GL/decode hot paths).
+# members). Release: LTO earns its keep on the frame (binary size and the
+# GL/decode hot paths).
 [profile.release]
 opt-level = 3
 lto = true

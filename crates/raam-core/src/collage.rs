@@ -19,7 +19,7 @@
 //!
 //! Left out: the 5- and 6-photo layouts (the setting stops at 4 here), the
 //! portrait-screen tables, and the one-video / one-greeting-per-group caps
-//! (videos only ever show their preview still in this pipeline).
+//! (a clip is always a slide of its own here, so no group holds one).
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
 pub enum Orientation {

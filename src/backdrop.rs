@@ -1,8 +1,9 @@
-//! A stand-in for the slideshow under the preset pages (026's step 2.4),
-//! until this host adopts the whole pipeline (migration step 8): the
-//! core's gl-transitions shaders between two generated full-screen
-//! textures, looping the progress without pause, so every frame is a
-//! transition frame - the frame's heaviest case under the chrome.
+//! A stand-in for the slideshow under the preset host's menu pages (the
+//! live mode draws the real pipeline): the core's gl-transitions shaders
+//! between two generated full-screen textures. `--backdrop still` holds
+//! the first; a transition name loops the progress without pause, so
+//! every frame is a transition frame - the frame's heaviest case under
+//! the chrome.
 use raam_core::gl::*;
 use raam_core::transitions::TransitionProgram;
 use std::ffi::c_void;
@@ -20,11 +21,12 @@ pub struct Backdrop {
 
 impl Backdrop {
     /// Needs a current GL context. `w`×`h` is the screen, so the textures
-    /// sample 1:1 like 025's composed slides.
+    /// sample 1:1 like the pipeline's composed slides.
     pub unsafe fn new(w: i32, h: i32) -> Self {
         unsafe {
             let progs = TransitionProgram::all();
-            // Fullscreen quad: aPos (x, y), aUV (u, v), as 025 lays it out.
+            // Fullscreen quad: aPos (x, y), aUV (u, v) per vertex, as the
+            // transition programs read it.
             let quad: [f32; 16] = [
                 -1.0, -1.0, 0.0, 0.0, 1.0, -1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 0.0, 1.0,
             ];
@@ -78,7 +80,8 @@ impl Backdrop {
                 kb,
             );
             // The program's attribute slots aren't known here; clear them
-            // all so the painter's arrays start clean (as 019's loop does).
+            // all so the painter's arrays start clean (as the live host
+            // does after the pipeline's draw).
             for i in 0..8 {
                 glDisableVertexAttribArray(i);
             }

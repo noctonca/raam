@@ -2,7 +2,7 @@
 //! (ipwho.is, falling back to ipapi.co; both keyless HTTPS), then polls
 //! Open-Meteo's current conditions every 15 minutes. Never touches the
 //! render thread: results land in a mutex, a version counter bumps, and the
-//! `AndroidAppWaker` wakes the loop so the overlay rebuilds its text.
+//! host's `Waker` wakes the loop so the overlay rebuilds its text.
 //!
 //! Privacy: the IP lookup necessarily sends the frame's public IP to the geo
 //! service; only the city is logged, never the IP or the coordinates.

@@ -6,8 +6,8 @@
 //!   runs it, on the engine, with no video player. The mouse is a finger.
 //! - **The preset host** (`--page`; preset.rs): the widget gallery and
 //!   every frame_ui screen by name, over a stand-in for the slideshow, so
-//!   theme, kit and screen changes are iterated and QA'd on the Mac
-//!   before the frame.
+//!   theme, kit and screen changes are iterated and QA'd on the
+//!   desktop before the frame.
 //!
 //! The slideshow's options:
 //! - `--data <dir>`: the DB and caches (default: the app-data dir,

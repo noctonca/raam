@@ -1,4 +1,4 @@
-//! 026's design system, layer 3: the M3 components egui doesn't have, built
+//! The design system, layer 3: the M3 components egui doesn't have, built
 //! from egui's own parts (allocate + `Response` + painter), so hit-testing,
 //! focus, disabled state and layout stay egui's. Colours only ever come from
 //! `theme::scheme(ui)`.
@@ -833,8 +833,8 @@ impl<'a> TextField<'a> {
             field.bottom()
         };
         mark_visual(ui, whole, Rangef::new(field.top(), bottom));
-        // The TextEdit's id derives from this control's own id (the
-        // segmented-button lesson).
+        // The TextEdit's id derives from this control's own id, so two
+        // fields in one Ui can't share ids (see `segmented`).
         let id = whole_resp.id.with("edit");
         let had_focus = ui.memory(|m| m.has_focus(id));
 
@@ -859,7 +859,7 @@ impl<'a> TextField<'a> {
         };
         // `place`, not `put`: `put` moves the cursor back to just under the
         // field, and the next widget in a vertical layout then covered the
-        // supporting line (step 2.6's server page).
+        // supporting line (seen on the Server page).
         let resp = ui.place(
             field,
             TextEdit::singleline(self.text)
@@ -1025,7 +1025,7 @@ pub struct ListItem<'a> {
     pub headline: &'a str,
     pub supporting: Option<&'a str>,
     pub trailing: Trailing<'a>,
-    /// The supporting text is a warning (025's "not on the server any
+    /// The supporting text is a warning (an album "not on the server any
     /// more"), in the warning role rather than on-surface-variant.
     pub warn: bool,
 }
@@ -1408,8 +1408,8 @@ pub fn segmented(ui: &mut Ui, selected: &mut usize, options: &[&str], seg_w: f32
     let s = scheme(ui);
     let n = options.len();
     // The segments' ids derive from the whole control's own id, so two
-    // segmented buttons in one Ui can't share ids (026: they did, and egui
-    // routed the first control's taps to the second).
+    // segmented buttons in one Ui can't share ids (with shared ids, egui
+    // routes the first control's taps to the second).
     let (rect, whole) = ui.allocate_exact_size(vec2(seg_w * n as f32, size::TOUCH), Sense::hover());
     mark_visual(ui, rect, rect.y_range());
     let mut changed = false;
@@ -1551,7 +1551,7 @@ pub enum Tone {
     Error,
 }
 
-/// An inline note in a container colour (025's "missing album" amber). It
+/// An inline note in a container colour (a missing album's amber). It
 /// hugs its text, up to the content width: the container on the container
 /// edge, the icon on the content edge and the text on the text edge, like
 /// the row above it. One line is 48 tall (12 around the 24 icon).
@@ -2024,7 +2024,7 @@ pub fn time_picker(ui: &mut Ui, minutes: &mut u32, step: u32) -> bool {
     changed
 }
 
-/// Minutes after midnight as HH:MM (025's `schedule::fmt_hm`).
+/// Minutes after midnight as HH:MM (as `schedule::fmt_hm` writes them).
 pub fn fmt_hm(min: u32) -> String {
     format!("{:02}:{:02}", min / 60, min % 60)
 }

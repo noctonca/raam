@@ -1,13 +1,13 @@
-//! 016/018's GLES2 egui painter. Changes for sharing a GL context with the
-//! slideshow: it sets its own viewport and active texture unit instead of
-//! assuming them, and disables the vertex attribute arrays it enabled when
-//! done - a left-enabled `aColor` array still pointing at egui's dynamic VBO
-//! is an out-of-bounds read waiting to happen once the slideshow's
-//! 2-attribute programs draw next. Painting is split into `upload` (one
-//! VBO/IBO for the whole frame) and `draw`, so an unchanged overlay can be
-//! redrawn over a moving slideshow without re-running egui.
+//! The GLES2 egui painter. It shares a GL context with the slideshow, so
+//! it sets its own viewport and active texture unit instead of assuming
+//! them, and disables the vertex attribute arrays it enabled when done - a
+//! left-enabled `aColor` array still pointing at egui's dynamic VBO is an
+//! out-of-bounds read waiting to happen once the slideshow's 2-attribute
+//! programs draw next. Painting is split into `upload` (one VBO/IBO for
+//! the whole frame) and `draw`, so an unchanged overlay can be redrawn
+//! over a moving slideshow without re-running egui.
 //!
-//! 026 added two things:
+//! Two more things:
 //! - `pixels_per_point`: egui's meshes and clip rects are in points, so the
 //!   screen size uniform is in points and scissors are scaled to pixels.
 //! - A text boost in the shader. The font atlas keeps raw coverage in both

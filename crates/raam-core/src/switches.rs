@@ -1,5 +1,5 @@
-//! Test-only switches the host snapshots once per loop pass — the start of
-//! Raam's `DebugSwitches` seam: fault injection (`debug.video.fail`) and
+//! Test-only switches (the `DebugSwitches` seam, seams.rs) the host
+//! snapshots once per loop pass: fault injection (`debug.video.fail`) and
 //! the two video holds. The sites that act on them (gl.rs, video.rs, the
 //! Android player) read the flags and never the Android property, so they
 //! stay portable.
@@ -22,7 +22,7 @@ pub enum Fail {
     /// `open`: opening a player fails at once, as a failed SurfaceTexture
     /// setup does (the Android host's video.rs).
     Open,
-    /// `panic`: panic right after startup (lib.rs).
+    /// `panic`: panic right after startup (the Android host's lib.rs).
     Panic,
 }
 

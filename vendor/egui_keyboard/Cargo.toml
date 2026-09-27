@@ -2,7 +2,7 @@
 name = "egui_keyboard"
 version = "0.8.0"
 repository = "https://github.com/podusowski/egui_keyboard"
-description = "virtual keyboard widget for egui (vendored + patched locally for experiment 018: added '-' and '_' to the qwerty layout, needed for Immich server URLs/API keys - upstream's layout has no hyphen/underscore key at all)"
+description = "virtual keyboard widget for egui (vendored + patched locally: added '-' and '_' to the qwerty layout, needed for Immich server URLs/API keys - upstream's layout has no hyphen/underscore key at all; the other local changes are marked LOCAL in the source)"
 authors = ["Piotr Podusowski <podusowski@gmail.com>"]
 license = "MIT"
 categories = ["gui"]
@@ -13,8 +13,8 @@ default = ["clipboard"]
 clipboard = ["dep:android_clipboard", "dep:arboard"]
 
 [dependencies]
-# LOCAL PATCH (experiment 026): no default features, so this crate doesn't
-# turn on egui's default_fonts (and the rest) in a build that has them off.
+# LOCAL PATCH: no default features, so this crate doesn't turn on egui's
+# default_fonts (and the rest) in a build that has them off.
 egui = { version = "0.36.0", default-features = false }
 
 [target.'cfg(target_os = "android")'.dependencies]

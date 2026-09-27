@@ -6,10 +6,10 @@
 //! as a failure. The slideshow composes and draws; a decoded picture
 //! reaches it only as a `ClipFrame`, an external texture and its transform.
 //!
-//! Proven on the frame's RK VPU in the lab's experiment 027. The Android
-//! host keeps the decoders themselves (MediaCodec, the SurfaceTexture
-//! bridge, OpenSL audio, the reaper thread); photo-only hosts use
-//! `NoVideo`.
+//! Tested on the frame's RK VPU, which decodes H.264 (up to 1920x1080 at
+//! 15 Mbit/s, rotated or not) and has no HEVC decoder. The Android host
+//! keeps the decoders themselves (MediaCodec, the SurfaceTexture bridge,
+//! OpenSL audio, the reaper thread); photo-only hosts use `NoVideo`.
 
 use crate::clock;
 use crate::gl::GlUint;

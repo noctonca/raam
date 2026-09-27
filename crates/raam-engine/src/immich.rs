@@ -34,7 +34,7 @@ pub struct RemoteAsset {
     pub height: u32,
     pub taken_at_ms: Option<i64>,
     /// `checksum`: base64 SHA-1 of the original file (checked on live
-    /// assets in the experiments, a video included), as lowercase hex.
+    /// assets, a video included), as lowercase hex.
     pub sha1_hex: Option<String>,
     pub is_video: bool,
 }
@@ -208,12 +208,12 @@ impl Client {
         Ok(n)
     }
 
-    /// `GET /api/faces?id=` (probed live in the experiments): each face's
-    /// bounding box in whatever resolution the ML pass used
-    /// (`imageWidth/Height`, per asset), so every centre is taken as a
-    /// fraction of that, and Frameo's rule turns them into the focus
-    /// (`Focus::from_faces`). `Err` only when the server couldn't be asked;
-    /// a photo with no faces gets the middle and no target.
+    /// `GET /api/faces?id=` (probed live): each face's bounding box in
+    /// whatever resolution the ML pass used (`imageWidth/Height`, per
+    /// asset), so every centre is taken as a fraction of that, and Frameo's
+    /// rule turns them into the focus (`Focus::from_faces`). `Err` only when
+    /// the server couldn't be asked; a photo with no faces gets the middle
+    /// and no target.
     pub fn faces(&self, id: &str) -> Result<Focus, ProviderError> {
         let faces = self.get_json(&format!("/api/faces?id={id}"))?;
         let mut found: Vec<(f32, (f32, f32))> = Vec::new();

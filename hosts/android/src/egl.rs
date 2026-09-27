@@ -1,6 +1,6 @@
-//! Raw EGL FFI: the host half of the experiments' gl.rs. The GLES2 half
-//! lives in raam-core (the cfg-selected GL layer); EGL — displays,
-//! surfaces, contexts — is window-system glue and stays with the host.
+//! Raw EGL FFI. The GLES2 bindings live in raam-core (the cfg-selected GL
+//! layer); EGL — displays, surfaces, contexts — is window-system glue and
+//! belongs to the host.
 use std::ffi::c_void;
 
 pub type EglDisplay = *mut c_void;

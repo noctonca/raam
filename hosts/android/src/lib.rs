@@ -5,7 +5,7 @@
 //! props. The product: applicationId io.github.noctonca.raam, the
 //! frame's home app.
 //!
-//! The product's behaviour lives in raam-core's App controller (step 5b):
+//! The product's behaviour lives in raam-core's App controller:
 //! each loop pass feeds it the lifecycle and touch events, calls
 //! `frame`, executes the effects it returns, and draws around it — the
 //! slideshow, the clock overlay, the egui chrome, the swap. Everything
@@ -180,7 +180,7 @@ fn run_effects(
                     f.set_max_group(max);
                 }
             }
-            // 027: the volume is the music stream's (see power.rs).
+            // The volume is the music stream's (see power.rs).
             Effect::SetMusicVolume(v) => {
                 if let Some(p) = power {
                     match p.set_music_volume(v) {
@@ -208,9 +208,9 @@ fn android_main(app: AndroidApp) {
     switches::set_fail(&props::prop("debug.video.fail"));
     // A panic on any thread ends the process. android-activity would catch
     // one in android_main and leave the process up with a frozen window and
-    // the worker threads running (seen at boot, 2026-09-26); as the home app,
-    // a dead process is started again by the system. `exit`, not `abort`:
-    // no crash dialog, and nothing waits on this process's state.
+    // the worker threads running (seen at boot); as the home app, a dead
+    // process is started again by the system. `exit`, not `abort`: no crash
+    // dialog, and nothing waits on this process's state.
     std::panic::set_hook(Box::new(|info| {
         let thread = std::thread::current();
         log::error!(
@@ -252,7 +252,7 @@ fn android_main(app: AndroidApp) {
         files_dir: files_dir.clone(),
         local_dir_default: "/sdcard/Pictures/Frame".to_string(),
         // Next to the folder, not in it, so it is never scanned. The same
-        // place the experiments exported to: a fresh install imports the
+        // place the prototype exported to: a fresh install imports the
         // curation that is already there.
         curation_export: std::path::PathBuf::from("/sdcard/Pictures/frame-curation.json"),
     };
@@ -295,7 +295,7 @@ fn android_main(app: AndroidApp) {
     let mut stats = Stats::default();
     let mut last_log = clock::now();
 
-    // 023: lifecycle and schedule plumbing.
+    // Lifecycle and schedule plumbing.
     let mut power = match power::Power::new(&app) {
         Ok(p) => Some(p),
         Err(e) => {
@@ -482,7 +482,9 @@ fn android_main(app: AndroidApp) {
                 lib.clone(),
             ));
             painter = Some(unsafe { Painter::new() });
-            // The theme's text mode is the shader boost (026's probe).
+            // The theme's text mode is the shader boost, chosen on the frame:
+            // right for light and dark text alike, and a theme switch never
+            // rebuilds the font atlas.
             painter.as_mut().unwrap().text_boost = true;
             clock_overlay = Some(unsafe { ClockOverlay::new() });
             weather = Some(weather::spawn(host.waker.clone()));
@@ -509,7 +511,7 @@ fn android_main(app: AndroidApp) {
             if let (Some(p), Some(o)) = (pipeline.as_mut(), overrides.take()) {
                 p.set_overrides(o);
             }
-            // Follow-up: the output latency the picture waits for.
+            // The output latency the picture waits for.
             if let (Some(p), Some(pw)) = (pipeline.as_mut(), power.as_ref()) {
                 match pw.output_latency_ms() {
                     Ok(ms) => {

@@ -1,16 +1,17 @@
 //! The always-on clock/date/weather overlay, in two styles (both measured
-//! from existing frames in 022; the lab's EXPERIMENTS.md has the
-//! provenance), each anchorable to any screen corner (step 6's
-//! style x corner split):
-//! - Simple: an 80sp bold clock, then "date  icon temp" at 40sp bold,
+//! from existing frame apps), each anchorable to any screen corner (style
+//! and corner are separate settings):
+//! - Simple: Frameo's clock, matched to stock Frameo on the frame within a
+//!   few px: an 80sp bold clock, then "date  icon temp" at 40sp bold,
 //!   white, soft dark shadow, no panel, 16dp padding.
-//! - Detailed: 012's widget - small date, big bold time, then
-//!   "icon place, temp" and a short description, warm cream.
+//! - Detailed: the ImmichFrame web client's widget - small date, big bold
+//!   time, then "icon place, temp" and a short description, warm cream.
 //!
-//! Text is 012's baked-blur shadow atlas, not egui, so a closed menu still
-//! never runs egui. Geometry is rebuilt into one persistent VBO only when
-//! the displayed text changes (a minute tick, a weather update, a setting);
-//! every other frame is just the bind plus 2 draw calls per atlas.
+//! Text is the baked-blur shadow atlas (atlas.rs), not egui, so a closed
+//! menu still never runs egui. Geometry is rebuilt into one persistent VBO
+//! only when the displayed text changes (a minute tick, a weather update,
+//! a setting); every other frame is just the bind plus 2 draw calls per
+//! atlas.
 use crate::atlas::{FontAtlas, Shadow};
 use crate::clock;
 use crate::gl::*;
@@ -21,8 +22,8 @@ use std::ffi::c_void;
 const ROBOTO_REGULAR: &[u8] = include_bytes!("../assets/Roboto-Regular.ttf");
 const ROBOTO_BOLD: &[u8] = include_bytes!("../assets/Roboto-Bold.ttf");
 
-/// What the overlay shows; lib.rs formats it from the local time and the
-/// weather thread's snapshot.
+/// What the overlay shows; the App controller (app.rs) formats it with
+/// `content` from the local time and the weather snapshot.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Content {
     pub time: String,
@@ -48,7 +49,7 @@ const WHITE: Rgba = (1.0, 1.0, 1.0, 1.0);
 /// The Simple style's soft shadow, #303030.
 const SIMPLE_SHADOW: Rgba = (0.19, 0.19, 0.19, 1.0);
 const SIMPLE_SHADOW_OFFSET: (f32, f32) = (0.0, 2.0);
-/// 012's tuned values: warm cream text, black shadow at 0.78, 3px offset.
+/// Tuned on the frame: warm cream text, black shadow at 0.78, 3px offset.
 const CREAM: Rgba = (0.96, 0.87, 0.70, 1.0);
 const DETAILED_SHADOW: Rgba = (0.0, 0.0, 0.0, 0.78);
 const DETAILED_SHADOW_OFFSET: (f32, f32) = (3.0, 3.0);

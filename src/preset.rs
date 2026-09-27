@@ -1,7 +1,7 @@
 //! The preset host (`--page`): the widget gallery and every frame_ui
 //! screen by name, drawn by the core's own GLES2 painter over a stand-in
 //! for the slideshow (backdrop.rs), so theme, kit and screen changes are
-//! iterated and QA'd on the Mac before the frame. Input is egui's own
+//! iterated and QA'd on the desktop before the frame. Input is egui's own
 //! from winit, plus the scripted taps, holds and scroll of the flags in
 //! main.rs, and `--screenshot` saves once egui is idle.
 use crate::{Args, Gl, PageArg, backdrop, save_png};
@@ -137,7 +137,7 @@ impl Preset {
             &gl.window,
             Some(gl.window.scale_factor() as f32),
             None,
-            // Not the Mac's 16384: the device leaves egui at its default,
+            // Not a desktop GPU's 16384: the device leaves egui at its default,
             // and the atlas's shape should match.
             None,
         ));
@@ -229,8 +229,8 @@ impl Preset {
                 _ => {}
             }
         }
-        // --hold: the Android host's events for a finger (its lib.rs,
-        // push_egui_touch), the lift once the hold is up.
+        // --hold: the events a finger becomes on the frame (raam-core's
+        // app.rs, push_egui_touch), the lift once the hold is up.
         if let Some((pos, hold)) = self.args.hold {
             // The synthetic finger owns the pointer: the real cursor over
             // the window would read as the finger jumping (a drag, a

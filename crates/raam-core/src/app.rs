@@ -1,7 +1,6 @@
-//! The App controller: the product's behaviour, extracted from the
-//! experiment's ~800-line `android_main` (migration step 5b). Events in,
-//! effects out: the host feeds lifecycle and touch events plus a few
-//! per-pass inputs; the controller routes input (tap-slop, menu
+//! The App controller: the product's behaviour, shared by every host.
+//! Events in, effects out: the host feeds lifecycle and touch events plus
+//! a few per-pass inputs; the controller routes input (tap-slop, menu
 //! open/close, auto-dismiss, undo-hide), runs the egui chrome, applies
 //! settings to the slideshow, drives the sleep/wake state machine,
 //! debounces settings saves, and computes the next wake deadline.
@@ -150,8 +149,7 @@ pub enum Effect {
     ClearCache,
     Rescan,
     SyncNow,
-    /// The fetch side's collage group size (was `set_max_group` host
-    /// wiring; an effect since step 5b).
+    /// The fetch side's collage group size.
     SetMaxGroup(usize),
     /// The music stream's volume, set when it changes while sound is on.
     SetMusicVolume(f32),
@@ -181,9 +179,10 @@ pub struct FrameOut {
     /// Hidden or not yet initialised: draw nothing, skip the swap.
     pub skip_draw: bool,
     /// The full-screen settings cover everything: the host skips the
-    /// slideshow and clock overlay draws under them (026's step 2.4
-    /// lever; a covered Mali-400 transition still costs 23-58 ms). The
-    /// overlay rebuild is still applied, so its text stays current.
+    /// slideshow and clock overlay draws under them (the Mali-400 has no
+    /// hidden-surface removal, so a covered transition still costs 23-58
+    /// ms a frame). The overlay rebuild is still applied, so its text
+    /// stays current.
     pub chrome_opaque: bool,
     /// Just came back from hidden: the host resets its frame stats.
     pub became_visible: bool,
@@ -411,7 +410,7 @@ impl App {
                 self.hidden_wakes = 0;
                 self.prev_in_sleep = None;
                 stage.slideshow.set_clock_paused(true);
-                // 027: a playing clip (and its sound) stops with it.
+                // A playing clip (and its sound) stops with it.
                 stage.slideshow.pause_video();
                 if self.overlay_open {
                     self.overlay_open = false;
@@ -544,7 +543,7 @@ impl App {
         }
 
         self.apply(stage.slideshow, &mut out.effects);
-        // 027: the volume is the music stream's, set when it changes while
+        // The volume is the music stream's, set when it changes while
         // sound is on (and once at start).
         let want_volume = self
             .state
@@ -792,8 +791,8 @@ impl App {
             // on nothing above it (the toolbar is an Area). The settings
             // draw as Panels IN the root layer, so there every tap would
             // read as outside: tap-to-dismiss is a menu-screen rule only
-            // (found on the frame at step 6; settings leave via Back or
-            // the idle timeout).
+            // (found on the frame; settings leave via Back or the idle
+            // timeout).
             let tapped_outside = menu_at_input
                 && presses.iter().any(|p| {
                     self.ctx
@@ -939,8 +938,10 @@ fn until_next_minute() -> Duration {
     Duration::from_secs(60) - into + Duration::from_millis(20)
 }
 
-/// 018's synthesis: mouse-style pointer events for buttons/sliders/keyboard
-/// plus real `Event::Touch` for `ScrollArea`'s touch-drag-to-scroll.
+/// A touch as egui events: mouse-style pointer events for
+/// buttons/sliders/keyboard plus real `Event::Touch` for `ScrollArea`'s
+/// touch-drag-to-scroll (egui pans a `ScrollArea` on a drag only once it
+/// has seen a real touch).
 fn push_egui_touch(
     t: &Touch,
     down: &mut bool,

@@ -2,9 +2,9 @@
 //! typed errors. No dependencies, no platform types, no I/O.
 //! Everything else depends on this; this depends on nothing.
 //!
-//! The experiments' three type-level dependency cycles all came from value
-//! types living in GPU and UI modules; this crate is what breaks them, so
-//! it exists from day one and stays a leaf forever (docs/ARCHITECTURE.md).
+//! Value types living in GPU and UI modules are what create type-level
+//! dependency cycles; keeping them here breaks those cycles, so this crate
+//! stays a leaf forever (docs/ARCHITECTURE.md).
 
 mod error;
 pub mod limits;

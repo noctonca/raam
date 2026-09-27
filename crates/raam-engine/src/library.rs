@@ -1,4 +1,4 @@
-//! 024: keeping the DB in step with the providers (provider.rs), on two
+//! Keeping the DB in step with the providers (provider.rs), on two
 //! threads.
 //!
 //! The library thread does the slow work, provider-agnostically:
@@ -21,14 +21,13 @@
 //! The fetch thread reads the DB directly; `generation` tells it when the
 //! set of showable photos changed.
 //!
-//! 025: the Immich provider plays the union of the albums picked in
-//! settings (`collection`), not the hard-coded Favorites. Picking an album
-//! syncs it 2 s later (so a run of taps is one sync); un-picking one drops
-//! its assets at once on the writer thread, offline too, unless another
-//! picked album holds them. Every sync first checks the key still reads the
-//! same Immich user: another server or user is another library, which
-//! starts over from the default album. Cached files are removed only after
-//! the DB lock is let go.
+//! The Immich provider plays the union of the albums picked in settings
+//! (`collection`). Picking an album syncs it 2 s later (so a run of taps is
+//! one sync); un-picking one drops its assets at once on the writer thread,
+//! offline too, unless another picked album holds them. Every sync first
+//! checks the key still reads the same Immich user: another server or user
+//! is another library, which starts over from the default album. Cached
+//! files are removed only after the DB lock is let go.
 use crate::db::{self, Db};
 use crate::immich;
 use crate::provider::{ImmichProvider, LocalFolder, Provider};
@@ -56,9 +55,9 @@ pub enum Cmd {
     SetSourceEnabled(SourceKind, bool),
     SetServer(immich::Config),
     ExportCuration,
-    /// 025: pick or un-pick an album (Immich album id).
+    /// Pick or un-pick an album (Immich album id).
     SelectAlbum(String, bool),
-    /// 027: the frame couldn't decode this clip (asset id, why).
+    /// The frame couldn't decode this clip (asset id, why).
     SetUnplayable(i64, String),
     // To the library thread.
     SetCap(u32),
@@ -67,7 +66,7 @@ pub enum Cmd {
     SyncNow,
     ServerChanged,
     Refresh,
-    /// 025: the pick changed; sync shortly.
+    /// The pick changed; sync shortly.
     AlbumsChanged,
 }
 
@@ -404,9 +403,8 @@ struct Loop {
 }
 
 fn library_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
-    // The fresh-start hand-over (docs/plan/migration.md): an empty curation
-    // table is seeded once from the lab frame's JSON export, if one is
-    // there.
+    // An empty curation table is seeded once from a curation export
+    // (Raam's own, or the prototype's), if one is there.
     match db::import_curation(&lib.db.lock().unwrap(), &lib.paths.curation_export) {
         Ok(0) => {}
         Ok(n) => {
@@ -619,7 +617,7 @@ fn handle(lib: &Library, st: &mut Loop, cmd: Cmd) {
                 .iter()
                 .flat_map(|id| db::drop_cached(&conn, *id))
                 .collect();
-            // 027: clips found unplayable are tried again after a clear (the
+            // Clips found unplayable are tried again after a clear (the
             // server may have transcoded them since).
             let _ = conn.execute(
                 "UPDATE asset SET playable = NULL, unplayable_reason = NULL
@@ -823,9 +821,9 @@ fn materialise_one(lib: &Library, st: &mut Loop) -> bool {
     let immich_on = lib.enabled(SourceKind::Immich) && lib.online();
     let next: Option<(i64, SourceKind, String, Option<String>, bool, bool)> = {
         let conn = lib.db.lock().unwrap();
-        // 027: an Immich clip's "preview" is its playback transcode; a
-        // local clip plays from where it is and needs nothing made. Photos
-        // first, then clips (bigger, and fewer).
+        // An Immich clip's "preview" is its playback transcode; a local
+        // clip plays from where it is and needs nothing made. Photos first,
+        // then clips (bigger, and fewer).
         let mut stmt = match conn.prepare(&format!(
             "SELECT a.id, s.kind, a.remote_id, a.location, a.faces_checked, a.kind = 'video'
              FROM asset a JOIN source s ON s.id = a.source_id
@@ -1047,11 +1045,11 @@ pub fn store_immich_preview(
     Ok(true)
 }
 
-/// 027: downloads an Immich clip (its playback transcode) into the cache,
-/// checks the frame's decoder can take it, and records it. `evict`: make
-/// room by evicting the least recently shown (on demand, for a clip about
-/// to play); without it (prefetch) a clip that would pass the cap isn't
-/// kept. Ok(None) = not kept (the cap). A clip that can't be played here is
+/// Downloads an Immich clip (its playback transcode) into the cache, checks
+/// the frame's decoder can take it, and records it. `evict`: make room by
+/// evicting the least recently shown (on demand, for a clip about to play);
+/// without it (prefetch) a clip that would pass the cap isn't kept.
+/// Ok(None) = not kept (the cap). A clip that can't be played here is
 /// marked so (out of the queue) and its file removed: an Err.
 pub fn fetch_immich_video(
     lib: &Library,

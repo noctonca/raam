@@ -1,12 +1,12 @@
-//! Raw GLES2 FFI: the GLES2 half of the experiments' gl.rs (the painter's
-//! and pipeline's whole GL surface), plus `RenderTarget`. This is the
-//! cfg-selected GL layer, one set of entry points over three linkages:
-//! extern GLES2 on Android; the same extern names on the desktop host
-//! (macOS/Linux GL exports them, and a cfg block below rewrites the GLSL
-//! ES 1.00 shaders to 1.50 for the core contexts glutin makes there); and
-//! on wasm32 the WebGL1 shim in gl/webgl.rs, which implements them over
-//! the canvas's context. The helpers below the entry points are one copy
-//! for all three. The EGL half lives with the Android host.
+//! Raw GLES2 FFI: the painter's and pipeline's whole GL surface, plus
+//! `RenderTarget`. This is the cfg-selected GL layer, one set of entry
+//! points over three linkages: extern GLES2 on Android; the same extern
+//! names on the desktop host (macOS/Linux GL exports them, and a cfg
+//! block below rewrites the GLSL ES 1.00 shaders to 1.50 for the core
+//! contexts glutin makes there); and on wasm32 the WebGL1 shim in
+//! gl/webgl.rs, which implements them over the canvas's context. The
+//! helpers below the entry points are one copy for all three. EGL lives
+//! with the Android host.
 use std::ffi::{CStr, c_char, c_void};
 
 pub type GlUint = u32;
@@ -51,15 +51,15 @@ pub const GL_BLEND: GlEnum = 0x0BE2;
 pub const GL_SCISSOR_TEST: GlEnum = 0x0C11;
 pub const GL_ONE: GlEnum = 1;
 pub const GL_ONE_MINUS_SRC_ALPHA: GlEnum = 0x0303;
-// 022: the clock overlay's single-channel shadow atlas (012).
+// The clock overlay's single-channel shadow atlas.
 pub const GL_SRC_ALPHA: GlEnum = 0x0302;
 pub const GL_ALPHA: GlEnum = 0x1906;
-// 027: decoded video frames (011's SurfaceTexture bridge).
+// Decoded video frames (the Android host's SurfaceTexture bridge).
 pub const GL_TEXTURE_EXTERNAL_OES: GlEnum = 0x8D65;
 pub const GL_INFO_LOG_LENGTH: GlEnum = 0x8B84;
 
 // The WebGL1 linkage: the same names and signatures, forwarded to the
-// canvas's context (the host makes it current with `webgl::init`).
+// canvas's context (the host makes it current with `webgl::make_current`).
 #[cfg(target_arch = "wasm32")]
 mod webgl;
 #[cfg(target_arch = "wasm32")]
@@ -354,7 +354,7 @@ pub unsafe fn gl_string(name: GlEnum) -> String {
 /// driver's own info log on failure - a bad shader is a build defect, not
 /// something to survive (TigerStyle: crash, don't limp). `label` is included in
 /// the panic message so a bad ported gl-transitions shader is identifiable
-/// immediately from logcat, since 014 links many more programs than 008 did.
+/// immediately from logcat among the many programs the pipeline links.
 ///
 /// # Safety
 /// Requires a current GL context.
@@ -436,9 +436,10 @@ pub unsafe fn uniform_loc(program: GlUint, name: &str) -> GlInt {
 
 /// A small offscreen render target: a texture plus the FBO that renders into
 /// it. NPOT-safe (CLAMP_TO_EDGE + non-mipmapped LINEAR filtering, matching
-/// GLES2's NPOT texture rules). Unlike 008 (which only ever used this at a
-/// tiny 128x80 blur working resolution), 014 also uses this at full screen
-/// resolution to hold each slide's fully-composited (blur+photo) texture.
+/// GLES2's NPOT texture rules). Used both at the tiny blur working
+/// resolution (`BLUR_WIDTH_PX` wide) and at up to full screen resolution,
+/// for each tile's `source` and composed `target` and a transition's
+/// scratch pair.
 pub struct RenderTarget {
     pub texture: GlUint,
     pub fbo: GlUint,
@@ -540,12 +541,12 @@ impl RenderTarget {
         }
     }
 
-    /// Frees the GPU-side texture+FBO. Used by 014's transition pipeline to
-    /// keep only one extra full-screen-resolution render target alive at a
-    /// time (created right as a transition starts, destroyed right after it
-    /// finishes) rather than permanently holding two - this device's own
-    /// near-zero `MemFree` headroom (004, 008) makes an extra ~4MB screen-
-    /// sized texture worth not paying for at rest.
+    /// Frees the GPU-side texture+FBO. The pipeline frees targets as soon
+    /// as it is done with them (a transition's scratch pair right after it
+    /// finishes, a collage's tiles when it leaves the screen) rather than
+    /// holding them at rest - the frame's thin `MemFree` headroom (under
+    /// 10 MB at its lowest, measured) makes every ~4MB screen-sized
+    /// texture worth not paying for.
     ///
     /// # Safety
     /// Requires a current GL context; the texture and FBO must not be bound or drawn after this.

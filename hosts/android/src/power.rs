@@ -1,5 +1,5 @@
-//! 023's screen power, through JNI against the NativeActivity (011's `jni`
-//! pattern; `android_main`'s thread is already attached by android-activity):
+//! Screen power, through JNI against the NativeActivity (`android_main`'s
+//! thread is already attached by android-activity):
 //! - the wake alarm: `AlarmManager.setExactAndAllowWhileIdle(RTC_WAKEUP, t,
 //!   PendingIntent.getActivity(<this activity>))`. The PendingIntent lives in
 //!   system_server, so it fires and relaunches us even if this process was
@@ -171,9 +171,9 @@ impl Power {
         })
     }
 
-    /// Follow-up: the music output's latency in ms, which OpenSL ES on API 23
-    /// doesn't report: `AudioManager.getOutputLatency(STREAM_MUSIC)`, @hide
-    /// but callable over JNI (hidden-API checks start at API 28). It is
+    /// The music output's latency in ms, which OpenSL ES on API 23 doesn't
+    /// report: `AudioManager.getOutputLatency(STREAM_MUSIC)`, @hide but
+    /// callable over JNI (hidden-API checks start at API 28). It is
     /// AudioFlinger's figure for the output (its HAL buffering).
     pub fn output_latency_ms(&self) -> JResult<i32> {
         self.with_env(|env, ctx| {

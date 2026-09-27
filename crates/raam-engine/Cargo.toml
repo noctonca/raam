@@ -23,7 +23,7 @@ ureq = { version = "3", features = ["json"] }
 # One JPEG decoder for previews and local photos; its 1/2-1/8 DCT-domain
 # scaling is why it's here (a 12 MP JPEG never decodes at full size).
 jpeg-decoder = { version = "0.3", default-features = false }
-# Dependency-free encoder for the q88 local previews (replaces `image`).
+# Dependency-free encoder for the q88 local previews (no `image` crate).
 jpeg-encoder = "0.6"
 # EXIF orientation + DateTimeOriginal; the edge cases are cheap insurance.
 kamadak-exif = "0.6"

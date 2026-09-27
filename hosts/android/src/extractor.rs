@@ -1,7 +1,7 @@
-//! 006/011's thin RAII wrapper around the raw `AMediaExtractor` NDK API (the
-//! `ndk` crate has no binding for it), plus 027's `probe`: what the slideshow
-//! needs to know about a clip before planning or playing it, and whether
-//! this frame's decoder can play it at all.
+//! A thin RAII wrapper around the raw `AMediaExtractor` NDK API (the `ndk`
+//! crate has no binding for it), plus `probe`: what the slideshow needs to
+//! know about a clip before planning or playing it, and whether this
+//! frame's decoder can play it at all.
 use ndk::media::media_format::MediaFormat;
 use raam_model::ClipInfo;
 use std::fmt;
@@ -44,7 +44,7 @@ unsafe impl Send for Extractor {}
 impl Extractor {
     /// Opens `path` with `AMediaExtractor_setDataSourceFd`, never the
     /// path-based call: on this device's libmediandk.so that one must run on
-    /// a Java thread and segfaults on a plain Rust thread (006).
+    /// a Java thread and segfaults on a plain Rust thread.
     pub fn open(path: &str) -> Result<Self, OpenError> {
         let file = File::open(path).map_err(|e| OpenError::File(format!("open {path}: {e}")))?;
         let len = file

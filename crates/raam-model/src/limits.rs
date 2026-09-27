@@ -9,8 +9,10 @@
 use core::time::Duration;
 
 // ---- memory budget (docs/ARCHITECTURE.md "Memory budget") ---------------
-// The design target is the measured envelope of the final experiment on
-// the real frame (lab repo, docs/raam-prep/memory-baseline.md).
+// The design target is the envelope measured on the frame over a few
+// minutes of slideshow (collages and transitions, menu closed), counting
+// PSS + Mali + the app's ion buffers, since PSS alone misses GPU and ion
+// memory.
 
 /// App total (PSS + GPU + window buffers), steady state. Measured ~67 MB.
 pub const APP_TOTAL_STEADY_MB: u32 = 80;
@@ -48,10 +50,10 @@ pub const SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
 
 // ---- slideshow pipeline ----------------------------------------------------
 
-/// Transition length. Chosen in the experiments; the measured 1.33-1.51 s
-/// on-frame includes compose overhead.
+/// Transition length. Chosen on the frame; the measured 1.33-1.51 s there
+/// includes compose overhead.
 pub const TRANSITION_DURATION: Duration = Duration::from_millis(1300);
-/// The blur working buffer's width, px. Chosen in experiment 008: the
+/// The blur working buffer's width, px. Chosen on the frame: the
 /// smallest that still looks like Frameo's background blur.
 pub const BLUR_WIDTH_PX: i32 = 128;
 /// How many shown collages Prev can walk back through. Chosen.
@@ -76,16 +78,16 @@ pub const DECODER_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DECODER_BACKOFF_BASE_SECS: u64 = 30;
 pub const DECODER_BACKOFF_CAP_SECS: u64 = 600;
 /// A live clip's frame 0 waits this long for its sound to pre-roll, then
-/// plays without it. Chosen in experiment 027.
+/// plays without it. Chosen on the frame.
 pub const AUDIO_PREROLL_WAIT: Duration = Duration::from_millis(1500);
 /// How often the loop looks again while a decoder's release is awaited:
-/// the host's reaper thread doesn't wake it. Chosen in experiment 027.
+/// the host's reaper thread doesn't wake it. Chosen on the frame.
 pub const DECODER_RELEASE_POLL: Duration = Duration::from_millis(100);
 
 // ---- the Android player's A/V clock ----------------------------------------
 
 /// A video frame this late against the media clock is dropped, not shown.
-/// Chosen in experiment 011.
+/// Chosen on the frame.
 pub const DROP_LATE_US: i64 = 60_000;
 /// PCM handed to the audio output per batch: 0.1 s of 44.1 kHz stereo
 /// s16 (hardware-derived).
@@ -93,7 +95,7 @@ pub const PCM_BATCH_BYTES: usize = 35_280;
 /// How long the video thread waits for audio's first batch before starting
 /// without it. Chosen.
 pub const AUDIO_ALIGN_TIMEOUT: Duration = Duration::from_millis(1000);
-/// OpenSL buffer-queue depth. Chosen in experiment 006.
+/// OpenSL buffer-queue depth. Chosen on the frame.
 pub const AUDIO_OUT_BUFFERS: u32 = 4;
 
 // ---- library (sync, cache) ---------------------------------------------------
@@ -120,7 +122,7 @@ pub const LRU_BATCH_ENFORCE: usize = 32;
 // ---- fetch thread (planning, tile handover) ---------------------------------
 
 /// Polling cadences of the fetch loop's slot handshake. Chosen; the fetch
-/// thread has no condvar (a step-5b candidate).
+/// thread has no condvar to wait on, so it polls.
 pub const FETCH_SLOT_POLL: Duration = Duration::from_millis(50);
 pub const FETCH_TILE_POLL: Duration = Duration::from_millis(20);
 pub const FETCH_EMPTY_WAIT: Duration = Duration::from_millis(500);

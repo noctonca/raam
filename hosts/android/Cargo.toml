@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 
 # Android dependencies stay under the target gate (with
 # #![cfg(target_os = "android")] in lib.rs) so `cargo check --workspace`
-# is green on any dev machine (the workspace check's option B).
+# is green on any dev machine.
 [target.'cfg(target_os = "android")'.dependencies]
 raam-model.workspace = true
 raam-core.workspace = true
@@ -26,8 +26,8 @@ ndk = { version = "0.9", features = ["media"] }
 ndk-sys = { version = "0.6", features = ["media"] }
 # 0.21, knowingly: 0.22 redesigned the whole API (Env/EnvUnowned, typed
 # GlobalRef, closure attach) and porting power/video_texture/player to it
-# is its own change, not part of the behaviour-identical move. Costs
-# ~56 KB of duplicate jni next to android-activity's 0.22.
+# is a change of its own. Costs ~56 KB of duplicate jni next to
+# android-activity's 0.22.
 jni = "0.21"
 # localtime_r, __system_property_get, setpriority.
 libc = "0.2"

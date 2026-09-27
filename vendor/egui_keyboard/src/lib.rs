@@ -35,21 +35,20 @@ pub struct Keyboard {
     /// Last rect where the keyboard was rendered.
     last_rect: Option<Rect>,
 
-    /// LOCAL ADDITION (experiment 026): labels for the shift, backspace and
-    /// Done keys; empty means upstream's "⏶" and "⏴", and "Done". A font
-    /// without the arrows (026's Roboto) draws them as "?".
+    /// LOCAL ADDITION: labels for the shift, backspace and Done keys; empty
+    /// means upstream's "⏶" and "⏴", and "Done". A font without the arrows
+    /// (Raam's Roboto) draws them as "?".
     shift_label: String,
     backspace_label: String,
     done_label: String,
-    /// LOCAL ADDITION (experiment 026): keycap colours; unset, they come
-    /// from the egui style.
+    /// LOCAL ADDITION: keycap colours; unset, they come from the egui style.
     colours: Option<KeyColours>,
-    /// LOCAL ADDITION (experiment 026): Done was tapped this frame, so the
-    /// focus must not be handed back to the field.
+    /// LOCAL ADDITION: Done was tapped this frame, so the focus must not be
+    /// handed back to the field.
     done: bool,
 }
 
-/// LOCAL ADDITION (experiment 026): the keycaps' colours and corner.
+/// LOCAL ADDITION: the keycaps' colours and corner.
 /// Upstream drew frameless buttons, so nothing showed where a key ended.
 #[derive(Clone, Copy, Debug)]
 pub struct KeyColours {
@@ -65,15 +64,15 @@ pub struct KeyColours {
     pub radius: u8,
 }
 
-/// LOCAL ADDITION (experiment 026): the key grid's geometry. Rows are 56
-/// tall (upstream: 50); keycaps are inset `KEY_GAP / 2` from their cells,
-/// and a cell is its key's target, so a tap in a gap still hits a key.
+/// LOCAL ADDITION: the key grid's geometry. Rows are 56 tall (upstream:
+/// 50); keycaps are inset `KEY_GAP / 2` from their cells, and a cell is its
+/// key's target, so a tap in a gap still hits a key.
 const ROW_H: f32 = 56.0;
 const KEY_GAP: f32 = 6.0;
-/// Fingers land high on the frame's panel (the owner's taps on backspace
-/// came 15 to 25 px above its glyph), so each row's target is moved this
-/// far above its keycaps. The top row's target stops at the keyboard's
-/// edge (48 px) and the bottom row's reaches the screen's (64 px).
+/// Fingers land high on the frame's panel (taps on backspace there came
+/// 15 to 25 px above its glyph), so each row's target is moved this far
+/// above its keycaps. The top row's target stops at the keyboard's edge
+/// (48 px) and the bottom row's reaches the screen's (64 px).
 const HIT_RAISE: f32 = 8.0;
 /// Shift and backspace are this many letter keys wide.
 const WIDE_KEY: f32 = 1.5;
@@ -100,8 +99,8 @@ impl Keyboard {
         ctx.input_mut(|input| input.events.extend(std::mem::take(&mut self.events)));
     }
 
-    /// LOCAL ADDITION (experiment 026): the shift, backspace and Done keys'
-    /// labels, e.g. icon-font characters.
+    /// LOCAL ADDITION: the shift, backspace and Done keys' labels, e.g.
+    /// icon-font characters.
     pub fn key_labels(
         mut self,
         shift: impl Into<String>,
@@ -114,8 +113,8 @@ impl Keyboard {
         self
     }
 
-    /// LOCAL ADDITION (experiment 026): the keycaps' colours; set them
-    /// every frame to follow a theme switch.
+    /// LOCAL ADDITION: the keycaps' colours; set them every frame to follow
+    /// a theme switch.
     pub fn set_colours(&mut self, colours: KeyColours) {
         self.colours = Some(colours);
     }
@@ -123,6 +122,13 @@ impl Keyboard {
     pub fn layout(mut self, layout: KeyboardLayout) -> Self {
         self.keyboard_layout = layout;
         self
+    }
+
+    /// LOCAL ADDITION: the exact rect the keyboard last rendered at, for
+    /// real touch-coordinate verification instead of guessing key positions
+    /// from a screenshot.
+    pub fn last_rect(&self) -> Option<Rect> {
+        self.last_rect
     }
 
     /// Area which is free from the keyboard. This is useful when you want to constrain a window to
@@ -140,13 +146,6 @@ impl Keyboard {
     ///   });
     /// # });
     /// ```
-    /// LOCAL ADDITION (experiment 018): the exact rect the keyboard last
-    /// rendered at, for real touch-coordinate verification instead of
-    /// guessing key positions from a screenshot.
-    pub fn last_rect(&self) -> Option<Rect> {
-        self.last_rect
-    }
-
     pub fn safe_rect(&self, ctx: &Context) -> Rect {
         let screen_rect = ctx.content_rect();
 
@@ -193,9 +192,8 @@ impl Keyboard {
                     #[cfg(feature = "clipboard")]
                     self.clipboard_key(ui);
 
-                    // LOCAL CHANGE (experiment 026): keycaps, drawn by
-                    // `grid` instead of a column of frameless buttons per
-                    // key.
+                    // LOCAL CHANGE: keycaps, drawn by `grid` instead of a
+                    // column of frameless buttons per key.
                     self.grid(ui, &keys, colours);
                 });
 
@@ -242,12 +240,12 @@ impl Keyboard {
         }
     }
 
-    /// LOCAL ADDITION (experiment 026): the keys as keycaps. Each row is
-    /// split into cells by key width (1, or `WIDE_KEY` for shift and
-    /// backspace); the bottom row, a lone space key upstream, is a space bar
-    /// over the middle five of ten key widths with Done over the last one.
-    /// A cell is its key's target (raised by `HIT_RAISE`); its keycap is the
-    /// cell inset by half of `KEY_GAP`.
+    /// LOCAL ADDITION: the keys as keycaps. Each row is split into cells by
+    /// key width (1, or `WIDE_KEY` for shift and backspace); the bottom row,
+    /// a lone space key upstream, is a space bar over the middle five of ten
+    /// key widths with Done over the last one. A cell is its key's target
+    /// (raised by `HIT_RAISE`); its keycap is the cell inset by half of
+    /// `KEY_GAP`.
     fn grid(&mut self, ui: &mut Ui, keys: &[Vec<Key>], c: KeyColours) {
         let n_rows = keys.len();
         let (area, _) = ui.allocate_exact_size(
@@ -379,19 +377,19 @@ impl Keyboard {
         self.focus_back_to_input_widget(ui.ctx());
     }
 
-    /// LOCAL PATCH (experiment 018): upstream called `ctx.request_repaint()`
-    /// on every frame the keyboard was shown at all, including the common
-    /// case where a field simply has focus and nothing is actually changing
-    /// (no touch, no animation of ours - `TextEdit`'s own cursor blink
-    /// already schedules its own repaints via `request_repaint_after`).
-    /// Against a backend that honours egui's requested repaint delay instead
-    /// of redrawing unconditionally every loop iteration, that pinned the
-    /// render loop to max rate for as long as the keyboard stayed open,
-    /// measured on real hardware dropping ~47fps to ~16fps while idle with
-    /// the keyboard up. Only the brief hysteresis countdown below - which
-    /// exists to survive one-frame focus blips without the keyboard
-    /// flickering away - genuinely needs to force a wakeup each frame so the
-    /// counter advances instead of stalling until unrelated input arrives.
+    /// LOCAL PATCH: upstream called `ctx.request_repaint()` on every frame
+    /// the keyboard was shown at all, including the common case where a
+    /// field simply has focus and nothing is actually changing (no touch, no
+    /// animation of ours - `TextEdit`'s own cursor blink already schedules
+    /// its own repaints via `request_repaint_after`). Against a backend that
+    /// honours egui's requested repaint delay instead of redrawing
+    /// unconditionally every loop iteration, that pinned the render loop to
+    /// max rate for as long as the keyboard stayed open, measured on real
+    /// hardware dropping ~47fps to ~16fps while idle with the keyboard up.
+    /// Only the brief hysteresis countdown below - which exists to survive
+    /// one-frame focus blips without the keyboard flickering away -
+    /// genuinely needs to force a wakeup each frame so the counter advances
+    /// instead of stalling until unrelated input arrives.
     fn keyboard_input_needed(&mut self, ctx: &Context) -> bool {
         if ctx.egui_wants_keyboard_input() {
             self.needed = 20;
@@ -406,7 +404,7 @@ impl Keyboard {
     }
 }
 
-/// LOCAL ADDITION (experiment 026): `b` over `a` at `t`, keeping `a`'s alpha.
+/// LOCAL ADDITION: `b` over `a` at `t`, keeping `a`'s alpha.
 fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     Color32::from_rgba_unmultiplied(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()), a.a())

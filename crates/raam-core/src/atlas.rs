@@ -1,22 +1,25 @@
-//! 012's baked-blur shadow atlas: every glyph is packed twice into one
+//! The baked-blur shadow atlas: every glyph is packed twice into one
 //! `GL_ALPHA` texture, once sharp and once padded and box-blurred, and a
 //! line is drawn twice (blurred region offset and tinted dark, then the
-//! sharp region on top) with the same shader.
+//! sharp region on top) with the same shader. The soft shadow costs no
+//! extra shader, render target or per-frame blur, only a blur at startup.
 //!
-//! 022 changes: the charset also takes extra pre-rasterized glyphs (the
-//! weather icons from icons.rs, on private-use codepoints) so they are laid
-//! out and shadowed exactly like text, and the blur radius is a parameter so
-//! the 80px clock can have a softer shadow than 012's 72px one.
+//! The charset also takes extra pre-rasterized glyphs (the weather icons
+//! from weather_icons.rs, on private-use codepoints) so they are laid out
+//! and shadowed exactly like text, and the blur radius is a parameter so
+//! the 80px clock can have a softer shadow than the smaller lines.
 use crate::clock;
 use crate::gl::*;
 use std::collections::HashMap;
 use std::ffi::c_void;
 
 use raam_model::limits::ATLAS_WIDTH;
-/// Printable ASCII, plus the degree sign (012's one-codepoint widening).
+/// Printable ASCII, plus the degree sign for the weather (one codepoint,
+/// not general Unicode).
 const CHARSET: [(u32, u32); 2] = [(32, 126), (0xB0, 0xB0)];
 
-/// A coverage bitmap to pack: fontdue's for text, icons.rs's for icons.
+/// A coverage bitmap to pack: fontdue's for text, weather_icons.rs's for
+/// icons.
 pub struct Raster {
     pub ch: char,
     pub width: usize,
@@ -103,8 +106,8 @@ fn pad_bitmap(src: &[u8], w: usize, h: usize, bleed: usize) -> (Vec<u8>, usize, 
     (out, pw, ph)
 }
 
-/// Two box-blur passes, running sums (012's nested loops scale with the
-/// radius, and 022's clock radius is larger).
+/// Two box-blur passes, running sums (plain nested loops scale with the
+/// radius, and the clock's radius is the largest).
 fn box_blur(src: &[u8], w: usize, h: usize, r: usize) -> Vec<u8> {
     let r = r as i32;
     let pass =

@@ -116,9 +116,10 @@ The fetch, library, writer and weather workers; SQLite (the library
 cache, settings rows, curation); HTTP (Immich REST, weather); the
 providers (`Immich`, `LocalFolder`); cache cap and LRU eviction. Native
 only — it is never compiled for wasm, so it may use threads, blocking
-I/O and rusqlite freely. It implements the core's `TileSource` and
-wakes the host through `Waker`. Its workers block on condvars/channels,
-not sleep-polling.
+I/O and rusqlite freely. It implements the core's `TileSource`, wakes
+the host through `Waker`, and runs the App controller's effects for
+both native hosts (`run_effects`). Its workers block on
+condvars/channels, not sleep-polling.
 
 ### Hosts
 
@@ -155,10 +156,13 @@ The core is a synchronous state machine. Each host owns its loop:
 
 ```rust
 // Host loop, once per wake:
-let effects = app.frame(now, &events, &mut deps);
-// deps: &mut dyn TileSource, &mut dyn VideoPlayer, …
-// effects: engine commands, power requests (screen off/on, wake alarm),
-//          save-settings, and the next wake deadline
+let out = app.frame(&events, &inputs, &mut deps);
+// deps: the slideshow, the TileSource, the library and weather views,
+//       and Power (screen off/on, wake alarm), which the controller calls
+// out.effects: engine commands (save settings, hide, sync, …), which a
+//       native host hands to raam_engine::run_effects
+// out: the next wake deadline, what to draw, and what only the host can
+//       do (the music stream's volume)
 ```
 
 - **Android** blocks in `poll_events(deadline)`; the engine's workers

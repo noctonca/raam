@@ -124,7 +124,7 @@ not sleep-polling.
 | Host | Keeps |
 |---|---|
 | `hosts/android` (the product) | NativeActivity, EGL, input events, the decoders behind `VideoPlayer` (MediaCodec onto a SurfaceTexture, OpenSL audio and its A/V alignment, the process-wide decoder count, the reaper thread), power (wake alarm, wake lock, screen off), root helpers, storage paths |
-| `raam` at the root (desktop/Linux) | winit/glutin window, screenshot tooling (`--exact` goldens), env-var debug switches. On a Pi it runs under X/Wayland; a bare KMS/DRM host is a possible later addition, not v1 |
+| `raam` at the root (desktop/Linux) | winit/glutin window, the mouse as a finger, the engine's paths (the app-data dir, a photos folder), `NoVideo` and a probe that says so, env-var debug switches (`RAAM_DEBUG_VIDEO_FAIL=rt`); `--page` is the preset host with the screenshot tooling (`--exact` goldens). On a Pi it runs under X/Wayland; a bare KMS/DRM host is a possible later addition, not v1 |
 | `hosts/web` (the demo) | canvas + rAF loop, its own synchronous `TileSource` over bundled sample photos (the browser decodes them; faces come from a checked-in `faces.json`), `NoVideo`, URL-query debug switches; later, "try with Immich" against demo.immich.app (CORS-open) |
 
 ## The seams
@@ -136,7 +136,7 @@ complete list of how the outside reaches the core.
 |---|---|---|
 | `Clock` | monotonic `now() -> Duration`, wall time, local time | host (system clocks; fake in tests) |
 | `TileSource` | `take_plan / take_tile / take_failed / consumed / request / tile_is_clip` | engine (native); the web host directly |
-| `MediaProbe` | clip info for a file (dimensions, codec, playability) | Android host (AMediaExtractor); stub elsewhere |
+| `MediaProbe` | clip info for a file (dimensions, codec, playability); `no_player` for a host that plays no clip at all, so the engine marks clips unplayable as it lists them instead of fetching each to find out | Android host (AMediaExtractor); the desktop's stub answers `no_player` |
 | `VideoPlayer` | `open(clip, role)` → an open clip (`latch / phase / play / set_paused / set_looping / set_sound / has_frame / oes / matrix / stop`); `decoders_open` for the single-decoder rule | Android host (MediaCodec); `NoVideo` elsewhere |
 | `Waker` | `wake(&self)`, `Send + Sync` | host; handed to the engine's threads |
 | `Store` | settings load/save rows | engine (SQLite); localStorage or nothing on web |
@@ -162,7 +162,8 @@ let effects = app.frame(now, &events, &mut deps);
 
 - **Android** blocks in `poll_events(deadline)`; the engine's workers
   and the video threads wake it through `Waker`.
-- **Desktop** blocks in winit's event loop with the same deadline.
+- **Desktop** blocks in winit's event loop with the same deadline; the
+  engine's workers wake it through an event-loop proxy.
 - **Web** schedules via rAF and timeouts; there is no engine — the web
   `TileSource` resolves its requests from fetch callbacks.
 
@@ -216,7 +217,10 @@ tests over a fake player. The Android host keeps the decoders
 themselves: MediaCodec onto a SurfaceTexture, the OpenSL audio and its
 A/V alignment against the audio clock, and the reaper thread that
 releases a stopped decoder off the render thread. Desktop and web use
-the core's `NoVideo`, whose `open` always fails. If a Linux frame ever
+the core's `NoVideo`, whose `open` always fails, and neither ever plans
+a clip: the web source offers none, and the desktop's probe answers
+`no_player`, so its engine marks every clip unplayable as it lists it
+rather than downloading each to find out. If a Linux frame ever
 needs clips, that's a new `VideoPlayer` implementation (GStreamer or
 V4L2), not a core change.
 
@@ -318,7 +322,7 @@ basis; its replacements are adopted as decisions:
 | SHA-1 via `ring::digest` | engine | Immich checksum matching; ring is already there under rustls |
 | `fontdue` | core (overlay) | Clock/weather atlas rasterisation; revisit merging onto egui's skrifa |
 | `android-activity`, `ndk`, `ndk-sys`, `jni` 0.21, `android_logger` (no defaults), `libc` | android | The platform glue; no regex logger filter. jni stays on 0.21 until its 0.22 API redesign is ported deliberately (it duplicates android-activity's 0.22, ~56 KB) |
-| `libc` | engine | `statvfs` (free space for the cache cap) and `mktime` (EXIF local times); the engine is native-only by design |
+| `libc` | engine; raam (desktop) | `statvfs` (free space for the cache cap) and `mktime` (EXIF local times); the engine is native-only by design. The desktop's `localtime_r`, the Clock seam's local time, as the Android host does it |
 | OpenSL bindings, checked in | android | Pre-generated and pruned; no bindgen, no libclang at build time |
 | `winit`, `glutin`, `glutin-winit`, `egui-winit` (no `links`), `png` | raam (desktop) | The window host and the screenshot tool |
 | `wasm-bindgen`, `js-sys`, `web-sys` | web; core on wasm32 only (the WebGL1 module) | Unavoidable wasm glue, and egui already brings all three on wasm32. The web host logs and reports panics to the console itself (about 20 lines), so no `console_log` or `console_error_panic_hook` |

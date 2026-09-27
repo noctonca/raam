@@ -15,6 +15,7 @@ pub mod schedule;
 pub mod seams;
 pub mod slideshow;
 pub mod source;
+pub mod store;
 pub mod switches;
 pub mod transitions;
 pub mod ui;

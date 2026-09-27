@@ -21,6 +21,7 @@
 //! lineage obligation. Curation carries over through the JSON
 //! export/import (`import_curation`).
 use raam_core::clock;
+use raam_core::store::transition_str;
 use raam_model::limits;
 use raam_model::{
     AlbumRow, ClockStyle, FitBackground, Focus, GapColour, HiddenItem, MediaItem, MediaKind,
@@ -271,51 +272,6 @@ pub fn set_immich_server(conn: &Connection, url: &str, key: &str) -> rusqlite::R
 }
 
 // ---- settings ----------------------------------------------------------
-
-/// The `setting` rows for everything in `Settings` except the server and
-/// key (on `source`/`credential`) and the sleep schedule (`schedule`).
-pub fn settings_rows(s: &Settings) -> Vec<(&'static str, serde_json::Value)> {
-    use serde_json::json;
-    vec![
-        ("slideshow.interval_s", json!(s.interval_secs)),
-        ("slideshow.transition", json!(transition_str(s.transition))),
-        ("slideshow.ken_burns", json!(s.ken_burns_enabled)),
-        ("display.fill_by_default", json!(s.fill_by_default)),
-        (
-            "display.fit_background",
-            json!(match s.fit_background {
-                FitBackground::Blurred => "blurred",
-                FitBackground::Black => "black",
-            }),
-        ),
-        ("collage.max", json!(s.collage_max)),
-        (
-            "collage.gap_colour",
-            json!(match s.gap_colour {
-                GapColour::Black => "black",
-                GapColour::White => "white",
-            }),
-        ),
-        (
-            "overlay.clock",
-            json!(match s.clock_style {
-                ClockStyle::Off => "off",
-                ClockStyle::TopRight => "topright",
-                ClockStyle::BottomLeft => "bottomleft",
-            }),
-        ),
-        ("locale.clock_24h", json!(s.clock_24h)),
-        ("cache.cap_mb", json!(s.cache_cap_mb)),
-        ("video.playback", json!(s.video_playback.as_str())),
-        ("video.sound", json!(s.video_sound)),
-        ("video.volume", json!(s.video_volume)),
-        ("video.audio_delay_ms", json!(s.audio_delay_ms)),
-    ]
-}
-
-fn transition_str(t: TransitionChoice) -> &'static str {
-    t.shader_name().unwrap_or("rotate")
-}
 
 /// Loads saved settings over the defaults in `s`. Returns the keys found,
 /// so callers can tell a saved value from a default.

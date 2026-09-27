@@ -1269,6 +1269,7 @@ dependencies = [
  "fontdue",
  "log",
  "raam-model",
+ "serde_json",
 ]
 
 [[package]]

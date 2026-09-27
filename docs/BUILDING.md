@@ -14,7 +14,8 @@ and Ubuntu):
 cargo run --release -- --photos DIR
 ```
 
-The flags are listed at the top of [src/main.rs](../src/main.rs).
+Add `--fullscreen` to fill the monitor, as a Linux frame runs it. The
+flags are listed at the top of [src/main.rs](../src/main.rs).
 
 ## Checks
 

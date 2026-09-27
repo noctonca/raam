@@ -10,8 +10,10 @@
 //!
 //! The window is the frame's screen in device pixels, since the controller
 //! runs egui at one pixel per point: a retina window is half size, as
-//! `--exact` makes it for the presets. The mouse is a finger: a press, a
-//! drag and a release are one touch, fed as the Android host feeds one.
+//! `--exact` makes it for the presets. With `--fullscreen` it is the whole
+//! monitor, as on a Linux frame. The mouse is a finger: a press, a drag
+//! and a release are one touch, fed as the Android host feeds one. A
+//! touchscreen's first finger is fed the same way.
 use crate::platform::{self, EnvSwitches};
 use crate::{Args, Gl, Step, save_png};
 use glutin::surface::GlSurface;
@@ -28,10 +30,12 @@ use raam_engine::{db, fetch, immich, library, weather};
 use raam_model::limits::LARGEST_LAYOUT;
 use raam_model::{ClipInfo, FitBackground, GapColour, ScaleMode, SourceKind};
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
+use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
@@ -50,6 +54,11 @@ const SCRIPT_STEP: Duration = Duration::from_millis(1500);
 /// A scripted run whose first collage hasn't come by now (an empty
 /// folder, say) fails rather than wait forever.
 const SCRIPT_START_LIMIT: Duration = Duration::from_secs(60);
+
+/// A full-screen window's size holds still this long before the pipeline
+/// is made for it: a window system may carry out the request after the
+/// window opens, resizing it in steps.
+const FULLSCREEN_SETTLE: Duration = Duration::from_millis(500);
 
 /// An engine worker woke the loop.
 pub struct Wake;
@@ -107,11 +116,16 @@ pub struct Live {
     /// The saved Fill/Fit choices, for the pipeline once it exists.
     overrides: Option<HashMap<String, ScaleMode>>,
     controller: App,
+    /// A full-screen window whose size hasn't held still yet, and when it
+    /// will have if nothing resizes it before.
+    opening: Option<(Gl, Instant)>,
     run: Option<Running>,
     events: Vec<Event>,
     next_run: Option<Instant>,
     pointer: egui::Pos2,
     down: bool,
+    /// The touchscreen's finger being fed, while one is down.
+    finger: Option<u64>,
     /// --click/--press/--screenshot: they start once the first collage is
     /// up and still, then each step waits for the one before to play out.
     script_started: bool,
@@ -199,12 +213,14 @@ impl Live {
             saved_keys,
             overrides: Some(overrides),
             controller,
+            opening: None,
             run: None,
             // The activity's start, as Android reports it at boot.
             events: vec![Event::Start, Event::Resume],
             next_run: Some(Instant::now()),
             pointer: egui::Pos2::ZERO,
             down: false,
+            finger: None,
             script_started: false,
             // The start limit, so the loop wakes to check it.
             script_at: scripted.then(|| Instant::now() + SCRIPT_START_LIMIT),
@@ -217,13 +233,57 @@ impl Live {
         })
     }
 
-    /// The window, and everything that needs its GL context or its size.
-    fn start(&mut self, el: &ActiveEventLoop) -> Result<(), String> {
-        let gl = crate::create_gl(el, self.args.size, true, true)?;
-        // The pipeline's targets are made once for the screen, which on a
-        // frame never changes size.
-        gl.window.set_resizable(false);
-        let [w, h] = self.args.size.map(|v| v as i32);
+    /// The window. A full-screen one waits in `opening` until its size
+    /// holds still (`settle`); any other starts at once.
+    fn open(&mut self, el: &ActiveEventLoop) -> Result<(), String> {
+        if !self.args.fullscreen {
+            let gl = crate::create_gl(el, self.args.size, true, true, None)?;
+            // The pipeline's targets are made once for the screen, which on
+            // a frame never changes size.
+            gl.window.set_resizable(false);
+            return self.start(gl, self.args.size);
+        }
+        // Wayland names no primary monitor.
+        let m = el
+            .primary_monitor()
+            .or_else(|| el.available_monitors().next())
+            .ok_or("--fullscreen: no monitor")?;
+        let s = m.size();
+        log::info!(
+            "full screen on {} ({}x{})",
+            m.name().unwrap_or_else(|| "the monitor".into()),
+            s.width,
+            s.height
+        );
+        let gl = crate::create_gl(el, [s.width, s.height], true, true, Some(m))?;
+        // A frame has no mouse; one plugged in still works, unseen.
+        gl.window.set_cursor_visible(false);
+        self.opening = Some((gl, Instant::now() + FULLSCREEN_SETTLE));
+        Ok(())
+    }
+
+    /// A full-screen window whose size has held still starts, at that
+    /// size.
+    fn settle(&mut self) -> Result<(), String> {
+        let Some((gl, at)) = self.opening.take() else {
+            return Ok(());
+        };
+        if Instant::now() < at {
+            self.opening = Some((gl, at));
+            return Ok(());
+        }
+        let s = gl.window.inner_size();
+        log::info!(
+            "full screen: the window holds still at {}x{}",
+            s.width,
+            s.height
+        );
+        self.start(gl, [s.width, s.height])
+    }
+
+    /// Everything that needs the window's GL context or the screen's size.
+    fn start(&mut self, gl: Gl, screen: [u32; 2]) -> Result<(), String> {
+        let [w, h] = screen.map(|v| v as i32);
         let size = gl.window.inner_size();
         if (size.width, size.height) != (w as u32, h as u32) {
             log::warn!(
@@ -286,6 +346,55 @@ impl Live {
         });
         self.next_run = Some(Instant::now());
         Ok(())
+    }
+
+    /// The window's new size. The GL surface follows it (Wayland's EGL
+    /// surface doesn't on its own); a full-screen window still settling
+    /// waits again; the pipeline keeps the size it was made for.
+    fn resized(&mut self, size: PhysicalSize<u32>) {
+        let gl = match (&self.run, &mut self.opening) {
+            (Some(run), _) => &run.gl,
+            (None, Some((gl, at))) => {
+                *at = Instant::now() + FULLSCREEN_SETTLE;
+                &*gl
+            }
+            (None, None) => return,
+        };
+        if let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
+            gl.surface.resize(&gl.context, w, h);
+        }
+        if let Some(run) = &self.run {
+            let (w, h) = run.screen;
+            if (size.width, size.height) != (w as u32, h as u32) {
+                log::warn!(
+                    "the window is now {}x{}; still drawing {w}x{h}",
+                    size.width,
+                    size.height
+                );
+            }
+        }
+    }
+
+    /// A touchscreen's touch, fed only while it is the first finger down,
+    /// as the Android host reads only a motion's first pointer.
+    fn finger(&mut self, t: winit::event::Touch) {
+        use winit::event::TouchPhase as P;
+        match self.finger {
+            None if t.phase == P::Started => self.finger = Some(t.id),
+            Some(id) if id == t.id => {}
+            _ => return,
+        }
+        let phase = match t.phase {
+            P::Started => egui::TouchPhase::Start,
+            P::Moved => egui::TouchPhase::Move,
+            P::Ended => egui::TouchPhase::End,
+            P::Cancelled => egui::TouchPhase::Cancel,
+        };
+        if matches!(t.phase, P::Ended | P::Cancelled) {
+            self.finger = None;
+        }
+        let pos = egui::pos2(t.location.x as f32, t.location.y as f32);
+        self.touch(phase, pos);
     }
 
     fn touch(&mut self, phase: egui::TouchPhase, pos: egui::Pos2) {
@@ -523,7 +632,8 @@ fn run_effects(
 impl ApplicationHandler<Wake> for Live {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.run.is_none()
-            && let Err(e) = self.start(el)
+            && self.opening.is_none()
+            && let Err(e) = self.open(el)
         {
             log::error!("{e}");
             el.exit();
@@ -559,6 +669,10 @@ impl ApplicationHandler<Wake> for Live {
                 }
                 ElementState::Released => {}
             },
+            // X11 sends no button presses for a touch (winit asks for the
+            // touches themselves), and Wayland keeps the two apart.
+            WindowEvent::Touch(t) => self.finger(t),
+            WindowEvent::Resized(size) => self.resized(size),
             // A scripted run draws regardless, or a window stacked behind
             // another would never take its screenshot.
             WindowEvent::Occluded(hidden) if self.scripted() => log::info!(
@@ -586,9 +700,21 @@ impl ApplicationHandler<Wake> for Live {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        if let Err(e) = self.settle() {
+            log::error!("{e}");
+            el.exit();
+            return;
+        }
         let next = match (self.next_run, self.script_at) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
+        };
+        // A full-screen window still settling starts then.
+        let settle_at = self.opening.as_ref().map(|(_, at)| *at);
+        let until = |t: Option<Instant>| match (t, settle_at) {
+            (Some(a), Some(b)) => ControlFlow::WaitUntil(a.min(b)),
+            (Some(t), None) | (None, Some(t)) => ControlFlow::WaitUntil(t),
+            (None, None) => ControlFlow::Wait,
         };
         match next {
             Some(t) if t <= Instant::now() => {
@@ -596,10 +722,9 @@ impl ApplicationHandler<Wake> for Live {
                     run.gl.window.request_redraw();
                 }
                 self.next_run = None;
-                el.set_control_flow(ControlFlow::Wait);
+                el.set_control_flow(until(None));
             }
-            Some(t) => el.set_control_flow(ControlFlow::WaitUntil(t)),
-            None => el.set_control_flow(ControlFlow::Wait),
+            t => el.set_control_flow(until(t)),
         }
     }
 }

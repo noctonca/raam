@@ -5,7 +5,9 @@ this directory when work on it starts.
 
 ## Smaller items
 
-- A `--fullscreen` flag, so the desktop host can run a Linux frame.
+- A Raspberry Pi 4 or 5 as a Linux frame. Mesa's V3D driver offers
+  OpenGL 3.1 at most, and OpenGL ES 3.1; the desktop host asks for
+  OpenGL 3.2, so there it needs a GLES context, as on the frame.
 - The App controller's effects are mapped to engine commands twice, in
   the Android and the desktop host; the mapping belongs in the engine.
 - The desktop host has no sleep schedule or screen power yet, and no

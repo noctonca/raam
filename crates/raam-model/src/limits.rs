@@ -75,6 +75,12 @@ pub const DECODER_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 /// then 10 min). Chosen against the RK VPU running out of ion memory.
 pub const DECODER_BACKOFF_BASE_SECS: u64 = 30;
 pub const DECODER_BACKOFF_CAP_SECS: u64 = 600;
+/// A live clip's frame 0 waits this long for its sound to pre-roll, then
+/// plays without it. Chosen in experiment 027.
+pub const AUDIO_PREROLL_WAIT: Duration = Duration::from_millis(1500);
+/// How often the loop looks again while a decoder's release is awaited:
+/// the host's reaper thread doesn't wake it. Chosen in experiment 027.
+pub const DECODER_RELEASE_POLL: Duration = Duration::from_millis(100);
 
 // ---- the Android player's A/V clock ----------------------------------------
 

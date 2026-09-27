@@ -77,6 +77,11 @@ it exists from day one and stays a leaf forever.
 - The slideshow pipeline: collage layout, slide composition (Fill/Fit,
   blurred background, `RenderTarget`), Ken Burns aimed at faces,
   gl-transitions, the clock/weather overlay with its glyph atlas.
+- The video orchestration over the `VideoPlayer` seam: the probe that
+  brings up a clip's first frame for its tile, the live clip's start,
+  pause, loop and end, one decoder at a time, the decoder-failure
+  backoff and the wedged-decoder watch — plus the OES program that
+  draws a decoded frame.
 - **The App controller** — the product's behaviour, extracted from the
   experiment's 800-line `android_main`: input routing (tap-slop, menu
   open/close, auto-dismiss, undo-hide), the sleep/wake state machine,
@@ -114,7 +119,7 @@ not sleep-polling.
 
 | Host | Keeps |
 |---|---|
-| `hosts/android` (the product) | NativeActivity, EGL, input events, the video stack (MediaCodec probe/live players, OES program, SurfaceTexture, OpenSL audio, decoder backoff and the wedge watch), power (wake alarm, wake lock, screen off), root helpers, storage paths |
+| `hosts/android` (the product) | NativeActivity, EGL, input events, the decoders behind `VideoPlayer` (MediaCodec onto a SurfaceTexture, OpenSL audio and its A/V alignment, the process-wide decoder count, the reaper thread), power (wake alarm, wake lock, screen off), root helpers, storage paths |
 | `raam` at the root (desktop/Linux) | winit/glutin window, screenshot tooling (`--exact` goldens), env-var debug switches. On a Pi it runs under X/Wayland; a bare KMS/DRM host is a possible later addition, not v1 |
 | `hosts/web` (the demo) | canvas + rAF loop, its own `TileSource` over browser fetch and `<img>` decode, bundled sample photos, "try with Immich" against demo.immich.app (CORS-open), URL-query debug switches |
 
@@ -128,7 +133,7 @@ complete list of how the outside reaches the core.
 | `Clock` | monotonic `now() -> Duration`, wall time, local time | host (system clocks; fake in tests) |
 | `TileSource` | `take_plan / take_tile / take_failed / consumed / request / tile_is_clip` | engine (native); the web host directly |
 | `MediaProbe` | clip info for a file (dimensions, codec, playability) | Android host (AMediaExtractor); stub elsewhere |
-| `VideoPlayer` | `open / play / pause / stop / phase / has_frame / oes / matrix` | Android host (MediaCodec); stub elsewhere |
+| `VideoPlayer` | `open(clip, role)` → an open clip (`latch / phase / play / set_paused / set_looping / set_sound / has_frame / oes / matrix / stop`); `decoders_open` for the single-decoder rule | Android host (MediaCodec); `NoVideo` elsewhere |
 | `Waker` | `wake(&self)`, `Send + Sync` | host; handed to the engine's threads |
 | `Store` | settings load/save rows | engine (SQLite); localStorage or nothing on web |
 | `DebugSwitches` | snapshotted **once per loop pass** | Android props / desktop env vars / web URL query |
@@ -199,11 +204,15 @@ panic policy relies on (crash → exit(70) → relaunched).
 
 ## Video
 
-Android-only in v1, behind `MediaProbe` + `VideoPlayer`. The Android
-host keeps the whole proven stack: probe-then-play, one decoder at a
+Android-only in v1, behind `MediaProbe` + `VideoPlayer`. The core runs
+the orchestration the lab proved — probe-then-play, one decoder at a
 time (the live open waits for the probe's release), exponential backoff
-on failure, the wedged-VPU watch, A/V alignment against the audio
-clock. Desktop and web are photos-only stubs. If a Linux frame ever
+on failure, the wedged-VPU watch — as a state machine with simulation
+tests over a fake player. The Android host keeps the decoders
+themselves: MediaCodec onto a SurfaceTexture, the OpenSL audio and its
+A/V alignment against the audio clock, and the reaper thread that
+releases a stopped decoder off the render thread. Desktop and web use
+the core's `NoVideo`, whose `open` always fails. If a Linux frame ever
 needs clips, that's a new `VideoPlayer` implementation (GStreamer or
 V4L2), not a core change.
 

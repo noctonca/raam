@@ -21,7 +21,7 @@
 //!   released, which needs the frame composed out of it first: the caller
 //!   copies the latched frame into a GL_TEXTURE_2D before `stop`.
 use crate::audio_out::AudioOut;
-use crate::extractor::Extractor;
+use crate::extractor::{Extractor, OpenError};
 use crate::video_texture::VideoTexture;
 use android_activity::AndroidAppWaker;
 use jni::{JNIEnv, JavaVM};
@@ -31,6 +31,7 @@ use ndk::media::media_codec::{
 use ndk::native_window::NativeWindow;
 use raam_core::clock;
 use raam_core::gl::*;
+use raam_core::video::{OpenClip, Phase, PlayerError};
 use raam_model::ClipInfo;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -48,8 +49,8 @@ static VM: OnceLock<JavaVM> = OnceLock::new();
 /// Video decoders created and not yet released, probes included. The RK
 /// VPU maps its buffers from ion, and on this 493 MB frame a second
 /// decoder opened while another's buffers are still held has run ion out
-/// ("vpu_dmabuf_map: ion map failed"), so the slideshow opens one only
-/// when this is 0.
+/// ("vpu_dmabuf_map: ion map failed"), so the core opens one only when
+/// this is 0 (`VideoPlayer::decoders_open`).
 static VIDEO_DECODERS: AtomicU32 = AtomicU32::new(0);
 
 pub fn video_decoders() -> u32 {
@@ -90,8 +91,10 @@ pub fn env() -> Result<JNIEnv<'static>, String> {
         .map_err(|e| format!("attach: {e}"))
 }
 
+/// Where the decode thread is. The core sees `Phase`, which also asks
+/// whether that frame is on the texture yet (`OpenClip::phase`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Phase {
+enum DecoderPhase {
     /// Opening the clip, configuring the decoder.
     Starting,
     /// Frame 0 is rendered; waiting for `play`.
@@ -102,14 +105,14 @@ pub enum Phase {
     Failed,
 }
 
-impl Phase {
+impl DecoderPhase {
     fn from_u8(v: u8) -> Self {
         match v {
-            0 => Phase::Starting,
-            1 => Phase::FirstFrame,
-            2 => Phase::Playing,
-            3 => Phase::Ended,
-            _ => Phase::Failed,
+            0 => DecoderPhase::Starting,
+            1 => DecoderPhase::FirstFrame,
+            2 => DecoderPhase::Playing,
+            3 => DecoderPhase::Ended,
+            _ => DecoderPhase::Failed,
         }
     }
 }
@@ -204,25 +207,28 @@ struct Shared {
     /// `AudioManager.getOutputLatency(STREAM_MUSIC)`; applied as a fixed
     /// offset: what is heard is the position less this.
     latency_us: i64,
-    error: Mutex<Option<String>>,
+    error: Mutex<Option<PlayerError>>,
     waker: AndroidAppWaker,
     label: String,
+    /// A probe (frame 0 only), not the live clip: the fail injection
+    /// tells them apart.
+    probe: bool,
 }
 
 impl Shared {
-    fn phase(&self) -> Phase {
-        Phase::from_u8(self.phase.load(Ordering::Acquire))
+    fn phase(&self) -> DecoderPhase {
+        DecoderPhase::from_u8(self.phase.load(Ordering::Acquire))
     }
 
-    fn set_phase(&self, p: Phase) {
+    fn set_phase(&self, p: DecoderPhase) {
         self.phase.store(p as u8, Ordering::Release);
         self.waker.wake();
     }
 
-    fn fail(&self, e: String) {
+    fn fail(&self, e: PlayerError) {
         log::error!("{}: {e}", self.label);
         *self.error.lock().unwrap() = Some(e);
-        self.set_phase(Phase::Failed);
+        self.set_phase(DecoderPhase::Failed);
     }
 
     fn stopped(&self) -> bool {
@@ -272,10 +278,10 @@ pub struct Player {
     shared: Arc<Shared>,
     threads: Vec<JoinHandle<()>>,
     path: String,
-    pub info: ClipInfo,
+    info: ClipInfo,
     latched: i64,
     matrix: [f32; 16],
-    pub created: Duration,
+    created: Duration,
     /// When `play` was called.
     played_at: Option<Duration>,
 }
@@ -287,6 +293,7 @@ impl Player {
     pub fn open(
         path: &str,
         info: ClipInfo,
+        probe: bool,
         sound: Option<f32>,
         latency_ms: i32,
         waker: AndroidAppWaker,
@@ -329,7 +336,7 @@ impl Player {
         let shared = Arc::new(Shared {
             ctl: Mutex::new(Ctl::default()),
             cond: Condvar::new(),
-            phase: AtomicU8::new(Phase::Starting as u8),
+            phase: AtomicU8::new(DecoderPhase::Starting as u8),
             first_stamp: AtomicI64::new(0),
             last_stamp: AtomicI64::new(0),
             rendered: AtomicU64::new(0),
@@ -347,6 +354,7 @@ impl Player {
             error: Mutex::new(None),
             waker,
             label,
+            probe,
         });
         let mut threads = Vec::new();
         {
@@ -390,25 +398,56 @@ impl Player {
         }));
     }
 
-    pub fn phase(&self) -> Phase {
-        self.shared.phase()
+    fn first_latched(&self) -> bool {
+        self.latched != 0 && self.latched == self.shared.first_stamp.load(Ordering::Acquire)
     }
 
-    pub fn error(&self) -> Option<String> {
-        self.shared.error.lock().unwrap().clone()
+    /// The last frame the decoder rendered is the one on the texture.
+    fn newest_latched(&self) -> bool {
+        self.latched != 0 && self.latched == self.shared.last_stamp.load(Ordering::Acquire)
     }
 
+    fn with_ctl(&self, f: impl FnOnce(&mut Ctl)) {
+        let mut ctl = self.shared.ctl.lock().unwrap();
+        f(&mut ctl);
+        ctl.update_clock();
+        drop(ctl);
+        self.shared.cond.notify_all();
+    }
+
+    fn playing(&self) -> bool {
+        self.played_at.is_some()
+    }
+
+    fn summary(&self) -> String {
+        let s = &self.shared;
+        format!(
+            "{} frames shown, {} dropped, {} loops, position {:.2}s, audio {}, max A/V drift {} ms",
+            s.rendered.load(Ordering::Relaxed),
+            s.dropped.load(Ordering::Relaxed),
+            s.loops.load(Ordering::Relaxed),
+            self.position_us() as f64 / 1e6,
+            match s.audio_ms.load(Ordering::Relaxed) {
+                -1 => "none".to_string(),
+                ms => format!("{:.2}s played", ms as f64 / 1000.0),
+            },
+            s.max_drift_ms.load(Ordering::Relaxed),
+        )
+    }
+}
+
+impl OpenClip for Player {
     /// Latches the newest rendered frame onto the texture if there is one
-    /// not latched yet. True when the texture changed.
-    pub fn latch(&mut self) -> bool {
+    /// not latched yet.
+    fn latch(&mut self) {
         let want = self.shared.last_stamp.load(Ordering::Acquire);
         if want == 0 || want == self.latched {
-            return false;
+            return;
         }
         let Some(tex) = self.texture.as_ref() else {
-            return false;
+            return;
         };
-        let Ok(mut env) = env() else { return false };
+        let Ok(mut env) = env() else { return };
         // `updateTexImage` takes the oldest queued frame, not the newest, so
         // if more than one is waiting (a 60 fps clip on a ~50 fps loop) take
         // them until the newest is on, rather than falling behind.
@@ -427,50 +466,34 @@ impl Player {
             }
         }
         if self.latched == before {
-            return false;
+            return;
         }
         self.matrix = tex.transform_matrix(&mut env).unwrap_or(IDENTITY4);
-        true
     }
 
-    pub fn first_latched(&self) -> bool {
-        self.latched != 0 && self.latched == self.shared.first_stamp.load(Ordering::Acquire)
+    /// The decode thread's phase, held back until its frame is latched:
+    /// frame 0 counts once it's on the texture, and the end once the last
+    /// frame is (stopping the codec before that would drop it).
+    fn phase(&self) -> Phase {
+        match self.shared.phase() {
+            DecoderPhase::Starting => Phase::Starting,
+            DecoderPhase::FirstFrame if self.first_latched() => Phase::FirstFrame,
+            DecoderPhase::FirstFrame => Phase::Starting,
+            DecoderPhase::Playing => Phase::Playing,
+            DecoderPhase::Ended if self.newest_latched() => Phase::Ended,
+            DecoderPhase::Ended => Phase::Playing,
+            DecoderPhase::Failed => Phase::Failed(
+                self.shared
+                    .error
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .expect("a failed decode thread records its error first"),
+            ),
+        }
     }
 
-    /// The last frame the decoder rendered is the one on the texture.
-    pub fn newest_latched(&self) -> bool {
-        self.latched != 0 && self.latched == self.shared.last_stamp.load(Ordering::Acquire)
-    }
-
-    pub fn has_frame(&self) -> bool {
-        self.latched != 0
-    }
-
-    pub fn oes(&self) -> GlUint {
-        self.oes
-    }
-
-    pub fn matrix(&self) -> &[f32; 16] {
-        &self.matrix
-    }
-
-    pub fn audio_ready(&self) -> bool {
-        self.shared.audio_ready.load(Ordering::Acquire)
-    }
-
-    pub fn has_audio(&self) -> bool {
-        self.shared.audio_running.load(Ordering::Acquire)
-    }
-
-    fn with_ctl(&self, f: impl FnOnce(&mut Ctl)) {
-        let mut ctl = self.shared.ctl.lock().unwrap();
-        f(&mut ctl);
-        ctl.update_clock();
-        drop(ctl);
-        self.shared.cond.notify_all();
-    }
-
-    pub fn play(&mut self) {
+    fn play(&mut self) {
         self.played_at = Some(clock::now());
         let audio = self.shared.audio_running.load(Ordering::Acquire);
         self.with_ctl(|c| {
@@ -482,11 +505,7 @@ impl Player {
         });
     }
 
-    pub fn playing(&self) -> bool {
-        self.played_at.is_some()
-    }
-
-    pub fn set_paused(&self, paused: bool) {
+    fn set_paused(&self, paused: bool) {
         if self.shared.ctl.lock().unwrap().paused != paused {
             log::info!(
                 "{} {}",
@@ -505,7 +524,7 @@ impl Player {
         }
     }
 
-    pub fn set_looping(&self, looping: bool) {
+    fn set_looping(&self, looping: bool) {
         if self.shared.ctl.lock().unwrap().looping != looping {
             log::info!("{} looping {looping}", self.shared.label);
             self.with_ctl(|c| c.looping = looping);
@@ -514,7 +533,7 @@ impl Player {
 
     /// Sound on (with this volume) or off. Off mutes; on starts the audio
     /// thread at the current position if there wasn't one.
-    pub fn set_sound(&mut self, sound: Option<f32>) {
+    fn set_sound(&mut self, sound: Option<f32>) {
         let v = sound.unwrap_or(0.0);
         if self.shared.volume() != v {
             self.shared
@@ -537,16 +556,36 @@ impl Player {
         }
     }
 
+    fn audio_ready(&self) -> bool {
+        self.shared.audio_ready.load(Ordering::Acquire)
+    }
+
+    fn audio_running(&self) -> bool {
+        self.shared.audio_running.load(Ordering::Acquire)
+    }
+
     /// Media time of the latest rendered frame (µs).
-    pub fn position_us(&self) -> i64 {
+    fn position_us(&self) -> i64 {
         self.shared.position_us.load(Ordering::Relaxed)
     }
 
+    fn has_frame(&self) -> bool {
+        self.latched != 0
+    }
+
+    fn oes(&self) -> GlUint {
+        self.oes
+    }
+
+    fn matrix(&self) -> [f32; 16] {
+        self.matrix
+    }
+
     /// Render-side view, for the periodic stats line.
-    pub fn debug_line(&self) -> String {
+    fn debug_line(&self) -> String {
         format!(
             "{:?} latched {} last {} rendered {} dropped {} pos {:.2}s",
-            self.phase(),
+            self.shared.phase(),
             self.latched,
             self.shared.last_stamp.load(Ordering::Relaxed),
             self.shared.rendered.load(Ordering::Relaxed),
@@ -555,26 +594,10 @@ impl Player {
         )
     }
 
-    pub fn summary(&self) -> String {
-        let s = &self.shared;
-        format!(
-            "{} frames shown, {} dropped, {} loops, position {:.2}s, audio {}, max A/V drift {} ms",
-            s.rendered.load(Ordering::Relaxed),
-            s.dropped.load(Ordering::Relaxed),
-            s.loops.load(Ordering::Relaxed),
-            self.position_us() as f64 / 1e6,
-            match s.audio_ms.load(Ordering::Relaxed) {
-                -1 => "none".to_string(),
-                ms => format!("{:.2}s played", ms as f64 / 1000.0),
-            },
-            s.max_drift_ms.load(Ordering::Relaxed),
-        )
-    }
-
     /// Ends playback. The GL texture goes now (on the GL thread); the
     /// threads are joined and the Java objects released on a reaper thread.
     /// Compose the latched frame out of the texture first.
-    pub fn stop(mut self) {
+    fn stop(mut self) {
         log::info!(
             "{} stopped after {:.1}s: {}",
             self.shared.label,
@@ -608,45 +631,30 @@ impl Player {
 }
 
 #[rustfmt::skip]
-pub const IDENTITY4: [f32; 16] = [
+const IDENTITY4: [f32; 16] = [
     1.0, 0.0, 0.0, 0.0,
     0.0, 1.0, 0.0, 0.0,
     0.0, 0.0, 1.0, 0.0,
     0.0, 0.0, 0.0, 1.0,
 ];
 
-/// Column-major `a * b`.
-pub fn mat_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
-    let mut out = [0.0; 16];
-    for c in 0..4 {
-        for r in 0..4 {
-            out[c * 4 + r] = (0..4).map(|k| a[k * 4 + r] * b[c * 4 + k]).sum();
-        }
-    }
-    out
-}
-
-/// (u, v) -> (u, 1 - v).
-#[rustfmt::skip]
-pub const FLIP_V: [f32; 16] = [
-    1.0, 0.0, 0.0, 0.0,
-    0.0, -1.0, 0.0, 0.0,
-    0.0, 0.0, 1.0, 0.0,
-    0.0, 1.0, 0.0, 1.0,
-];
-
 // ---- the decode threads (006/011's loops) ------------------------------------
 
-fn video_thread(path: &str, window: NativeWindow, sh: &Shared) -> Result<(), String> {
+fn video_thread(path: &str, window: NativeWindow, sh: &Shared) -> Result<(), PlayerError> {
     let t0 = clock::now();
-    let ex = Extractor::open(path)?;
-    let (track, mut format) = ex.find_track("video/").ok_or("no video track")?;
-    ex.select_track(track)?;
+    let ex = Extractor::open(path).map_err(|e| match e {
+        OpenError::File(why) => PlayerError::File(why),
+        OpenError::Media(why) => PlayerError::Decoder(why),
+    })?;
+    let (track, mut format) = ex
+        .find_track("video/")
+        .ok_or_else(|| PlayerError::Decoder("no video track".into()))?;
+    ex.select_track(track).map_err(PlayerError::Decoder)?;
     let mime = format.str("mime").unwrap_or("video/avc").to_string();
     // Declared before the codec, so it's dropped (uncounted) after it.
     let _slot = DecoderSlot::take();
-    let codec =
-        MediaCodec::from_decoder_type(&mime).ok_or_else(|| format!("no decoder for {mime}"))?;
+    let codec = MediaCodec::from_decoder_type(&mime)
+        .ok_or_else(|| PlayerError::Decoder(format!("no decoder for {mime}")))?;
 
     let mut input_eos = false;
     let mut seq: i64 = 0;
@@ -673,9 +681,9 @@ fn video_thread(path: &str, window: NativeWindow, sh: &Shared) -> Result<(), Str
         // the live decoder at once; `hang` fails the live one and holds its
         // release 15 s, as a wedged stop does.
         let fail = raam_core::switches::fail();
-        let probe = sh.label.ends_with("(probe)");
         use raam_core::switches::Fail;
-        if (fail == Fail::Probe && probe) || ((fail == Fail::Live || fail == Fail::Hang) && !probe)
+        if (fail == Fail::Probe && sh.probe)
+            || ((fail == Fail::Live || fail == Fail::Hang) && !sh.probe)
         {
             return Err(format!("test failure (debug.video.fail={fail:?})"));
         }
@@ -693,7 +701,7 @@ fn video_thread(path: &str, window: NativeWindow, sh: &Shared) -> Result<(), Str
             }
             if !input_eos
                 && clock::elapsed(last_output) > Duration::from_secs(3)
-                && sh.phase() == Phase::Playing
+                && sh.phase() == DecoderPhase::Playing
             {
                 return Err(format!(
                     "decoder stalled: no output for {:.1}s (input eos {input_eos}, {queued_in} samples in, {} rendered, {} dropped, last stamp {})",
@@ -755,7 +763,7 @@ fn video_thread(path: &str, window: NativeWindow, sh: &Shared) -> Result<(), Str
                         last_rel = rel;
                         let media = sh.loop_base_us.load(Ordering::Relaxed) + rel;
                         let phase = sh.phase();
-                        if phase == Phase::Starting {
+                        if phase == DecoderPhase::Starting {
                             seq += 1;
                             let stamp = seq * 1000;
                             codec
@@ -769,7 +777,7 @@ fn video_thread(path: &str, window: NativeWindow, sh: &Shared) -> Result<(), Str
                                 sh.label,
                                 clock::elapsed(t0).as_secs_f64() * 1000.0
                             );
-                            sh.set_phase(Phase::FirstFrame);
+                            sh.set_phase(DecoderPhase::FirstFrame);
                             // Hold frame 0 until the slideshow plays it.
                             {
                                 let mut ctl = sh.ctl.lock().unwrap();
@@ -787,7 +795,7 @@ fn video_thread(path: &str, window: NativeWindow, sh: &Shared) -> Result<(), Str
                             // However long frame 0 was held (audio pre-roll,
                             // the window hidden), the stall watch starts now.
                             last_output = clock::now();
-                            sh.set_phase(Phase::Playing);
+                            sh.set_phase(DecoderPhase::Playing);
                         } else {
                             if !sh.wait_until(media) {
                                 let _ = codec.release_output_buffer(out, false);
@@ -840,7 +848,7 @@ fn video_thread(path: &str, window: NativeWindow, sh: &Shared) -> Result<(), Str
                 Ok(DequeuedOutputBufferInfoResult::TryAgainLater) => {}
                 Err(e) => return Err(format!("dequeue output: {e:?}")),
             }
-            if !at_end && input_eos && sh.phase() == Phase::Playing {
+            if !at_end && input_eos && sh.phase() == DecoderPhase::Playing {
                 let all_out = out_pass >= in_pass;
                 let quiet = clock::elapsed(last_output) > Duration::from_millis(600);
                 if all_out || quiet {
@@ -877,7 +885,7 @@ fn video_thread(path: &str, window: NativeWindow, sh: &Shared) -> Result<(), Str
                     );
                     continue;
                 }
-                sh.set_phase(Phase::Ended);
+                sh.set_phase(DecoderPhase::Ended);
                 // Keep the codec until the slideshow has composed the last
                 // frame: stopping it disconnects the surface, which drops
                 // any frame not yet latched.
@@ -897,12 +905,10 @@ fn video_thread(path: &str, window: NativeWindow, sh: &Shared) -> Result<(), Str
     // (seen: ion out of memory, then OMX.rk ERROR 0x80001000) the stop can
     // take seconds or never return, and the slideshow must not wait on it.
     if let Err(e) = result {
-        sh.fail(e);
+        sh.fail(PlayerError::Decoder(e));
     }
     let t = clock::now();
-    if raam_core::switches::fail() == raam_core::switches::Fail::Hang
-        && !sh.label.ends_with("(probe)")
-    {
+    if raam_core::switches::fail() == raam_core::switches::Fail::Hang && !sh.probe {
         std::thread::sleep(Duration::from_secs(15));
     }
     let _ = codec.stop();

@@ -4,9 +4,32 @@
 //! this frame's decoder can play it at all.
 use ndk::media::media_format::MediaFormat;
 use raam_model::ClipInfo;
+use std::fmt;
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::ptr::NonNull;
+
+/// Why `Extractor::open` failed.
+pub enum OpenError {
+    /// The file itself couldn't be opened (gone from the cache, say).
+    File(String),
+    /// It opened, but not as media the extractor reads.
+    Media(String),
+}
+
+impl fmt::Display for OpenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OpenError::File(why) | OpenError::Media(why) => f.write_str(why),
+        }
+    }
+}
+
+impl From<OpenError> for String {
+    fn from(e: OpenError) -> String {
+        e.to_string()
+    }
+}
 
 pub struct Extractor {
     ptr: NonNull<ndk_sys::AMediaExtractor>,
@@ -22,14 +45,15 @@ impl Extractor {
     /// Opens `path` with `AMediaExtractor_setDataSourceFd`, never the
     /// path-based call: on this device's libmediandk.so that one must run on
     /// a Java thread and segfaults on a plain Rust thread (006).
-    pub fn open(path: &str) -> Result<Self, String> {
-        let file = File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+    pub fn open(path: &str) -> Result<Self, OpenError> {
+        let file = File::open(path).map_err(|e| OpenError::File(format!("open {path}: {e}")))?;
         let len = file
             .metadata()
-            .map_err(|e| format!("stat {path}: {e}"))?
+            .map_err(|e| OpenError::File(format!("stat {path}: {e}")))?
             .len();
         let ptr = unsafe { ndk_sys::AMediaExtractor_new() };
-        let ptr = NonNull::new(ptr).ok_or("AMediaExtractor_new returned null")?;
+        let ptr = NonNull::new(ptr)
+            .ok_or_else(|| OpenError::Media("AMediaExtractor_new returned null".into()))?;
         let status = unsafe {
             ndk_sys::AMediaExtractor_setDataSourceFd(
                 ptr.as_ptr(),
@@ -40,9 +64,9 @@ impl Extractor {
         };
         if status != ndk_sys::media_status_t::AMEDIA_OK {
             unsafe { ndk_sys::AMediaExtractor_delete(ptr.as_ptr()) };
-            return Err(format!(
+            return Err(OpenError::Media(format!(
                 "AMediaExtractor_setDataSourceFd({path}): {status:?}"
-            ));
+            )));
         }
         Ok(Self { ptr, _file: file })
     }

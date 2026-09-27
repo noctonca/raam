@@ -287,7 +287,7 @@ fn android_main(app: AndroidApp) {
 
     let mut egl: Option<EglState> = None;
     let mut painter: Option<Painter> = None;
-    let mut pipeline: Option<Pipeline<video::Video>> = None;
+    let mut pipeline: Option<Pipeline<video::Decoders>> = None;
     let mut clock_overlay: Option<ClockOverlay> = None;
     let mut weather: Option<std::sync::Arc<weather::WeatherShared>> = None;
 
@@ -366,6 +366,10 @@ fn android_main(app: AndroidApp) {
         // The test-only property overrides. The schedule ones go to the
         // controller as inputs; the wake mechanism is host business.
         switches::set_fail(&props::prop("debug.video.fail"));
+        switches::set_video_holds(
+            props::prop("debug.video.hold_first").trim() == "1",
+            props::prop("debug.video.show_still").trim() == "1",
+        );
         let props = props::debug_props();
         if props != debug {
             log::info!("debug props {props:?}");
@@ -498,7 +502,7 @@ fn android_main(app: AndroidApp) {
                         video_sound: controller.state.settings.video_sound,
                         video_volume: controller.state.settings.video_volume,
                     },
-                    video::Video::new(app.create_waker()),
+                    video::Decoders::new(app.create_waker()),
                     mem_free_kb,
                 )
             });
@@ -510,7 +514,7 @@ fn android_main(app: AndroidApp) {
                 match pw.output_latency_ms() {
                     Ok(ms) => {
                         log::info!("music output latency {ms} ms (AudioManager.getOutputLatency)");
-                        p.video.audio_latency_ms = ms.max(0) as u32;
+                        p.video.player_mut().audio_latency_ms = ms.max(0) as u32;
                     }
                     Err(e) => log::warn!("no output latency ({e}), using 0"),
                 }
@@ -525,7 +529,7 @@ fn android_main(app: AndroidApp) {
         let frame_start = clock::now();
         // Test-only: `debug.video.audio_extra_ms` overrides the calibration.
         let p = pipeline.as_mut().unwrap();
-        p.video.audio_extra_ms = props::prop("debug.video.audio_extra_ms")
+        p.video.player_mut().audio_extra_ms = props::prop("debug.video.audio_extra_ms")
             .trim()
             .parse()
             .unwrap_or(controller.state.settings.audio_delay_ms);

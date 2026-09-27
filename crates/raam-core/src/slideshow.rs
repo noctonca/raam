@@ -32,9 +32,10 @@ use crate::collage::{self, Rect};
 use crate::gl::*;
 use crate::source::{Photo, Plan, TileSource, VideoClip};
 use crate::transitions::TransitionProgram;
-use crate::video::{ClipFrame, FinishedHandle, LiveCue, ProbeHandle, ProbeStatus, Tick, VideoSeam};
+use crate::video::{ClipFrame, LiveCue, ProbePlayer, ProbeStatus, Tick, Video, VideoPlayer};
 use raam_model::limits::{BLUR_WIDTH_PX, GPU_RETRY, HISTORY_LEN, TRANSITION_DURATION};
 use raam_model::{FitBackground, GapColour, ScaleMode, VideoPlayback};
+use std::cell::OnceCell;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::time::Duration;
@@ -317,6 +318,102 @@ const FS_BLUR_SRC: &str = "precision mediump float; varying vec2 vUV; uniform sa
          gl_FragColor = (c0 + c1 + c2) / 3.0; \
      }";
 
+/// Samples a decoded frame (`GL_TEXTURE_EXTERNAL_OES`) through its
+/// transform (the lab's 011 shaders). Linked on the first clip frame drawn:
+/// only a host with a real `VideoPlayer` ever needs it, and desktop GL has
+/// no external textures to compile it against.
+const VS_OES_SRC: &str = "attribute vec2 aPos; attribute vec2 aUV; \
+     uniform vec2 uScale; uniform mat4 uTexMatrix; varying vec2 vUV; \
+     void main() { \
+         vUV = (uTexMatrix * vec4(aUV, 0.0, 1.0)).xy; \
+         gl_Position = vec4(aPos * uScale, 0.0, 1.0); \
+     }";
+
+const FS_OES_SRC: &str = "#extension GL_OES_EGL_image_external : require\n\
+     precision mediump float; varying vec2 vUV; uniform samplerExternalOES uTex; \
+     void main() { gl_FragColor = texture2D(uTex, vUV); }";
+
+/// (u, v) -> (u, 1 - v), column-major.
+#[rustfmt::skip]
+const FLIP_V: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0,
+    0.0, -1.0, 0.0, 0.0,
+    0.0, 0.0, 1.0, 0.0,
+    0.0, 1.0, 0.0, 1.0,
+];
+
+/// Column-major `a * b`.
+fn mat_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut out = [0.0; 16];
+    for c in 0..4 {
+        for r in 0..4 {
+            out[c * 4 + r] = (0..4).map(|k| a[k * 4 + r] * b[c * 4 + k]).sum();
+        }
+    }
+    out
+}
+
+struct OesProgram {
+    program: GlUint,
+    a_pos: GlUint,
+    a_uv: GlUint,
+    u_scale: GlInt,
+    u_matrix: GlInt,
+    u_tex: GlInt,
+}
+
+impl OesProgram {
+    unsafe fn new() -> Self {
+        unsafe {
+            let program = link_program("oes", VS_OES_SRC, FS_OES_SRC);
+            Self {
+                program,
+                a_pos: attrib_loc(program, "aPos"),
+                a_uv: attrib_loc(program, "aUV"),
+                u_scale: uniform_loc(program, "uScale"),
+                u_matrix: uniform_loc(program, "uTexMatrix"),
+                u_tex: uniform_loc(program, "uTex"),
+            }
+        }
+    }
+
+    /// The frame's matrix samples with (0,0) at the picture's bottom-left;
+    /// the quad's UVs have v=1 at the bottom, so `upright` pre-flips them
+    /// (`FLIP_V`) to draw it the right way up in the framebuffer. Without
+    /// it the frame lands with row 0 = its top, which is the convention of
+    /// an uploaded photo (and of a tile's `source`).
+    unsafe fn draw(
+        &self,
+        quad_vbo: GlUint,
+        quad_ibo: GlUint,
+        frame: &ClipFrame,
+        scale: (f32, f32),
+        upright: bool,
+    ) {
+        let m = if upright {
+            mat_mul(&frame.matrix, &FLIP_V)
+        } else {
+            frame.matrix
+        };
+        unsafe {
+            glUseProgram(self.program);
+            glBindBuffer(GL_ARRAY_BUFFER, quad_vbo);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, quad_ibo);
+            let stride = 4 * 4;
+            glVertexAttribPointer(self.a_pos, 2, GL_FLOAT, 0, stride, std::ptr::null());
+            glEnableVertexAttribArray(self.a_pos);
+            glVertexAttribPointer(self.a_uv, 2, GL_FLOAT, 0, stride, (2 * 4) as *const c_void);
+            glEnableVertexAttribArray(self.a_uv);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_EXTERNAL_OES, frame.texture);
+            glUniform1i(self.u_tex, 0);
+            glUniform2f(self.u_scale, scale.0, scale.1);
+            glUniformMatrix4fv(self.u_matrix, 1, 0, m.as_ptr());
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, std::ptr::null());
+        }
+    }
+}
+
 struct QuadProgram {
     program: GlUint,
     a_pos: GlUint,
@@ -393,10 +490,10 @@ struct VideoTile {
 }
 
 /// A clip's first frame being decoded, for a tile of the plan being built.
-struct Probe<V: VideoSeam> {
+struct Probe<P: VideoPlayer> {
     slot: usize,
     rect: Rect,
-    player: V::Probe,
+    player: ProbePlayer<P::Clip>,
     meta: PhotoMeta,
     clip: VideoClip,
 }
@@ -469,13 +566,13 @@ impl Collage {
 }
 
 /// A planned collage whose tiles are still arriving from the source.
-struct Building<V: VideoSeam> {
+struct Building<P: VideoPlayer> {
     plan: Plan,
     rects: Vec<Rect>,
     tiles: Vec<Option<Tile>>,
     started: Duration,
     compose_total: Duration,
-    probe: Option<Probe<V>>,
+    probe: Option<Probe<P>>,
 }
 
 enum State {
@@ -495,15 +592,17 @@ enum Skip {
     Prev(Vec<i64>),
 }
 
-pub struct Pipeline<V: VideoSeam> {
+pub struct Pipeline<P: VideoPlayer> {
     quad_vbo: GlUint,
     quad_ibo: GlUint,
     blit: QuadProgram,
     blur: QuadProgram,
-    /// The host's video stack behind the seam (probe and live players,
-    /// decoder backoff, the wedge watch). Public because the pause on
-    /// hide, the unplayable clips and the audio latency are host business.
-    pub video: V,
+    /// Linked on the first clip frame drawn (`draw_clip_frame`).
+    oes: OnceCell<OesProgram>,
+    /// The video orchestration over the host's decoders (video.rs). Public
+    /// because the pause on hide, the unplayable clips and the player's
+    /// audio latency are host business.
+    pub video: Video<P>,
     /// When the source may plan again after a GPU drop.
     gpu_retry_at: Option<Duration>,
     photo_tex: GlUint,
@@ -519,7 +618,7 @@ pub struct Pipeline<V: VideoSeam> {
     margin_px: i32,
     highlight_px: i32,
     current: Option<Collage>,
-    building: Option<Building<V>>,
+    building: Option<Building<P>>,
     ready: Option<Collage>,
     /// Per-photo Fill/Fit choices from the menu, by curation key (SHA-1).
     /// 024: loaded from and saved to `curation` by lib.rs; a photo with no
@@ -545,7 +644,7 @@ pub struct Pipeline<V: VideoSeam> {
     mem_free_kb: fn() -> Option<u64>,
 }
 
-impl<V: VideoSeam> Pipeline<V> {
+impl<P: VideoPlayer> Pipeline<P> {
     ///
     /// # Safety
     /// Requires a current GL context (it creates buffers, textures and programs).
@@ -554,7 +653,7 @@ impl<V: VideoSeam> Pipeline<V> {
         screen_h: i32,
         density_dpi: u32,
         settings: SlideshowSettings,
-        video: V,
+        player: P,
         mem_free_kb: fn() -> Option<u64>,
     ) -> Self {
         unsafe {
@@ -616,7 +715,8 @@ impl<V: VideoSeam> Pipeline<V> {
                 quad_ibo: ibo,
                 blit: QuadProgram::new("blit", FS_BLIT_SRC),
                 blur: QuadProgram::new("blur", FS_BLUR_SRC),
-                video,
+                oes: OnceCell::new(),
+                video: Video::new(player),
                 gpu_retry_at: None,
                 photo_tex,
                 blur_targets,
@@ -1030,13 +1130,13 @@ impl<V: VideoSeam> Pipeline<V> {
         self.finish_building(source);
     }
 
-    unsafe fn destroy_building_tiles(b: &mut Building<V>) {
+    unsafe fn destroy_building_tiles(b: &mut Building<P>) {
         for t in b.tiles.iter_mut().filter_map(Option::take) {
             unsafe { t.destroy() };
         }
     }
 
-    fn destroy_building(mut b: Building<V>) {
+    fn destroy_building(mut b: Building<P>) {
         unsafe { Self::destroy_building_tiles(&mut b) };
         if let Some(p) = b.probe.take() {
             p.player.stop();
@@ -1329,7 +1429,7 @@ impl<V: VideoSeam> Pipeline<V> {
     /// `source` gets the frame (cover-scaled, row 0 = top, like an uploaded
     /// photo), the blur chain runs on it once for the background, and the
     /// tile is composed as Fit over it. Fails like `make_tile`.
-    fn make_video_tile(&mut self, probe: &Probe<V>) -> Result<Tile, String> {
+    fn make_video_tile(&mut self, probe: &Probe<P>) -> Result<Tile, String> {
         let rect = probe.rect;
         let (w, h) = (probe.meta.width.max(1), probe.meta.height.max(1));
         let s = (rect.w as f32 / w as f32)
@@ -1340,12 +1440,7 @@ impl<V: VideoSeam> Pipeline<V> {
         let source = unsafe { RenderTarget::try_new(sw, sh) }?;
         unsafe {
             source.bind_and_viewport();
-            self.video.probe_frame(&probe.player).draw(
-                self.quad_vbo,
-                self.quad_ibo,
-                (1.0, 1.0),
-                false,
-            );
+            self.draw_clip_frame(&self.video.probe_frame(&probe.player), (1.0, 1.0), false);
         }
         let comp = Composition::Fit(self.settings.fit_background);
         let bg = if self.settings.fit_background == FitBackground::Blurred {
@@ -1400,6 +1495,17 @@ impl<V: VideoSeam> Pipeline<V> {
                 bg,
             }),
         })
+    }
+
+    /// Draws a decoded frame into whatever framebuffer is bound. `upright`
+    /// pre-flips for drawing to the screen; a tile's `source` copy draws
+    /// with `false` (row 0 = the picture's top).
+    ///
+    /// # Safety
+    /// Requires a current GL context.
+    unsafe fn draw_clip_frame(&self, frame: &ClipFrame, scale: (f32, f32), upright: bool) {
+        let oes = self.oes.get_or_init(|| unsafe { OesProgram::new() });
+        unsafe { oes.draw(self.quad_vbo, self.quad_ibo, frame, scale, upright) };
     }
 
     /// A clip's still: the stored background (or black), then `source` fit.
@@ -1480,14 +1586,14 @@ impl<V: VideoSeam> Pipeline<V> {
         let Some(finished) = self.video.finish() else {
             return;
         };
-        if let Some(frame) = finished.frame()
+        if let Some(frame) = finished.frame
             && let Some(mut current) = self.current.take()
         {
             let t0 = clock::now();
             let tile = &mut current.tiles[0];
             unsafe {
                 tile.source.bind_and_viewport();
-                frame.draw(self.quad_vbo, self.quad_ibo, (1.0, 1.0), false);
+                self.draw_clip_frame(&frame, (1.0, 1.0), false);
             }
             let bg = tile.video.as_ref().and_then(|v| v.bg.as_ref());
             self.compose_video_target(tile.source.texture, &tile.target, &tile.meta, bg);
@@ -1809,7 +1915,7 @@ impl<V: VideoSeam> Pipeline<V> {
                         }
                         let scale =
                             fit_scale(meta.width, meta.height, self.screen_w, self.screen_h);
-                        frame.draw(self.quad_vbo, self.quad_ibo, scale, true);
+                        self.draw_clip_frame(&frame, scale, true);
                     }
                     _ => {
                         // Frameo only highlights inside a collage.
@@ -1963,7 +2069,7 @@ fn fit_scale(pw: u32, ph: u32, sw: i32, sh: i32) -> (f32, f32) {
 
 /// The App controller drives the pipeline through this narrow surface, so
 /// controller tests run against a fake with no GL behind it.
-impl<V: VideoSeam> crate::app::Slideshow for Pipeline<V> {
+impl<P: VideoPlayer> crate::app::Slideshow for Pipeline<P> {
     fn settings_mut(&mut self) -> &mut SlideshowSettings {
         &mut self.settings
     }

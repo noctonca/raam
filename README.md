@@ -16,6 +16,10 @@ APK, and a frame with root. If that's not you, watch for a release.
 [web demo](https://noctonca.github.io/raam/) runs the frame's slideshow
 and settings over twenty sample photos.
 
+[![The slideshow in the web demo: a collage of three photos, a château
+at dusk, a basket of buns and a waterfall under a rainbow, with the clock
+in the top right corner](docs/slideshow.jpg)](https://noctonca.github.io/raam/)
+
 ## What it does
 
 - **Photos from Immich albums** you pick on the frame, or from a folder
@@ -178,8 +182,8 @@ Raam is not affiliated with Immich, Frameo or ImmichFrame. It builds on
 [egui_keyboard](https://github.com/podusowski/egui_keyboard), the
 Roboto (SIL OFL 1.1) and Material Symbols (Apache-2.0) fonts, and
 weather data by [Open-Meteo.com](https://open-meteo.com) (CC BY 4.0).
-The Detailed clock follows ImmichFrame's. The web demo's sample photos
-are CC0, from Wikimedia Commons.
+The Detailed clock follows ImmichFrame's. The web demo's sample photos,
+also in the screenshot above, are CC0, from Wikimedia Commons.
 
 ## Licence
 

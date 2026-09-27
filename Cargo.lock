@@ -1969,6 +1969,7 @@ dependencies = [
  "log",
  "raam-model",
  "serde_json",
+ "web-sys",
 ]
 
 [[package]]

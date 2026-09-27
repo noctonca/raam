@@ -1,11 +1,12 @@
 //! Raw GLES2 FFI: the GLES2 half of the experiments' gl.rs (the painter's
 //! and pipeline's whole GL surface), plus `RenderTarget`. This is the
-//! cfg-selected GL layer's extern linkage, shared by Android (GLES2) and
-//! the desktop host: macOS/Linux GL exports the same entry points, and a
-//! cfg block below rewrites the GLSL ES 1.00 shaders to 1.50 for the core
-//! contexts glutin makes there. The WebGL1 shim replaces this file by name
-//! when the web host adopts the core (migration step 7). The EGL half
-//! lives with the Android host.
+//! cfg-selected GL layer, one set of entry points over three linkages:
+//! extern GLES2 on Android; the same extern names on the desktop host
+//! (macOS/Linux GL exports them, and a cfg block below rewrites the GLSL
+//! ES 1.00 shaders to 1.50 for the core contexts glutin makes there); and
+//! on wasm32 the WebGL1 shim in gl/webgl.rs, which implements them over
+//! the canvas's context. The helpers below the entry points are one copy
+//! for all three. The EGL half lives with the Android host.
 use std::ffi::{CStr, c_char, c_void};
 
 pub type GlUint = u32;
@@ -55,7 +56,16 @@ pub const GL_SRC_ALPHA: GlEnum = 0x0302;
 pub const GL_ALPHA: GlEnum = 0x1906;
 // 027: decoded video frames (011's SurfaceTexture bridge).
 pub const GL_TEXTURE_EXTERNAL_OES: GlEnum = 0x8D65;
+pub const GL_INFO_LOG_LENGTH: GlEnum = 0x8B84;
 
+// The WebGL1 linkage: the same names and signatures, forwarded to the
+// canvas's context (the host makes it current with `webgl::init`).
+#[cfg(target_arch = "wasm32")]
+mod webgl;
+#[cfg(target_arch = "wasm32")]
+pub use webgl::*;
+
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(non_snake_case, dead_code)]
 unsafe extern "C" {
     pub fn glGetString(name: GlEnum) -> *const u8;
@@ -256,7 +266,7 @@ pub unsafe fn link_program(label: &str, vs_src: &str, fs_src: &str) -> GlUint {
         glGetProgramiv(program, GL_LINK_STATUS, &mut status);
         if status == 0 {
             let mut len = 0i32;
-            glGetProgramiv(program, 0x8B84 /* GL_INFO_LOG_LENGTH */, &mut len);
+            glGetProgramiv(program, GL_INFO_LOG_LENGTH, &mut len);
             let mut buf = vec![0u8; len.max(1) as usize];
             let mut written = 0i32;
             glGetProgramInfoLog(program, len, &mut written, buf.as_mut_ptr() as *mut c_char);
@@ -280,7 +290,7 @@ unsafe fn compile(label: &str, kind: GlEnum, src: &str) -> GlUint {
         glGetShaderiv(shader, GL_COMPILE_STATUS, &mut status);
         if status == 0 {
             let mut len = 0i32;
-            glGetShaderiv(shader, 0x8B84 /* GL_INFO_LOG_LENGTH */, &mut len);
+            glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &mut len);
             let mut buf = vec![0u8; len.max(1) as usize];
             let mut written = 0i32;
             glGetShaderInfoLog(shader, len, &mut written, buf.as_mut_ptr() as *mut c_char);

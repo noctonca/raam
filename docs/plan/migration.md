@@ -24,8 +24,8 @@ are the part bought with the most debugging.
 | 5b | **Extract the App controller** from `android_main` (~800 lines): input routing, overlay lifecycle, sleep state machine, wait computation — into `raam-core`, events in / effects out | M–L | tap routing, auto-dismiss, undo-hide, sleep/wake cycle, manual wake |
 | 6 | frame_ui replaces the 025-era `ui.rs`: one Settings type ends the mirror drift; adds the video settings frame_ui lacks | M–L | menu latency, typing, settings survive restart, MemFree with menu open during a clip |
 | 6b | `VideoSeam` narrows to ARCHITECTURE's `VideoPlayer` (open/play/pause/stop/phase/has_frame/oes/matrix): the probe/live/backoff/wedge orchestration moves into the core (split out of step 6, 2026-09-27) | M | A/V start, Next mid-clip per playback mode, one decoder at a time, `fail=rt` recovery |
-| 7 | The web host adopts the core: bundled photos + faces.json through its own `TileSource` | M | collages, Fill/Fit, blur, clock in the browser; pixel diff vs desktop goldens |
-| 8 | The desktop host adopts the core (the `raam` binary); goldens re-blessed once, knowingly | S–M | `--exact` suite green |
+| 7 | The web host adopts the core: bundled photos + faces.json through its own `TileSource`, which offers no clips (`NoVideo` is its player) | M | collages, Fill/Fit, blur, clock in the browser; pixel diff vs desktop goldens |
+| 8 | The desktop host adopts the core (the `raam` binary) with `NoVideo`; if it runs the engine, its `MediaProbe` stub reports every clip unplayable so none is planned; goldens re-blessed once, knowingly | S–M | `--exact` suite green |
 
 Step-5 details settled in advance by the workspace check in the lab
 repo: cargo-apk2 builds workspace members into the root `target/`;

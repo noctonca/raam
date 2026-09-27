@@ -5,11 +5,12 @@
 //! props. The product: applicationId io.github.noctonca.raam, the
 //! frame's home app.
 //!
-//! `android_main` still holds the app controller (input routing, overlay
-//! lifecycle, settings save, the sleep state machine); extracting it into
-//! raam-core is migration step 5b. Everything portable already lives in
-//! raam-core/raam-model, and the data side in raam-engine, reached only
-//! through the seams built in `Host`.
+//! The product's behaviour lives in raam-core's App controller (step 5b):
+//! each loop pass feeds it the lifecycle and touch events, calls
+//! `frame`, executes the effects it returns, and draws around it — the
+//! slideshow, the clock overlay, the egui chrome, the swap. Everything
+//! portable lives in raam-core/raam-model, and the data side in
+//! raam-engine, reached only through the seams built in `Host`.
 #![cfg(target_os = "android")]
 
 mod audio_out;
@@ -29,19 +30,16 @@ use android_activity::{
     AndroidApp, AndroidAppWaker, InputStatus, MainEvent, PollEvent, WindowManagerFlags,
 };
 use ndk::native_window::NativeWindow;
+use raam_core::app::{App, Deps, Effect, Event, Inputs, Overrides, Stage, Touch};
 use raam_core::gl::{GL_RENDERER, GL_VENDOR, GL_VERSION, gl_string, glDisableVertexAttribArray};
-use raam_core::overlay::{self, ClockOverlay};
+use raam_core::overlay::ClockOverlay;
 use raam_core::painter::Painter;
-use raam_core::schedule::{self, Schedule};
 use raam_core::slideshow::{Pipeline, SlideshowSettings};
-use raam_core::ui::{self, AppState, Screen};
-use raam_core::{clock, collage, switches, weather_icons};
+use raam_core::ui::{AppState, Screen};
+use raam_core::{clock, collage, switches};
 use raam_engine::{db, fetch, immich, library, weather};
-use raam_model::limits::{
-    AUTO_DISMISS, DEFAULT_MANUAL_IDLE, LARGEST_LAYOUT, MAX_EGUI_WAIT, SAVE_DEBOUNCE, TAP_SLOP_PX,
-    UNDO_HIDE,
-};
-use raam_model::{ClockStyle, FitBackground, GapColour, ScaleMode, SourceKind};
+use raam_model::limits::LARGEST_LAYOUT;
+use raam_model::{FitBackground, GapColour, SourceKind};
 use std::ffi::c_void;
 use std::sync::Arc;
 use std::time::Duration;
@@ -113,7 +111,8 @@ fn grant_storage() -> bool {
 }
 
 /// Free memory as /proc/meminfo reports it, for the log lines (the
-/// pipeline gets this as its injected reader — no I/O in the core).
+/// pipeline and the controller get this as their injected reader — no I/O
+/// in the core).
 fn mem_free_kb() -> Option<u64> {
     let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
     for line in contents.lines() {
@@ -122,14 +121,6 @@ fn mem_free_kb() -> Option<u64> {
         }
     }
     None
-}
-
-struct Touch {
-    phase: egui::TouchPhase,
-    pos: egui::Pos2,
-    device_id: u64,
-    touch_id: u64,
-    force: f32,
 }
 
 #[derive(Default)]
@@ -160,29 +151,48 @@ fn ms(d: Duration, n: u32) -> f64 {
     }
 }
 
-fn apply_ui(state: &AppState, pipeline: &mut Pipeline<video::Video>, fetch: &fetch::FetchShared) {
-    fetch.set_max_group(state.settings.collage_max);
-    pipeline.settings.gap_colour = state.settings.gap_colour;
-    // Hidden time never counts: lib.rs pauses the clock itself while there
-    // is nothing to draw on, and this only runs while drawing.
-    pipeline.clock.set_paused(state.paused);
-    pipeline.settings.dwell = Duration::from_secs_f32(state.settings.interval_secs);
-    pipeline.settings.transition = state.settings.transition.shader_name();
-    pipeline.settings.ken_burns = state.settings.ken_burns_enabled;
-    pipeline.settings.fill_by_default = state.settings.fill_by_default;
-    pipeline.settings.fit_background = state.settings.fit_background;
-    pipeline.settings.video_playback = state.settings.video_playback;
-    pipeline.settings.video_sound = state.settings.video_sound;
-    pipeline.settings.video_volume = state.settings.video_volume;
-    // Test-only: `debug.video.audio_extra_ms` overrides the calibration.
-    pipeline.video.audio_extra_ms = props::prop("debug.video.audio_extra_ms")
-        .trim()
-        .parse()
-        .unwrap_or(state.settings.audio_delay_ms);
-}
-
-fn min_wait(a: Option<Duration>, b: Duration) -> Option<Duration> {
-    Some(a.map_or(b, |a| a.min(b)))
+/// The controller's effects, mapped onto the engine and the host plumbing.
+fn run_effects(
+    effects: Vec<Effect>,
+    lib: &library::Library,
+    fetch: Option<&fetch::FetchShared>,
+    power: Option<&power::Power>,
+) {
+    for effect in effects {
+        match effect {
+            Effect::SaveSettings { rows, sleep } => {
+                lib.send(library::Cmd::SaveSettings { rows, sleep })
+            }
+            Effect::SetScale(key, mode) => lib.send(library::Cmd::SetScale(key, mode)),
+            Effect::SetHidden(key, hidden) => lib.send(library::Cmd::SetHidden(key, hidden)),
+            Effect::SetSourceEnabled(kind, on) => lib.set_enabled(kind, on),
+            Effect::SetServer { url, key } => {
+                lib.send(library::Cmd::SetServer(immich::Config { url, key }))
+            }
+            Effect::ExportCuration => lib.send(library::Cmd::ExportCuration),
+            Effect::SelectAlbum(album, on) => lib.send(library::Cmd::SelectAlbum(album, on)),
+            Effect::SetCap(cap) => lib.send(library::Cmd::SetCap(cap)),
+            Effect::ClearCache => lib.send(library::Cmd::ClearCache),
+            Effect::Rescan => lib.send(library::Cmd::Rescan),
+            Effect::SyncNow => lib.send(library::Cmd::SyncNow),
+            Effect::SetMaxGroup(max) => {
+                if let Some(f) = fetch {
+                    f.set_max_group(max);
+                }
+            }
+            // 027: the volume is the music stream's (see power.rs).
+            Effect::SetMusicVolume(v) => {
+                if let Some(p) = power {
+                    match p.set_music_volume(v) {
+                        Ok((i, max)) => {
+                            log::info!("music stream volume {i}/{max} ({:.0}%)", v * 100.0)
+                        }
+                        Err(e) => log::error!("setting the music stream volume: {e}"),
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -221,8 +231,6 @@ fn android_main(app: AndroidApp) {
     player::init_jvm(app.vm_as_ptr());
 
     let mut fetch: Option<std::sync::Arc<fetch::FetchShared>> = None;
-    let ctx = egui::Context::default();
-    ctx.set_pixels_per_point(1.0);
     // Nothing is baked in: a fresh install starts with no server and no
     // key, both entered in settings.
     let mut state = AppState::new("", "");
@@ -273,78 +281,36 @@ fn android_main(app: AndroidApp) {
     let lib = library::spawn(database, paths, state.settings.cache_cap_mb, host.clone());
     state.settings.immich_enabled = lib.enabled(SourceKind::Immich);
     state.settings.local_enabled = lib.enabled(SourceKind::Local);
-    // What was last sent for saving, so only changes are written.
-    let mut saved_rows = db::settings_rows(&state.settings);
-    let mut saved_sleep = (
-        state.settings.sleep_enabled,
-        state.settings.sleep_min,
-        state.settings.wake_min,
-    );
-    let mut saved_server = (
-        state.settings.server_url.clone(),
-        state.settings.api_key.clone(),
-    );
-    let mut saved_cap = state.settings.cache_cap_mb;
-    let mut settings_dirty: Option<Duration> = None;
-    // The schedule as the user set it, kept while a debug override is on.
-    let mut schedule_base = (state.settings.sleep_min, state.settings.wake_min);
-    let mut undo: Option<(String, Duration)> = None;
-    let mut stats_version = 0u64;
+    // The controller takes the loaded state; its saved-settings snapshots
+    // start from it, so nothing writes at boot.
+    let mut controller = App::new(state, mem_free_kb);
 
     let mut egl: Option<EglState> = None;
     let mut painter: Option<Painter> = None;
     let mut pipeline: Option<Pipeline<video::Video>> = None;
     let mut clock_overlay: Option<ClockOverlay> = None;
     let mut weather: Option<std::sync::Arc<weather::WeatherShared>> = None;
-    // Re-derive the overlay's text only when one of these changes.
-    let mut clock_inputs: Option<(u64, u64, ClockStyle, bool)> = None;
-    let mut weather_status = String::from("weather: waiting");
 
-    let start = clock::now();
-    let mut overlay_open = false;
-    let mut closed_down: Option<egui::Pos2> = None;
-    let mut egui_down = false;
-    let mut last_input = clock::now();
     let mut next_wait: Option<Duration> = Some(Duration::ZERO);
     let mut stats = Stats::default();
     let mut last_log = clock::now();
-    // Frame-reuse state: the overlay's geometry lives in the painter's
-    // persistent buffers; egui itself only runs when it has input, asked
-    // for a repaint that is now due, or the status line changed.
-    let mut egui_due = clock::now();
-    let mut egui_uploaded = false;
-    let mut last_status = String::new();
 
-    // 023: lifecycle and schedule state.
-    let power = match power::Power::new(&app) {
+    // 023: lifecycle and schedule plumbing.
+    let mut power = match power::Power::new(&app) {
         Ok(p) => Some(p),
         Err(e) => {
             log::error!("power: JNI setup failed, no sleep schedule: {e}");
             None
         }
     };
-    let mut resumed = false;
     let mut low_memory = false;
-    // A Start/Resume arrived: if it is wake time, make sure the screen is on.
-    let mut check_wake = false;
-    // We turned the screen off and haven't seen it come back yet.
-    let mut asleep_since: Option<Duration> = None;
-    // Awake by hand in sleep hours: back to sleep once untouched this long.
-    let mut manual_wake: Option<Duration> = None;
-    // Sleep hours at the last visible evaluation; `None` after being hidden,
-    // so only a boundary crossed while in front sends the screen to sleep.
-    let mut prev_in_sleep: Option<bool> = None;
-    let mut last_touch = clock::now();
-    let mut hidden_since: Option<Duration> = Some(clock::now());
-    let mut hidden_wakes = 0u32;
     let mut debug = props::DebugProps::default();
     let mut mech = WakeMech::Both;
-    let mut manual_idle = DEFAULT_MANUAL_IDLE;
     let mut flags_applied: Option<WakeMech> = None;
-    let mut music_volume: Option<f32> = None;
 
     loop {
         let mut quit = false;
+        let mut events: Vec<Event> = Vec::new();
         app.poll_events(next_wait, |event| {
             let PollEvent::Main(event) = event else {
                 return;
@@ -379,12 +345,9 @@ fn android_main(app: AndroidApp) {
                         unsafe { e.release_window() };
                     }
                 }
-                MainEvent::Start => check_wake = true,
-                MainEvent::Resume { .. } => {
-                    resumed = true;
-                    check_wake = true;
-                }
-                MainEvent::Pause => resumed = false,
+                MainEvent::Start => events.push(Event::Start),
+                MainEvent::Resume { .. } => events.push(Event::Resume),
+                MainEvent::Pause => events.push(Event::Pause),
                 MainEvent::LowMemory => low_memory = true,
                 _ => {}
             }
@@ -400,27 +363,12 @@ fn android_main(app: AndroidApp) {
             );
         }
 
-        // Settings and the test-only property overrides.
+        // The test-only property overrides. The schedule ones go to the
+        // controller as inputs; the wake mechanism is host business.
         switches::set_fail(&props::prop("debug.video.fail"));
         let props = props::debug_props();
         if props != debug {
             log::info!("debug props {props:?}");
-            // A cleared override puts the default back, so a test schedule
-            // can't outlive its test.
-            // A cleared override puts the saved schedule back.
-            if props.sleep != debug.sleep {
-                if debug.sleep.is_none() {
-                    schedule_base.0 = state.settings.sleep_min;
-                }
-                state.settings.sleep_min = props.sleep.unwrap_or(schedule_base.0);
-            }
-            if props.wake != debug.wake {
-                if debug.wake.is_none() {
-                    schedule_base.1 = state.settings.wake_min;
-                }
-                state.settings.wake_min = props.wake.unwrap_or(schedule_base.1);
-            }
-            manual_idle = props.idle.unwrap_or(DEFAULT_MANUAL_IDLE);
             mech = WakeMech::from_prop(&props.mech);
             debug = props;
         }
@@ -440,39 +388,14 @@ fn android_main(app: AndroidApp) {
             log::info!("wake mechanism {mech:?}");
             flags_applied = Some(mech);
         }
-        let sched = Schedule {
-            enabled: state.settings.sleep_enabled && power.is_some(),
-            sleep_min: state.settings.sleep_min,
-            wake_min: state.settings.wake_min,
-        };
-        let (now_sod, now_epoch) = schedule::local_now();
-        let in_sleep = sched.asleep_at(now_sod / 60);
-        // Time to the next sleep/wake boundary, the loop's longest wait.
-        let boundary_wait = sched.enabled.then(|| {
-            schedule::until(sched.sleep_min, now_sod).min(schedule::until(sched.wake_min, now_sod))
-        });
-
-        if std::mem::take(&mut check_wake) && !in_sleep {
-            if let Some(p) = &power {
-                let before = p.is_interactive();
-                if mech.wakelock() {
-                    match p.wake_screen() {
-                        Ok(()) => {
-                            log::info!("wake: wake lock taken (interactive before: {before:?})")
-                        }
-                        Err(e) => log::error!("wake: wake lock failed: {e}"),
-                    }
-                } else {
-                    log::info!("wake: flags only (interactive before: {before:?})");
-                }
-            }
-            if asleep_since.take().is_some() {
-                log::info!(
-                    "schedule: woken at wake time ({})",
-                    schedule::fmt_hm(now_sod / 60)
-                );
-            }
+        for t in read_touches(&app) {
+            events.push(Event::Touch(t));
         }
+        let overrides_in = Overrides {
+            sleep: debug.sleep,
+            wake: debug.wake,
+            idle: debug.idle,
+        };
 
         // A new window after TerminateWindow: same config and context, so
         // every GL object made before is still there.
@@ -498,56 +421,27 @@ fn android_main(app: AndroidApp) {
             }
         }
 
-        // Nothing to draw on: no window, or not resumed (screen off, another
-        // activity in front). The slideshow's time stops and the loop blocks
-        // until the next event or schedule boundary.
-        let has_surface = egl.as_ref().is_some_and(|e| e.has_window());
-        if egl.is_some() && !(has_surface && resumed) {
-            if hidden_since.is_none() {
-                log::info!("hidden (surface={has_surface} resumed={resumed}), slideshow paused");
-                hidden_since = Some(clock::now());
-                hidden_wakes = 0;
-                prev_in_sleep = None;
-                if let Some(p) = pipeline.as_mut() {
-                    p.clock.set_paused(true);
-                    // 027: a playing clip (and its sound) stops with it.
-                    p.video.pause_now();
-                }
-                if overlay_open {
-                    overlay_open = false;
-                    if let Some(p) = pipeline.as_mut() {
-                        p.clear_selection();
-                        p.set_menu_open(false);
-                    }
-                    egui_down = false;
-                    egui_uploaded = false;
-                    state.reset_on_close();
-                    ctx.memory_mut(|m| m.stop_text_input());
-                }
-                closed_down = None;
-            }
-            hidden_wakes += 1;
-            // Backstop for the alarm: if the process is alive and the CPU
-            // awake at wake time, light the screen from here too (whatever is
-            // in front then shows; the alarm brings us to the front).
-            if asleep_since.is_some() && !in_sleep {
-                log::info!("schedule: wake time reached in-process while hidden");
-                asleep_since = None;
-                if let Some(p) = &power
-                    && let Err(e) = p.wake_screen()
-                {
-                    log::error!("wake: wake lock failed: {e}");
-                }
-            }
-            // Drain touches so they don't replay on return.
-            let _ = read_touches(&app);
-            next_wait = boundary_wait.map(|w| w + Duration::from_millis(50));
-            continue;
-        }
-
         if egl.is_none() {
+            // The controller runs before the first window too, so a boot
+            // in wake hours lights the screen.
+            let out = controller.frame(
+                &events,
+                &Inputs {
+                    has_surface: false,
+                    screen: (0, 0),
+                    wakelock_allowed: mech.wakelock(),
+                    overrides: overrides_in,
+                },
+                &mut Deps {
+                    stage: None,
+                    power: power
+                        .as_mut()
+                        .map(|p| p as &mut dyn raam_core::seams::Power),
+                },
+            );
+            run_effects(out.effects, &lib, None, power.as_ref());
             let Some(window) = app.native_window() else {
-                next_wait = boundary_wait;
+                next_wait = out.wait;
                 continue;
             };
             let e = match unsafe { EglState::new(&window) } {
@@ -569,13 +463,13 @@ fn android_main(app: AndroidApp) {
                 collage::screen_diagonal_inches(e.width, e.height, density),
             );
             if !saved_keys.iter().any(|k| k == "collage.max") {
-                state.settings.collage_max = default_max.min(LARGEST_LAYOUT);
+                controller.state.settings.collage_max = default_max.min(LARGEST_LAYOUT);
             }
-            state.settings.screen_default_max = default_max;
+            controller.state.settings.screen_default_max = default_max;
             let margin = ((2.0 * density as f32 / 160.0) + 0.5) as i32;
             fetch = Some(fetch::spawn(
                 host.clone(),
-                state.settings.collage_max,
+                controller.state.settings.collage_max,
                 fetch::Screen {
                     width: e.width,
                     height: e.height,
@@ -598,9 +492,9 @@ fn android_main(app: AndroidApp) {
                         fill_by_default: true,
                         fit_background: FitBackground::Blurred,
                         gap_colour: GapColour::Black,
-                        video_playback: state.settings.video_playback,
-                        video_sound: state.settings.video_sound,
-                        video_volume: state.settings.video_volume,
+                        video_playback: controller.state.settings.video_playback,
+                        video_sound: controller.state.settings.video_sound,
+                        video_volume: controller.state.settings.video_volume,
                     },
                     video::Video::new(app.create_waker()),
                     mem_free_kb,
@@ -624,130 +518,48 @@ fn android_main(app: AndroidApp) {
             next_wait = Some(Duration::ZERO);
             continue;
         }
-        if let Some(since) = hidden_since.take() {
-            log::info!(
-                "visible again after {:.1}s hidden ({hidden_wakes} loop wakes while hidden), MemFree={:?}KB",
-                clock::elapsed(since).as_secs_f64(),
-                mem_free_kb()
-            );
-            egui_uploaded = false;
-            last_log = clock::now();
-            stats = Stats::default();
-            last_touch = clock::now();
-            if asleep_since.take().is_some() && in_sleep {
-                log::info!(
-                    "schedule: woken by hand in sleep hours, back to sleep after {manual_idle:?} untouched"
-                );
-                manual_wake = Some(clock::now());
-            }
-        }
-
-        // The schedule, evaluated only while in front.
-        if !in_sleep {
-            manual_wake = None;
-        }
-        if let Some(since) = asleep_since
-            && clock::elapsed(since) >= Duration::from_secs(30)
-        {
-            log::error!(
-                "schedule: screen still on 30s after sleeping, treating it as a manual wake"
-            );
-            asleep_since = None;
-            manual_wake = Some(clock::now());
-        }
-        if asleep_since.is_none() && in_sleep {
-            let crossed = prev_in_sleep == Some(false);
-            if !crossed && manual_wake.is_none() {
-                log::info!(
-                    "schedule: in front during sleep hours, sleeping after {manual_idle:?} untouched"
-                );
-                manual_wake = Some(clock::now());
-            }
-            let idle_done = manual_wake
-                .is_some_and(|m| clock::elapsed(m).min(clock::elapsed(last_touch)) >= manual_idle);
-            if (crossed || idle_done)
-                && !overlay_open
-                && let Some(p) = &power
-            {
-                let wake_in = schedule::until(sched.wake_min, now_sod);
-                let wake_ms = (now_epoch + wake_in.as_secs() as i64) * 1000;
-                match p.set_wake_alarm(wake_ms) {
-                    Ok(()) => {
-                        log::info!(
-                            "schedule: sleeping at {} ({}), wake alarm set for {} (in {}s)",
-                            schedule::fmt_hm(now_sod / 60),
-                            if crossed {
-                                "sleep time"
-                            } else {
-                                "idle in sleep hours"
-                            },
-                            schedule::fmt_hm(sched.wake_min),
-                            wake_in.as_secs()
-                        );
-                        asleep_since = Some(clock::now());
-                        manual_wake = None;
-                        power::sleep_screen();
-                    }
-                    Err(e) => log::error!("schedule: wake alarm failed, staying awake: {e}"),
-                }
-            }
-        }
-        prev_in_sleep = Some(in_sleep);
 
         let egl_state = egl.as_ref().unwrap();
-        let painter = painter.as_mut().unwrap();
-        let pipeline = pipeline.as_mut().unwrap();
-        let fetch: &fetch::FetchShared = fetch.as_ref().unwrap();
-        let clock_overlay = clock_overlay.as_mut().unwrap();
-        let weather = weather.as_ref().unwrap();
         let frame_start = clock::now();
+        // Test-only: `debug.video.audio_extra_ms` overrides the calibration.
+        let p = pipeline.as_mut().unwrap();
+        p.video.audio_extra_ms = props::prop("debug.video.audio_extra_ms")
+            .trim()
+            .parse()
+            .unwrap_or(controller.state.settings.audio_delay_ms);
 
-        let mut egui_events = Vec::new();
-        let mut presses = Vec::new();
-        for t in read_touches(&app) {
-            last_touch = clock::now();
-            if !overlay_open {
-                match t.phase {
-                    egui::TouchPhase::Start => closed_down = Some(t.pos),
-                    egui::TouchPhase::End => {
-                        if let Some(d) = closed_down.take()
-                            && d.distance(t.pos) <= TAP_SLOP_PX
-                        {
-                            overlay_open = true;
-                            last_input = clock::now();
-                            let tile = pipeline.select_at(t.pos.x, t.pos.y);
-                            log::info!("overlay opened by tap at {:?} on tile {tile:?}", t.pos);
-                        }
-                    }
-                    egui::TouchPhase::Cancel => closed_down = None,
-                    egui::TouchPhase::Move => {}
-                }
-                continue;
-            }
-            last_input = clock::now();
-            push_egui_touch(&t, &mut egui_down, &mut egui_events, &mut presses);
+        let fetch_ref: &fetch::FetchShared = fetch.as_ref().unwrap();
+        let out = controller.frame(
+            &events,
+            &Inputs {
+                has_surface: egl_state.has_window(),
+                screen: (egl_state.width, egl_state.height),
+                wakelock_allowed: mech.wakelock(),
+                overrides: overrides_in,
+            },
+            &mut Deps {
+                stage: Some(Stage {
+                    slideshow: p,
+                    source: fetch_ref,
+                    library: lib.as_ref(),
+                    weather: weather.as_ref().unwrap().as_ref(),
+                }),
+                power: power
+                    .as_mut()
+                    .map(|p| p as &mut dyn raam_core::seams::Power),
+            },
+        );
+        run_effects(out.effects, &lib, fetch.as_deref(), power.as_ref());
+        if out.became_visible {
+            stats = Stats::default();
+            last_log = clock::now();
         }
-
-        apply_ui(&state, pipeline, fetch);
-        // 027: the volume is the music stream's (see power.rs), set when it
-        // changes while sound is on (and once at start).
-        let want_volume = state
-            .settings
-            .video_sound
-            .then_some(state.settings.video_volume);
-        if want_volume.is_some() && want_volume != music_volume {
-            if let (Some(p), Some(v)) = (&power, want_volume) {
-                match p.set_music_volume(v) {
-                    Ok((i, max)) => log::info!("music stream volume {i}/{max} ({:.0}%)", v * 100.0),
-                    Err(e) => log::error!("setting the music stream volume: {e}"),
-                }
-            }
-            music_volume = want_volume;
+        if out.skip_draw {
+            next_wait = out.wait;
+            continue;
         }
-        pipeline.set_menu_open(overlay_open);
-        let t = clock::now();
-        pipeline.update(fetch);
-        stats.advance += clock::elapsed(t);
+        stats.advance += out.advance;
+        let pipeline = pipeline.as_mut().unwrap();
         for (asset, why) in pipeline.video.take_unplayable() {
             lib.send(library::Cmd::SetUnplayable(asset, why));
         }
@@ -765,55 +577,17 @@ fn android_main(app: AndroidApp) {
         }
 
         // Clock overlay: over the slideshow (transitions included), under
-        // the egui chrome.
-        let t = clock::now();
-        let minute = epoch_secs() / 60;
-        let inputs = (
-            minute,
-            weather.version(),
-            state.settings.clock_style,
-            state.settings.clock_24h,
-        );
-        if clock_inputs != Some(inputs) {
-            clock_inputs = Some(inputs);
-            let (city, current) = weather.snapshot();
-            let w = current.map(|c| {
-                let (description, icon) = weather_icons::describe(c.code, c.is_day);
-                overlay::Weather {
-                    icon: icon.ch(),
-                    temp: format!("{}\u{b0}", c.temp_c.round() as i64),
-                    description,
-                    city: city.clone(),
-                }
-            });
-            weather_status = match (&city, current) {
-                (Some(city), Some(c)) => format!(
-                    "{city} {:.1}\u{b0}C {}",
-                    c.temp_c,
-                    weather_icons::describe(c.code, c.is_day).0
-                ),
-                (Some(city), None) => format!("{city}, weather pending"),
-                _ => "locating...".to_string(),
-            };
-            let now = props::local_time((minute * 60) as i64);
-            let content = overlay::content(
-                state.settings.clock_style,
-                state.settings.clock_24h,
-                &now,
-                w,
-            );
-            if clock_overlay.update(
-                state.settings.clock_style,
-                &content,
-                egl_state.width,
-                egl_state.height,
-            ) {
+        // the egui chrome. The controller says when the text changed.
+        let clock_overlay = clock_overlay.as_mut().unwrap();
+        if let Some(r) = out.overlay {
+            let t = clock::now();
+            if clock_overlay.update(r.style, &r.content, egl_state.width, egl_state.height) {
                 stats.clock_rebuild += clock::elapsed(t);
                 stats.clock_rebuilds += 1;
                 log::info!(
                     "overlay rebuilt ({}): {:?} in {:.2}ms",
-                    state.settings.clock_style.label(),
-                    content,
+                    r.style.label(),
+                    r.content,
                     clock::elapsed(t).as_secs_f64() * 1000.0
                 );
             }
@@ -822,239 +596,41 @@ fn android_main(app: AndroidApp) {
         clock_overlay.draw(egl_state.width, egl_state.height);
         stats.clock_draw += clock::elapsed(t);
 
-        let mut force_redraw = false;
-        let mut egui_delay = Duration::MAX;
-        if undo
-            .as_ref()
-            .is_some_and(|u| clock::elapsed(u.1) >= UNDO_HIDE)
-        {
-            undo = None;
-        }
-        if overlay_open {
-            state.shown_scale = pipeline.shown_scale_mode();
-            state.shown_video = pipeline.shown_is_video();
-            state.undo_secs = undo
-                .as_ref()
-                .map(|u| UNDO_HIDE.saturating_sub(clock::elapsed(u.1)).as_secs() + 1);
-            let (version, lib_stats) = lib.stats();
-            let status = format!(
-                "{}  ·  {}  ·  {}  ·  {}  ·  every {:.0}s  ·  back history: {}  ·  {}  ·  {}  ·  {}",
-                if state.paused { "Paused" } else { "Playing" },
-                pipeline.shown_layout(),
-                match state.shown_scale {
-                    Some(ScaleMode::Fill) => "Fill frame",
-                    Some(ScaleMode::Fit) => "Fit to frame",
-                    None => "-",
-                },
-                state.settings.transition.label(),
-                state.settings.interval_secs,
-                pipeline.history_len(),
-                weather_status,
-                if sched.enabled {
-                    format!(
-                        "sleeps {}-{}",
-                        schedule::fmt_hm(sched.sleep_min),
-                        schedule::fmt_hm(sched.wake_min)
-                    )
-                } else {
-                    "no sleep schedule".to_string()
-                },
-                sources_status(&state.settings, &lib_stats, lib.online()),
-            );
-            let raw_input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(egl_state.width as f32, egl_state.height as f32),
-                )),
-                time: Some(clock::elapsed(start).as_secs_f64()),
-                predicted_dt: 1.0 / 30.0,
-                events: egui_events,
-                ..Default::default()
-            };
-            let mut actions = ui::Actions::default();
-            let need_run = !egui_uploaded
-                || !raw_input.events.is_empty()
-                || clock::now() >= egui_due
-                || status != last_status
-                || version != stats_version;
-            if need_run {
-                stats_version = version;
-                state.library = lib_stats;
-                let t = clock::now();
-                let mut full_output =
-                    ctx.run_ui(raw_input, |ui| ui::draw(ui.ctx(), &mut state, &status));
-                stats.run += clock::elapsed(t);
-
-                actions = std::mem::take(&mut state.actions);
-                apply_ui(&state, pipeline, fetch);
-                if actions.next {
-                    pipeline.request_next();
+        // The egui chrome: upload a fresh run's output, then draw from the
+        // painter's persistent buffers while the menu is up.
+        let painter = painter.as_mut().unwrap();
+        if let Some(mut e) = out.egui {
+            for (id, deltas) in &e.textures_delta.set {
+                for delta in deltas {
+                    painter.set_texture(*id, delta);
                 }
-                if actions.prev {
-                    pipeline.request_prev(fetch);
-                }
-                if actions.toggle_scale
-                    && let Some((key, mode)) = pipeline.toggle_shown_scale()
-                {
-                    lib.send(library::Cmd::SetScale(key, mode));
-                }
-                if actions.hide
-                    && let Some((key, asset)) = pipeline.shown_photo()
-                {
-                    log::info!("hide asset {asset} ({key})");
-                    lib.send(library::Cmd::SetHidden(key.clone(), true));
-                    pipeline.forget(&key, fetch);
-                    undo = Some((key, clock::now()));
-                }
-                if actions.undo_hide
-                    && let Some((key, _)) = undo.take()
-                {
-                    log::info!("undo hide of {key}");
-                    lib.send(library::Cmd::SetHidden(key.clone(), false));
-                    pipeline.unforget(&key);
-                }
-                if let Some(key) = actions.unhide.take() {
-                    lib.send(library::Cmd::SetHidden(key.clone(), false));
-                    pipeline.unforget(&key);
-                }
-                for (flag, cmd) in [
-                    (actions.clear_cache, library::Cmd::ClearCache),
-                    (actions.rescan, library::Cmd::Rescan),
-                    (actions.sync_now, library::Cmd::SyncNow),
-                    (actions.export, library::Cmd::ExportCuration),
-                ] {
-                    if flag {
-                        lib.send(cmd);
-                    }
-                }
-                for (album, on) in actions.select_album.drain(..) {
-                    lib.send(library::Cmd::SelectAlbum(album, on));
-                }
-                lib.set_enabled(SourceKind::Immich, state.settings.immich_enabled);
-                lib.set_enabled(SourceKind::Local, state.settings.local_enabled);
-                if state.settings.cache_cap_mb != saved_cap {
-                    saved_cap = state.settings.cache_cap_mb;
-                    lib.send(library::Cmd::SetCap(saved_cap));
-                }
-                let rows = db::settings_rows(&state.settings);
-                let sleep = (
-                    state.settings.sleep_enabled,
-                    state.settings.sleep_min,
-                    state.settings.wake_min,
-                );
-                if rows != saved_rows || sleep != saved_sleep {
-                    settings_dirty.get_or_insert_with(clock::now);
-                }
-                if actions.next || actions.prev {
-                    pipeline.update(fetch);
-                }
-
-                for (id, deltas) in &full_output.textures_delta.set {
-                    for delta in deltas {
-                        painter.set_texture(*id, delta);
-                    }
-                }
-                let t = clock::now();
-                let primitives = ctx.tessellate(
-                    std::mem::take(&mut full_output.shapes),
-                    full_output.pixels_per_point,
-                );
-                stats.tess += clock::elapsed(t);
-                stats.verts += primitives
-                    .iter()
-                    .map(|p| match &p.primitive {
-                        egui::epaint::Primitive::Mesh(m) => m.vertices.len(),
-                        _ => 0,
-                    })
-                    .sum::<usize>();
-                let t = clock::now();
-                painter.upload(&primitives, egl_state.width, egl_state.height);
-                stats.upload += clock::elapsed(t);
-                // Textures freed this pass are no longer referenced by the
-                // primitives just uploaded, so freeing now is safe.
-                for id in &full_output.textures_delta.free {
-                    painter.free_texture(*id);
-                }
-                full_output.textures_delta.clear();
-                egui_uploaded = true;
-                last_status = status;
-                stats.egui_runs += 1;
-
-                let delay = full_output
-                    .viewport_output
-                    .get(&egui::ViewportId::ROOT)
-                    .map_or(Duration::MAX, |v| v.repaint_delay);
-                egui_due = clock::now()
-                    .checked_add(delay)
-                    .unwrap_or_else(|| clock::now() + Duration::from_secs(3600));
             }
+            stats.run += e.run;
+            stats.tess += e.tess;
+            stats.verts += e
+                .primitives
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(m) => m.vertices.len(),
+                    _ => 0,
+                })
+                .sum::<usize>();
+            let t = clock::now();
+            painter.upload(&e.primitives, egl_state.width, egl_state.height);
+            stats.upload += clock::elapsed(t);
+            // Textures freed this pass are no longer referenced by the
+            // primitives just uploaded, so freeing now is safe.
+            for id in &e.textures_delta.free {
+                painter.free_texture(*id);
+            }
+            e.textures_delta.clear();
+            stats.egui_runs += 1;
+        }
+        if out.draw_egui {
             let t = clock::now();
             painter.draw(egl_state.width, egl_state.height);
             stats.paint += clock::elapsed(t);
             stats.egui_frames += 1;
-            egui_delay = egui_due.saturating_sub(clock::now());
-
-            let typing = ctx.egui_wants_keyboard_input();
-            // `run_ui`'s root Ui is itself a full-screen Background-order
-            // layer, so "outside the chrome" means a hit on nothing above it.
-            let tapped_outside = presses.iter().any(|p| {
-                ctx.layer_id_at(*p)
-                    .is_none_or(|l| l.order == egui::Order::Background)
-            });
-            let timed_out = !typing && clock::elapsed(last_input) >= AUTO_DISMISS;
-            if actions.close || tapped_outside || timed_out {
-                log::info!(
-                    "overlay closed (button={} tap_outside={tapped_outside} timeout={timed_out})",
-                    actions.close
-                );
-                overlay_open = false;
-                pipeline.clear_selection();
-                pipeline.set_menu_open(false);
-                egui_down = false;
-                egui_uploaded = false;
-                state.reset_on_close();
-                ctx.memory_mut(|m| m.stop_text_input());
-                force_redraw = true;
-                // The server and key apply (and save) when the menu closes,
-                // not per keystroke.
-                let server = (
-                    state.settings.server_url.trim().to_string(),
-                    state.settings.api_key.trim().to_string(),
-                );
-                if server != saved_server && !server.0.is_empty() {
-                    saved_server = server.clone();
-                    lib.send(library::Cmd::SetServer(immich::Config {
-                        url: server.0,
-                        key: server.1,
-                    }));
-                }
-            }
-        }
-        // Save changed settings once they settle, or at once when the menu
-        // has closed. A debug schedule override is never saved.
-        if let Some(since) = settings_dirty
-            && (!overlay_open || clock::elapsed(since) >= SAVE_DEBOUNCE)
-        {
-            settings_dirty = None;
-            let rows = db::settings_rows(&state.settings);
-            let sleep = (
-                state.settings.sleep_enabled,
-                if debug.sleep.is_some() {
-                    schedule_base.0
-                } else {
-                    state.settings.sleep_min
-                },
-                if debug.wake.is_some() {
-                    schedule_base.1
-                } else {
-                    state.settings.wake_min
-                },
-            );
-            if rows != saved_rows || sleep != saved_sleep {
-                saved_rows = rows.clone();
-                saved_sleep = sleep;
-                lib.send(library::Cmd::SaveSettings { rows, sleep });
-            }
         }
 
         let t = clock::now();
@@ -1062,48 +638,11 @@ fn android_main(app: AndroidApp) {
         stats.swap += clock::elapsed(t);
         stats.total += clock::elapsed(frame_start);
         stats.frames += 1;
-
-        // A scaling change lands in `update` next iteration, so run one more.
-        next_wait = if force_redraw || pipeline.is_animating() || pipeline.recompose_pending() {
-            Some(Duration::ZERO)
-        } else {
-            let mut w = pipeline.next_deadline();
-            if state.settings.clock_style != ClockStyle::Off {
-                w = min_wait(w, until_next_minute());
-            }
-            if let Some(b) = boundary_wait {
-                w = min_wait(w, b + Duration::from_millis(50));
-            }
-            if let Some(m) = manual_wake {
-                let idle = clock::elapsed(m).min(clock::elapsed(last_touch));
-                w = min_wait(
-                    w,
-                    manual_idle.saturating_sub(idle) + Duration::from_millis(50),
-                );
-            }
-            if let Some(since) = settings_dirty {
-                w = min_wait(
-                    w,
-                    SAVE_DEBOUNCE.saturating_sub(clock::elapsed(since)) + Duration::from_millis(10),
-                );
-            }
-            if overlay_open {
-                if egui_delay < MAX_EGUI_WAIT {
-                    w = min_wait(w, egui_delay);
-                }
-                if undo.is_some() {
-                    w = min_wait(w, Duration::from_millis(250));
-                }
-                if !ctx.egui_wants_keyboard_input() {
-                    w = min_wait(w, AUTO_DISMISS.saturating_sub(clock::elapsed(last_input)));
-                }
-            }
-            w
-        };
+        next_wait = out.wait;
 
         let since = clock::elapsed(last_log);
         if since >= Duration::from_secs(2) {
-            let overlay = match (overlay_open, state.screen) {
+            let overlay = match (controller.overlay_open(), controller.state.screen) {
                 (false, _) => "closed",
                 (true, Screen::Menu) => "menu",
                 (true, Screen::Settings) => "settings",
@@ -1117,8 +656,8 @@ fn android_main(app: AndroidApp) {
                  upload={:.2} | ms/egui_frame: draw={:.2} | verts/run={} | clock: draw={:.3}ms/frame rebuilds={} \
                  rebuild={:.2}ms MemFree={:?}KB",
                 n as f64 / since.as_secs_f64(),
-                state.keyboard.last_rect().is_some(),
-                state.paused,
+                controller.state.keyboard.last_rect().is_some(),
+                controller.state.paused,
                 stats.trans_frames,
                 ms(stats.advance, n),
                 ms(stats.slide, n),
@@ -1142,43 +681,6 @@ fn android_main(app: AndroidApp) {
         }
     }
     log::info!("exiting");
-}
-
-/// e.g. "Immich 213 + folder 6, offline: cached only".
-fn sources_status(s: &raam_model::Settings, lib: &raam_model::Stats, online: bool) -> String {
-    let mut parts = Vec::new();
-    if s.immich_enabled {
-        let picked = lib
-            .albums
-            .iter()
-            .filter(|a| a.selected && !a.missing)
-            .count();
-        parts.push(format!(
-            "Immich {} ({picked} album{})",
-            lib.immich_assets,
-            if picked == 1 { "" } else { "s" }
-        ));
-    }
-    if s.local_enabled {
-        parts.push(format!("folder {}", lib.local_ready));
-    }
-    let mut out = parts.join(" + ");
-    if s.immich_enabled && !online {
-        out.push_str(", offline: cached only");
-    }
-    out
-}
-
-fn epoch_secs() -> u64 {
-    clock::wall().as_secs()
-}
-
-/// Time to the next wall-clock minute, plus a few ms so the wake lands after
-/// the boundary rather than just before it.
-fn until_next_minute() -> Duration {
-    let now = clock::wall();
-    let into = Duration::from_millis((now.as_millis() % 60_000) as u64);
-    Duration::from_secs(60) - into + Duration::from_millis(20)
 }
 
 fn read_touches(app: &AndroidApp) -> Vec<Touch> {
@@ -1217,54 +719,6 @@ fn read_touches(app: &AndroidApp) -> Vec<Touch> {
         Err(err) => log::error!("input_events_iter failed: {err:?}"),
     }
     out
-}
-
-/// 018's synthesis: mouse-style pointer events for buttons/sliders/keyboard
-/// plus real `Event::Touch` for `ScrollArea`'s touch-drag-to-scroll.
-fn push_egui_touch(
-    t: &Touch,
-    down: &mut bool,
-    events: &mut Vec<egui::Event>,
-    presses: &mut Vec<egui::Pos2>,
-) {
-    let touch = egui::Event::Touch {
-        device_id: egui::TouchDeviceId(t.device_id),
-        id: egui::TouchId(t.touch_id),
-        phase: t.phase,
-        pos: t.pos,
-        force: Some(t.force),
-    };
-    let button = |pressed| egui::Event::PointerButton {
-        pos: t.pos,
-        button: egui::PointerButton::Primary,
-        pressed,
-        modifiers: egui::Modifiers::default(),
-    };
-    match t.phase {
-        egui::TouchPhase::Start => {
-            *down = true;
-            presses.push(t.pos);
-            events.extend([egui::Event::PointerMoved(t.pos), button(true), touch]);
-        }
-        egui::TouchPhase::Move => {
-            if *down {
-                events.extend([egui::Event::PointerMoved(t.pos), touch]);
-            }
-        }
-        egui::TouchPhase::End => {
-            *down = false;
-            events.extend([
-                egui::Event::PointerMoved(t.pos),
-                button(false),
-                touch,
-                egui::Event::PointerGone,
-            ]);
-        }
-        egui::TouchPhase::Cancel => {
-            *down = false;
-            events.extend([touch, egui::Event::PointerGone]);
-        }
-    }
 }
 
 struct EglState {

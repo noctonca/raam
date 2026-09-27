@@ -218,3 +218,24 @@ pub fn sleep_screen() {
         }
     });
 }
+
+/// The controller's Power seam (raam-core seams.rs) over this JNI plumbing.
+/// The wake mechanism's flags-only mode is the controller's business (it
+/// gets `wakelock_allowed` per pass); here every call does the real thing.
+impl raam_core::seams::Power for Power {
+    fn set_wake_alarm(&mut self, epoch_ms: i64) -> Result<(), String> {
+        Power::set_wake_alarm(self, epoch_ms)
+    }
+
+    fn sleep_screen(&mut self) {
+        sleep_screen();
+    }
+
+    fn wake_screen(&mut self) -> Result<(), String> {
+        Power::wake_screen(self)
+    }
+
+    fn is_interactive(&self) -> Result<bool, String> {
+        Power::is_interactive(self)
+    }
+}

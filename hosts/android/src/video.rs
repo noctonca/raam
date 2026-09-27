@@ -598,4 +598,8 @@ impl VideoSeam for Video {
     fn watch_decoders(&mut self, probing: bool) {
         Video::watch_decoders(self, probing)
     }
+
+    fn pause_now(&self) {
+        Video::pause_now(self)
+    }
 }

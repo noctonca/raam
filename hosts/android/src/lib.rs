@@ -548,7 +548,7 @@ fn android_main(app: AndroidApp) {
                     slideshow: p,
                     source: fetch_ref,
                     library: lib.as_ref(),
-                    weather: weather.as_ref().unwrap().as_ref(),
+                    weather: Some(weather.as_ref().unwrap().as_ref()),
                 }),
                 power: power
                     .as_mut()

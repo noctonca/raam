@@ -118,7 +118,9 @@ pub struct Stage<'a> {
     pub slideshow: &'a mut dyn Slideshow,
     pub source: &'a dyn TileSource,
     pub library: &'a dyn LibraryInfo,
-    pub weather: &'a dyn WeatherInfo,
+    /// No weather worker (the web demo): the overlay shows the time and
+    /// date, and the status line says nothing about weather.
+    pub weather: Option<&'a dyn WeatherInfo>,
 }
 
 pub struct Deps<'a> {
@@ -566,14 +568,14 @@ impl App {
         let minute = clock::wall().as_secs() / 60;
         let clock_inputs = (
             minute,
-            stage.weather.version(),
+            stage.weather.map_or(0, |w| w.version()),
             self.state.settings.clock_style,
             self.state.settings.clock_corner,
             self.state.settings.clock_24h,
         );
         if self.clock_inputs != Some(clock_inputs) {
             self.clock_inputs = Some(clock_inputs);
-            let (city, current) = stage.weather.snapshot();
+            let (city, current) = stage.weather.map_or((None, None), |w| w.snapshot());
             let w = current.map(|c| {
                 let (description, icon) = weather_icons::describe(c.code, c.is_day);
                 overlay::Weather {
@@ -590,6 +592,7 @@ impl App {
                     weather_icons::describe(c.code, c.is_day).0
                 ),
                 (Some(city), None) => format!("{city}, weather pending"),
+                _ if stage.weather.is_none() => String::new(),
                 _ => "locating...".to_string(),
             };
             let now = clock::local((minute * 60) as i64);
@@ -1131,7 +1134,8 @@ mod tests {
         show: FakeShow,
         source: FakeSource,
         lib: FakeLib,
-        weather: FakeWeather,
+        /// `None`: a host without a weather worker (the web demo).
+        weather: Option<FakeWeather>,
         power: Option<FakePower>,
         ov: Overrides,
     }
@@ -1160,7 +1164,7 @@ mod tests {
                 show: FakeShow::new(),
                 source: FakeSource,
                 lib: FakeLib,
-                weather: FakeWeather,
+                weather: Some(FakeWeather),
                 power,
                 ov: Overrides::default(),
             }
@@ -1180,7 +1184,7 @@ mod tests {
                         slideshow: &mut self.show,
                         source: &self.source,
                         library: &self.lib,
-                        weather: &self.weather,
+                        weather: self.weather.as_ref().map(|w| w as &dyn WeatherInfo),
                     }),
                     power: self.power.as_mut().map(|p| p as &mut dyn Power),
                 },
@@ -1210,6 +1214,20 @@ mod tests {
             });
             self.frame(&[down, up])
         }
+    }
+
+    #[test]
+    fn a_host_without_weather_leaves_it_out_of_the_status_line() {
+        // The status line is published while the menu is up.
+        let mut rig = Rig::new(None);
+        rig.tap(640.0, 400.0);
+        assert!(rig.app.overlay_open());
+        assert_eq!(rig.app.state.status.weather, "locating...");
+        let mut rig = Rig::new(None);
+        rig.weather = None;
+        rig.tap(640.0, 400.0);
+        assert!(rig.app.overlay_open());
+        assert_eq!(rig.app.state.status.weather, "");
     }
 
     #[test]

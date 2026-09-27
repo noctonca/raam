@@ -19,8 +19,8 @@ use crate::theme::{self, Type, scheme, size, space};
 use egui::{Align, CornerRadius, Ui, UiBuilder};
 use raam_model::limits::{AUDIO_DELAY_RANGE, CAP_CHOICES_MB, DEFAULT_CAP_MB, LARGEST_LAYOUT};
 use raam_model::{
-    AlbumRow, ClockStyle, FitBackground, GapColour, ScaleMode, Settings, Stats, TransitionChoice,
-    VideoPlayback,
+    AlbumRow, ClockStyle, Corner, FitBackground, GapColour, ScaleMode, Settings, Stats,
+    TransitionChoice, VideoPlayback,
 };
 use std::collections::HashMap;
 
@@ -1458,28 +1458,43 @@ fn display_page(ui: &mut Ui, st: &mut AppState) {
     }
 
     kit::section_header(ui, "Clock");
-    let styles = [
-        ClockStyle::Off,
-        ClockStyle::TopRight,
-        ClockStyle::BottomLeft,
-    ];
-    let mut clock = styles.iter().position(|c| *c == s.clock_style).unwrap_or(0);
-    let options: Vec<&str> = styles.iter().map(|c| c.label()).collect();
+    let mut clock = ClockStyle::ALL
+        .iter()
+        .position(|c| *c == s.clock_style)
+        .unwrap_or(0);
+    let options: Vec<&str> = ClockStyle::ALL.iter().map(|c| c.label()).collect();
     let row = ListItem::new("Clock overlay")
         .icon(icons::SCHEDULE)
-        .supporting("Time and weather over the photos")
+        .supporting(
+            "Time and weather over the photos · Simple is big and bold, Detailed adds the forecast",
+        )
         .trailing(Trailing::Segmented {
             selected: &mut clock,
             options: &options,
-            seg_w: 140.0,
+            seg_w: 120.0,
         });
     if kit::list_item(ui, row).changed() {
-        s.clock_style = styles[clock];
+        s.clock_style = ClockStyle::ALL[clock];
     }
-    // No icon: a digital clock is illegible at 24 px, and the overlay has the
-    // clock face (026's step 2.5). The empty slot keeps the text on the text
-    // edge.
+    // No icons below: a digital clock is illegible at 24 px, and the
+    // overlay has the clock face (026's step 2.5). The empty slots keep
+    // the text on the text edge.
     ui.add_enabled_ui(s.clock_style != ClockStyle::Off, |ui| {
+        let mut corner = Corner::ALL
+            .iter()
+            .position(|c| *c == s.clock_corner)
+            .unwrap_or(1);
+        let options: Vec<&str> = Corner::ALL.iter().map(|c| c.label()).collect();
+        let row = ListItem::new("Corner")
+            .blank_icon()
+            .trailing(Trailing::Segmented {
+                selected: &mut corner,
+                options: &options,
+                seg_w: 140.0,
+            });
+        if kit::list_item(ui, row).changed() {
+            s.clock_corner = Corner::ALL[corner];
+        }
         kit::list_item(
             ui,
             ListItem::new("24-hour clock")

@@ -1,8 +1,10 @@
-//! The always-on clock/date/weather overlay, in two layouts (both measured
-//! from existing frames in 022; EXPERIMENTS.md has the provenance):
-//! - Top right: an 80sp bold clock, then "date  icon temp" at 40sp bold,
+//! The always-on clock/date/weather overlay, in two styles (both measured
+//! from existing frames in 022; the lab's EXPERIMENTS.md has the
+//! provenance), each anchorable to any screen corner (step 6's
+//! style x corner split):
+//! - Simple: an 80sp bold clock, then "date  icon temp" at 40sp bold,
 //!   white, soft dark shadow, no panel, 16dp padding.
-//! - Bottom left: 012's widget - small date, big bold time, then
+//! - Detailed: 012's widget - small date, big bold time, then
 //!   "icon place, temp" and a short description, warm cream.
 //!
 //! Text is 012's baked-blur shadow atlas, not egui, so a closed menu still
@@ -13,7 +15,7 @@ use crate::atlas::{FontAtlas, Shadow};
 use crate::clock;
 use crate::gl::*;
 use crate::weather_icons;
-use raam_model::{ClockStyle, LocalTime};
+use raam_model::{ClockStyle, Corner, LocalTime};
 use std::ffi::c_void;
 
 const ROBOTO_REGULAR: &[u8] = include_bytes!("../assets/Roboto-Regular.ttf");
@@ -43,13 +45,13 @@ pub struct Weather {
 type Rgba = (f32, f32, f32, f32);
 
 const WHITE: Rgba = (1.0, 1.0, 1.0, 1.0);
-/// The top-right layout's soft shadow, #303030.
-const TOP_RIGHT_SHADOW: Rgba = (0.19, 0.19, 0.19, 1.0);
-const TOP_RIGHT_SHADOW_OFFSET: (f32, f32) = (0.0, 2.0);
+/// The Simple style's soft shadow, #303030.
+const SIMPLE_SHADOW: Rgba = (0.19, 0.19, 0.19, 1.0);
+const SIMPLE_SHADOW_OFFSET: (f32, f32) = (0.0, 2.0);
 /// 012's tuned values: warm cream text, black shadow at 0.78, 3px offset.
 const CREAM: Rgba = (0.96, 0.87, 0.70, 1.0);
-const BOTTOM_LEFT_SHADOW: Rgba = (0.0, 0.0, 0.0, 0.78);
-const BOTTOM_LEFT_SHADOW_OFFSET: (f32, f32) = (3.0, 3.0);
+const DETAILED_SHADOW: Rgba = (0.0, 0.0, 0.0, 0.78);
+const DETAILED_SHADOW_OFFSET: (f32, f32) = (3.0, 3.0);
 
 const VS_SRC: &str = "attribute vec2 aPos; attribute vec2 aUV; \
      uniform vec2 uScreen; varying vec2 vUV; \
@@ -76,16 +78,16 @@ pub struct ClockOverlay {
     u_color: GlInt,
     u_tex: GlInt,
     vbo: GlUint,
-    /// Bold 80: both layouts' clock.
+    /// Bold 80: both styles' clock.
     clock: FontAtlas,
-    /// Bold 40 + icons: the top-right layout's date/weather row.
+    /// Bold 40 + icons: the Simple style's date/weather row.
     date_row: FontAtlas,
-    /// Regular 26: the bottom-left layout's date and description.
+    /// Regular 26: the Detailed style's date and description.
     small: FontAtlas,
-    /// Regular 32 + icons: the bottom-left layout's weather line.
+    /// Regular 32 + icons: the Detailed style's weather line.
     weather: FontAtlas,
     draws: Vec<Draw>,
-    key: Option<(ClockStyle, Content, i32, i32)>,
+    key: Option<(ClockStyle, Corner, Content, i32, i32)>,
     pub rebuilds: u32,
 }
 
@@ -170,26 +172,31 @@ impl ClockOverlay {
         }
     }
 
-    /// Rebuilds the VBO if `style`/`content`/screen differ from the last
-    /// build. Returns true if it rebuilt.
-    pub fn update(&mut self, style: ClockStyle, content: &Content, sw: i32, sh: i32) -> bool {
-        if self
-            .key
-            .as_ref()
-            .is_some_and(|(s, c, w, h)| *s == style && c == content && *w == sw && *h == sh)
-        {
+    /// Rebuilds the VBO if `style`/`corner`/`content`/screen differ from
+    /// the last build. Returns true if it rebuilt.
+    pub fn update(
+        &mut self,
+        style: ClockStyle,
+        corner: Corner,
+        content: &Content,
+        sw: i32,
+        sh: i32,
+    ) -> bool {
+        if self.key.as_ref().is_some_and(|(s, k, c, w, h)| {
+            *s == style && *k == corner && c == content && *w == sw && *h == sh
+        }) {
             return false;
         }
         let mut verts = Vec::new();
         let mut draws = Vec::new();
         let lines = match style {
             ClockStyle::Off => Vec::new(),
-            ClockStyle::TopRight => self.top_right_lines(content, sw as f32),
-            ClockStyle::BottomLeft => self.bottom_left_lines(content, sh as f32),
+            ClockStyle::Simple => self.simple_lines(content, corner, sw as f32, sh as f32),
+            ClockStyle::Detailed => self.detailed_lines(content, corner, sw as f32, sh as f32),
         };
         let (shadow_color, (dx, dy), color) = match style {
-            ClockStyle::BottomLeft => (BOTTOM_LEFT_SHADOW, BOTTOM_LEFT_SHADOW_OFFSET, CREAM),
-            _ => (TOP_RIGHT_SHADOW, TOP_RIGHT_SHADOW_OFFSET, WHITE),
+            ClockStyle::Detailed => (DETAILED_SHADOW, DETAILED_SHADOW_OFFSET, CREAM),
+            _ => (SIMPLE_SHADOW, SIMPLE_SHADOW_OFFSET, WHITE),
         };
         // All shadows first, then all text, so no line's shadow darkens the
         // line above it. One draw per (atlas, pass).
@@ -231,70 +238,70 @@ impl ClockOverlay {
                 );
             }
         }
-        self.key = Some((style, content.clone(), sw, sh));
+        self.key = Some((style, corner, content.clone(), sw, sh));
         self.rebuilds += 1;
         true
     }
 
-    fn top_right_lines(&self, c: &Content, sw: f32) -> Vec<(&FontAtlas, String, f32, f32)> {
+    /// The Simple style, top-anchored, then shifted and aligned for the
+    /// corner: the clock, then "date  icon temp" pulled 16dp up into its
+    /// box, as Frameo's row sits.
+    fn simple_lines(
+        &self,
+        c: &Content,
+        corner: Corner,
+        sw: f32,
+        sh: f32,
+    ) -> Vec<(&FontAtlas, String, f32, f32)> {
         let pad = 16.0;
-        let right = sw - pad - 2.0;
         let mut out = Vec::new();
         let clock_baseline = pad + self.clock.ascent;
-        out.push((
-            &self.clock,
-            c.time.clone(),
-            right - self.clock.text_width(&c.time),
-            clock_baseline,
-        ));
-        // The date/weather row sits 16dp up into the clock's box
-        // (`layout_marginTop="-16dp"`).
+        out.push((&self.clock, c.time.clone(), 0.0, clock_baseline));
         let row_top = pad + self.clock.ascent + self.clock.descent - 16.0;
         let row_baseline = row_top + self.date_row.ascent;
         let mut row = c.short_date.clone();
         if let Some(w) = &c.weather {
             row.push_str(&format!(" {}{}", w.icon, w.temp));
         }
-        out.push((
-            &self.date_row,
-            row.clone(),
-            right - self.date_row.text_width(&row),
-            row_baseline,
-        ));
+        out.push((&self.date_row, row, 0.0, row_baseline));
+        let block_bottom = row_baseline + self.date_row.descent;
+        align_block(&mut out, corner, pad, 2.0, sw, sh, block_bottom);
         out
     }
 
-    fn bottom_left_lines(&self, c: &Content, sh: f32) -> Vec<(&FontAtlas, String, f32, f32)> {
-        let left = 32.0;
-        let mut y = sh - 32.0;
+    /// The Detailed style, top-anchored (long date, time, weather line,
+    /// description), then shifted and aligned for the corner.
+    fn detailed_lines(
+        &self,
+        c: &Content,
+        corner: Corner,
+        sw: f32,
+        sh: f32,
+    ) -> Vec<(&FontAtlas, String, f32, f32)> {
+        let pad = 32.0;
+        let mut y = pad;
         let mut out = Vec::new();
-        fn push_up<'a>(
+        fn push_down<'a>(
             out: &mut Vec<(&'a FontAtlas, String, f32, f32)>,
             atlas: &'a FontAtlas,
             text: String,
-            left: f32,
             y: &mut f32,
         ) {
-            let baseline = *y - atlas.descent;
-            *y = baseline - atlas.ascent;
-            out.push((atlas, text, left, baseline));
+            let baseline = *y + atlas.ascent;
+            *y = baseline + atlas.descent;
+            out.push((atlas, text, 0.0, baseline));
         }
+        push_down(&mut out, &self.small, c.long_date.clone(), &mut y);
+        push_down(&mut out, &self.clock, c.time.clone(), &mut y);
         if let Some(w) = &c.weather {
-            push_up(
-                &mut out,
-                &self.small,
-                w.description.to_string(),
-                left,
-                &mut y,
-            );
             let line = match &w.city {
                 Some(city) => format!("{}{}, {}", w.icon, city, w.temp),
                 None => format!("{}{}", w.icon, w.temp),
             };
-            push_up(&mut out, &self.weather, line, left, &mut y);
+            push_down(&mut out, &self.weather, line, &mut y);
+            push_down(&mut out, &self.small, w.description.to_string(), &mut y);
         }
-        push_up(&mut out, &self.clock, c.time.clone(), left, &mut y);
-        push_up(&mut out, &self.small, c.long_date.clone(), left, &mut y);
+        align_block(&mut out, corner, pad, 0.0, sw, sh, y);
         out
     }
 
@@ -328,6 +335,34 @@ impl ClockOverlay {
     }
 }
 
+/// Anchors a top-left-built block of lines to `corner`: right corners
+/// right-align every line at `sw - pad - inset`, left corners start each
+/// at `pad + inset`; bottom corners shift every baseline down so the
+/// block's bottom sits at `sh - pad`.
+fn align_block(
+    lines: &mut [(&FontAtlas, String, f32, f32)],
+    corner: Corner,
+    pad: f32,
+    inset: f32,
+    sw: f32,
+    sh: f32,
+    block_bottom: f32,
+) {
+    let dy = if corner.is_top() {
+        0.0
+    } else {
+        sh - pad - block_bottom
+    };
+    for (atlas, text, x, baseline) in lines.iter_mut() {
+        *x = if corner.is_left() {
+            pad + inset
+        } else {
+            sw - pad - inset - atlas.text_width(text)
+        };
+        *baseline += dy;
+    }
+}
+
 const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
@@ -338,9 +373,9 @@ pub fn content(style: ClockStyle, h24: bool, t: &LocalTime, weather: Option<Weat
         format!("{:02}:{:02}", t.hour, t.min)
     } else {
         let h = if t.hour % 12 == 0 { 12 } else { t.hour % 12 };
-        // The top-right style drops am/pm from its 12h clock; the bottom-left keeps it.
+        // The Simple style drops am/pm from its 12h clock; Detailed keeps it.
         match style {
-            ClockStyle::BottomLeft => {
+            ClockStyle::Detailed => {
                 format!("{h}:{:02} {}", t.min, if t.hour < 12 { "AM" } else { "PM" })
             }
             _ => format!("{h}:{:02}", t.min),

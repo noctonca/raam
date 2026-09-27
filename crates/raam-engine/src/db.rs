@@ -24,8 +24,8 @@ use raam_core::clock;
 use raam_core::store::transition_str;
 use raam_model::limits;
 use raam_model::{
-    AlbumRow, ClockStyle, FitBackground, Focus, GapColour, HiddenItem, MediaItem, MediaKind,
-    MediaRef, ScaleMode, Settings, SourceKind, TransitionChoice, VideoPlayback,
+    AlbumRow, ClockStyle, Corner, FitBackground, Focus, GapColour, HiddenItem, MediaItem,
+    MediaKind, MediaRef, ScaleMode, Settings, SourceKind, TransitionChoice, VideoPlayback,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashMap;
@@ -323,11 +323,26 @@ pub fn load_settings(conn: &Connection, s: &mut Settings) -> Vec<String> {
             GapColour::Black
         };
     }
-    if let Some(v) = str_of("overlay.clock") {
+    if let Some(v) = str_of("overlay.clock_style") {
         s.clock_style = match v.as_str() {
             "off" => ClockStyle::Off,
-            "bottomleft" => ClockStyle::BottomLeft,
-            _ => ClockStyle::TopRight,
+            "detailed" => ClockStyle::Detailed,
+            _ => ClockStyle::Simple,
+        };
+    } else if let Some(v) = str_of("overlay.clock") {
+        // Pre-split rows (one key conflating style and corner): read-alias.
+        (s.clock_style, s.clock_corner) = match v.as_str() {
+            "off" => (ClockStyle::Off, s.clock_corner),
+            "bottomleft" => (ClockStyle::Detailed, Corner::BottomLeft),
+            _ => (ClockStyle::Simple, Corner::TopRight),
+        };
+    }
+    if let Some(v) = str_of("overlay.clock_corner") {
+        s.clock_corner = match v.as_str() {
+            "topleft" => Corner::TopLeft,
+            "bottomleft" => Corner::BottomLeft,
+            "bottomright" => Corner::BottomRight,
+            _ => Corner::TopRight,
         };
     }
     if let Some(v) = rows.get("locale.clock_24h").and_then(|v| v.as_bool()) {

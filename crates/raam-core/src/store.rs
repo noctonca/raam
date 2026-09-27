@@ -5,7 +5,7 @@
 //! can (localStorage on the web). Moved from the engine's db.rs at
 //! migration step 5b so the dirty check needs no engine.
 
-use raam_model::{ClockStyle, FitBackground, GapColour, Settings, TransitionChoice};
+use raam_model::{ClockStyle, Corner, FitBackground, GapColour, Settings, TransitionChoice};
 
 /// The `setting` rows for everything in `Settings` except the server and
 /// key (on `source`/`credential`) and the sleep schedule (`schedule`).
@@ -32,11 +32,20 @@ pub fn settings_rows(s: &Settings) -> Vec<(&'static str, serde_json::Value)> {
             }),
         ),
         (
-            "overlay.clock",
+            "overlay.clock_style",
             json!(match s.clock_style {
                 ClockStyle::Off => "off",
-                ClockStyle::TopRight => "topright",
-                ClockStyle::BottomLeft => "bottomleft",
+                ClockStyle::Simple => "simple",
+                ClockStyle::Detailed => "detailed",
+            }),
+        ),
+        (
+            "overlay.clock_corner",
+            json!(match s.clock_corner {
+                Corner::TopLeft => "topleft",
+                Corner::TopRight => "topright",
+                Corner::BottomLeft => "bottomleft",
+                Corner::BottomRight => "bottomright",
             }),
         ),
         ("locale.clock_24h", json!(s.clock_24h)),

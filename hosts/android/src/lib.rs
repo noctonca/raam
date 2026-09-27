@@ -589,12 +589,19 @@ fn android_main(app: AndroidApp) {
         let clock_overlay = clock_overlay.as_mut().unwrap();
         if let Some(r) = out.overlay {
             let t = clock::now();
-            if clock_overlay.update(r.style, &r.content, egl_state.width, egl_state.height) {
+            if clock_overlay.update(
+                r.style,
+                r.corner,
+                &r.content,
+                egl_state.width,
+                egl_state.height,
+            ) {
                 stats.clock_rebuild += clock::elapsed(t);
                 stats.clock_rebuilds += 1;
                 log::info!(
-                    "overlay rebuilt ({}): {:?} in {:.2}ms",
+                    "overlay rebuilt ({}, {}): {:?} in {:.2}ms",
                     r.style.label(),
+                    r.corner.label(),
                     r.content,
                     clock::elapsed(t).as_secs_f64() * 1000.0
                 );

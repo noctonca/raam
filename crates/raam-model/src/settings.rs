@@ -71,20 +71,61 @@ pub enum GapColour {
     White,
 }
 
+/// The clock overlay's look. Style and position are separate choices
+/// (`clock_corner`): both looks can sit in any corner.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ClockStyle {
     Off,
-    TopRight,
-    BottomLeft,
+    /// The big bold white clock with a date/temperature row.
+    Simple,
+    /// The cream stack: date, time, weather and its description.
+    Detailed,
 }
 
 impl ClockStyle {
+    pub const ALL: [ClockStyle; 3] = [ClockStyle::Off, ClockStyle::Simple, ClockStyle::Detailed];
+
     pub fn label(self) -> &'static str {
         match self {
             ClockStyle::Off => "Off",
-            ClockStyle::TopRight => "Top right",
-            ClockStyle::BottomLeft => "Bottom left",
+            ClockStyle::Simple => "Simple",
+            ClockStyle::Detailed => "Detailed",
         }
+    }
+}
+
+/// A screen corner, for anchoring the clock overlay.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Corner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl Corner {
+    pub const ALL: [Corner; 4] = [
+        Corner::TopLeft,
+        Corner::TopRight,
+        Corner::BottomLeft,
+        Corner::BottomRight,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Corner::TopLeft => "Top left",
+            Corner::TopRight => "Top right",
+            Corner::BottomLeft => "Bottom left",
+            Corner::BottomRight => "Bottom right",
+        }
+    }
+
+    pub fn is_top(self) -> bool {
+        matches!(self, Corner::TopLeft | Corner::TopRight)
+    }
+
+    pub fn is_left(self) -> bool {
+        matches!(self, Corner::TopLeft | Corner::BottomLeft)
     }
 }
 
@@ -148,6 +189,7 @@ pub struct Settings {
     pub screen_default_max: usize,
     pub gap_colour: GapColour,
     pub clock_style: ClockStyle,
+    pub clock_corner: Corner,
     pub clock_24h: bool,
     pub sleep_enabled: bool,
     /// Minutes after local midnight.
@@ -182,7 +224,8 @@ impl Settings {
             collage_max: 3,
             screen_default_max: 3,
             gap_colour: GapColour::Black,
-            clock_style: ClockStyle::TopRight,
+            clock_style: ClockStyle::Simple,
+            clock_corner: Corner::TopRight,
             clock_24h: true,
             sleep_enabled: true,
             sleep_min: limits::DEFAULT_SLEEP_MIN,

@@ -22,7 +22,7 @@ use crate::{clock, store, theme, weather_icons};
 use raam_model::limits::{
     AUTO_DISMISS, DEFAULT_MANUAL_IDLE, MAX_EGUI_WAIT, SAVE_DEBOUNCE, TAP_SLOP_PX, UNDO_HIDE,
 };
-use raam_model::{ClockStyle, ScaleMode, SourceKind, Stats};
+use raam_model::{ClockStyle, Corner, ScaleMode, SourceKind, Stats};
 use std::time::Duration;
 
 /// What the host's event loop feeds in each pass.
@@ -168,6 +168,7 @@ pub struct EguiOut {
 /// The clock overlay's text changed: rebuild it before drawing.
 pub struct OverlayRebuild {
     pub style: ClockStyle,
+    pub corner: Corner,
     pub content: overlay::Content,
 }
 
@@ -210,7 +211,7 @@ pub struct App {
     egui_uploaded: bool,
     last_status: String,
     // Re-derive the overlay's text only when one of these changes.
-    clock_inputs: Option<(u64, u64, ClockStyle, bool)>,
+    clock_inputs: Option<(u64, u64, ClockStyle, Corner, bool)>,
     weather_status: String,
     // What was last sent for saving, so only changes are written.
     saved_rows: Vec<(&'static str, serde_json::Value)>,
@@ -567,6 +568,7 @@ impl App {
             minute,
             stage.weather.version(),
             self.state.settings.clock_style,
+            self.state.settings.clock_corner,
             self.state.settings.clock_24h,
         );
         if self.clock_inputs != Some(clock_inputs) {
@@ -599,6 +601,7 @@ impl App {
             );
             out.overlay = Some(OverlayRebuild {
                 style: self.state.settings.clock_style,
+                corner: self.state.settings.clock_corner,
                 content,
             });
         }

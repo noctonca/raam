@@ -1,3 +1,5 @@
 /target
 .env
 shots/
+# The web host's build output (hosts/web/build.sh).
+hosts/web/www/pkg/

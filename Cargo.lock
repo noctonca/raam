@@ -2003,6 +2003,16 @@ dependencies = [
 [[package]]
 name = "raam-web"
 version = "0.0.0"
+dependencies = [
+ "egui",
+ "js-sys",
+ "log",
+ "raam-core",
+ "raam-model",
+ "serde_json",
+ "wasm-bindgen",
+ "web-sys",
+]
 
 [[package]]
 name = "raw-window-handle"

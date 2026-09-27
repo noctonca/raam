@@ -20,5 +20,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
-      - name: web host builds for wasm
-        run: cargo check -p raam-web --target wasm32-unknown-unknown
+      # The web host and the core's WebGL1 linkage are wasm32-only code,
+      # so the native clippy above never sees them.
+      - name: web host lints clean for wasm
+        run: cargo clippy -p raam-web --target wasm32-unknown-unknown -- -D warnings

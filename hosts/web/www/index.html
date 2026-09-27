@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Raam demo</title>
+<style>
+  :root {
+    --bg: #f4f3f0;
+    --fg: #1c1b1a;
+    --muted: #5f5d59;
+    --line: #d9d6cf;
+    --chip: #e7e4dd;
+    --chip-on: #1c1b1a;
+    --chip-on-fg: #f4f3f0;
+    --bezel: #111;
+    --err: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151514;
+      --fg: #ecebe8;
+      --muted: #a09d97;
+      --line: #2d2c2a;
+      --chip: #252422;
+      --chip-on: #ecebe8;
+      --chip-on-fg: #151514;
+      --bezel: #050505;
+      --err: #f2b8b5;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); }
+  body {
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: 24px 16px 40px;
+  }
+  main { max-width: 1080px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .lede { color: var(--muted); margin: 0 0 20px; max-width: 62ch; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-bottom: 14px; }
+  .seg { display: inline-flex; background: var(--chip); border-radius: 999px; padding: 3px; }
+  .seg a {
+    font-size: 0.9rem; color: var(--fg); text-decoration: none;
+    padding: 6px 14px; border-radius: 999px;
+  }
+  .seg a[aria-current="page"] { background: var(--chip-on); color: var(--chip-on-fg); }
+  .hint { color: var(--muted); font-size: 0.9rem; }
+  .device {
+    background: var(--bezel);
+    border-radius: 18px;
+    padding: clamp(10px, 2.2vw, 26px);
+    box-shadow: 0 1px 0 rgba(255,255,255,0.06) inset, 0 18px 40px -18px rgba(0,0,0,0.5);
+  }
+  canvas {
+    display: block; width: 100%; height: auto;
+    background: #000; touch-action: none; user-select: none; -webkit-user-select: none;
+    cursor: pointer;
+  }
+  .status { color: var(--muted); font-size: 0.85rem; margin-top: 10px; min-height: 1.3em; }
+  .status.err { color: var(--err); }
+  details { margin-top: 28px; border-top: 1px solid var(--line); padding-top: 14px; color: var(--muted); font-size: 0.9rem; }
+  summary { cursor: pointer; color: var(--fg); }
+  details ul { padding-left: 18px; }
+  a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Raam</h1>
+  <p class="lede">A photo frame's slideshow and settings, running in your browser. It's the same Rust
+    code the frame runs, compiled to WebAssembly and drawn with the frame's own shaders.</p>
+
+  <div class="bar">
+    <nav class="seg" aria-label="What to show">
+      <a href="./" data-mode="live">Slideshow</a>
+      <a href="./?page=settings" data-mode="page">Design system</a>
+    </nav>
+    <span class="hint" id="hint"></span>
+  </div>
+
+  <div class="device"><canvas id="frame" width="1280" height="800" aria-label="Photo frame screen"></canvas></div>
+  <div class="status" id="status" role="status">Loading…</div>
+
+  <details>
+    <summary>Photos and credits</summary>
+    <p>Sample photos from Wikimedia Commons, all released under CC0.</p>
+    <ul id="credits"></ul>
+  </details>
+</main>
+<script type="module">
+  import init from "./pkg/raam_web.js";
+  const query = new URLSearchParams(location.search);
+  const mode = query.has("page") ? "page" : "live";
+  for (const a of document.querySelectorAll("[data-mode]")) {
+    if (a.dataset.mode === mode) a.setAttribute("aria-current", "page");
+  }
+  document.getElementById("hint").textContent = mode === "live"
+    ? "Tap the photo for the menu. Settings are kept until you leave the page."
+    : "The frame's component kit, in both themes.";
+  const canvas = document.getElementById("frame");
+  const status = document.getElementById("status");
+  try {
+    await init();
+    canvas.style.aspectRatio = `${canvas.width} / ${canvas.height}`;
+    status.textContent = `${canvas.width} × ${canvas.height}, as on the frame.`;
+  } catch (e) {
+    status.textContent = "Couldn't start: " + e;
+    status.classList.add("err");
+    console.error(e);
+  }
+  fetch("photos/credits.json").then(r => r.json()).then(list => {
+    const ul = document.getElementById("credits");
+    for (const c of list) {
+      const li = document.createElement("li");
+      const a = document.createElement("a");
+      a.href = c.source; a.textContent = c.title; a.rel = "noopener";
+      li.append(a, ` by ${c.artist} (${c.license})`);
+      ul.append(li);
+    }
+  }).catch(() => {});
+</script>
+</body>
+</html>

@@ -30,7 +30,9 @@ runs a frame yet.
 - **The desktop build** is for development and doubles as a Linux
   frame (Raspberry Pi class).
 - **The web build is the demo** — the real UI, compiled to wasm,
-  pixel-matched to the device.
+  pixel-matched to the device. To run it locally: `hosts/web/build.sh`,
+  then serve `hosts/web/www` (e.g. `python3 -m http.server -d
+  hosts/web/www`).
 
 ## Licence
 

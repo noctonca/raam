@@ -58,7 +58,9 @@ When the change is a diff on top of a reviewed state, also shoot a
 **reference**: the same set from a host built at the last reviewed
 commit. A `git worktree` at that commit has its own host; `shoot --bin`
 selects it. `diff` then shows exactly which areas changed, so nothing
-changed is missed and nothing unchanged is reviewed again. A brand-new
+changed is missed and nothing unchanged is reviewed again. For preset
+pages, `scripts/goldens.sh show 'set-photos*'` does the same against
+the last blessed commit. A brand-new
 screen has no reference: review all of it.
 Look at every image yourself. Then measure what looks off, and also what
 looks fine: most real findings measure 1 to 4 px and aren't visible at
@@ -172,6 +174,9 @@ weight with the shader boost, fingers, and timing.
   same files.
 - A lesson that would cost the next pass a round goes under Lessons
   below, such as the root cause of a device bug.
+- The pass moves the golden suite's shots: re-bless them
+  (`scripts/goldens.sh bless`) in a commit of their own, after the
+  work, and run `scripts/web-diff.py`.
 
 ## Lessons
 

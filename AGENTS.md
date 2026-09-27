@@ -11,9 +11,8 @@ discipline is [TIGERSTYLE.md](TIGERSTYLE.md). Read both before touching
   frame with a GLES2-only GPU and nobody watching the log. Desktop and
   web exist to serve that device, not the other way round.
 - **One renderer, one pixel truth.** The same GL code and shaders run
-  on all three targets; the desktop goldens and the web diff will
-  enforce it (the golden suite is next in
-  [docs/plan/next.md](docs/plan/next.md)). A change that renders
+  on all three targets; the golden suite and the web diff enforce it
+  ([docs/BUILDING.md](docs/BUILDING.md#goldens)). A change that renders
   differently per host is wrong even if it looks fine.
 - **The design is written down.** If a change contradicts
   ARCHITECTURE.md, the doc changes first (or the change is wrong).
@@ -55,8 +54,10 @@ wasm-bindgen + wasm-opt). APK releases are manual for now.
 
 ## When modifying X, do Y
 
-- **Rendering or shaders** → re-bless the desktop `--exact` goldens
-  deliberately, in their own commit; run the web pixel diff.
+- **Rendering or shaders** → `scripts/goldens.sh check` shows which
+  shots moved, drawn before and after; re-bless them deliberately
+  (`scripts/goldens.sh bless`) in a commit of their own; run
+  `scripts/web-diff.py`.
 - **The controller or pipeline states** → extend the simulation test
   alongside; failure injection included.
 - **Settings** → one type in `raam-model`; add the DB migration and a

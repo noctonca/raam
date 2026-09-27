@@ -33,6 +33,33 @@ The last needs the NDK's clang for the C in the dependencies: set
 `toolchains/llvm/prebuilt/<host>/bin/armv7a-linux-androideabi23-clang`
 and `AR_armv7_linux_androideabi` to `llvm-ar` in the same folder.
 
+## Goldens
+
+The desktop host's preset shots are the render-regression net: every
+gallery page and every frame_ui page with each of its fixtures, in both
+themes, plus a few that scroll, tap, type or use a smaller screen.
+[tests/goldens.txt](../tests/goldens.txt) pins each one as a hash of its
+pixels:
+
+```sh
+scripts/goldens.sh check            # or some of them: check 'set-albums*'
+scripts/goldens.sh bless            # after a change meant to move pixels
+scripts/goldens.sh show 'menu-*'    # before and after, and their diff
+```
+
+Pixels are exact per GPU and driver, so the hashes hold on the kind of
+Mac the file's header names, and CI doesn't run them. For a shot that
+differs, the check draws it at the last blessed commit (built in a
+worktree under `target/goldens/`) and now, with a diff that marks the
+changed pixels in magenta. A change meant to move pixels re-blesses in
+a commit of its own.
+
+The web build draws the same shots in headless Chromium through its
+`?page=` mode, and `scripts/web-diff.py` compares them with the
+desktop's, within 2 levels a channel: the browser's GL and the
+desktop's differ in the last bit of blending on a few dozen pixels. It
+needs [uv](https://docs.astral.sh/uv/) and the web build's tools below.
+
 ## Web
 
 ```sh

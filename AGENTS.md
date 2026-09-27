@@ -25,8 +25,11 @@ discipline is [TIGERSTYLE.md](TIGERSTYLE.md). Read both before touching
   platform type into `raam-core` or `raam-model`.
 - Never hard-code a limit; name it in `raam-model::limits`.
 - Never classify an error by string matching.
-- Never commit secrets, LAN addresses, or device identifiers. The lab
-  repo is private; this one is public.
+- Never commit secrets, LAN addresses, or device identifiers: this repo
+  is public.
+- Never cite what a reader can't see (private notes, a past working
+  session, a numbered experiment) in a comment, doc or commit message;
+  state the fact itself.
 - Never weaken a failure-recovery path (GPU allocation, decoder
   backoff, the single-decoder rule) without re-running its injection
   test — these paths were bought with real debugging on real hardware.

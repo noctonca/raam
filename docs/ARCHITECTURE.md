@@ -1,10 +1,10 @@
 # Raam architecture
 
-Designed 2026-09-26, from experiments 001–028 in a private lab repo
-(`immich-frame-rs`), which proved every load-bearing piece on the real
-hardware before this design was written. This document is the contract;
-[plan/migration.md](plan/migration.md) is the route from the experiments
-to this shape.
+Raam was prototyped in a private repo, which proved every load-bearing
+piece on the real hardware before this design was written; the findings
+that matter are restated here and in the code where they apply. This
+document is the contract; work still to come is in
+[plan/next.md](plan/next.md).
 
 ## What Raam is
 
@@ -25,7 +25,7 @@ web build is the demo: the real UI in a browser before anyone installs.
 | Decision | Why |
 |---|---|
 | GLES2 / WebGL1 everywhere; no wgpu, no glow | The Mali-400 has GLES2 only; one renderer keeps the pixel match across hosts; the three hand-written GL layers already work |
-| A Cargo workspace with a shared core; hosts keep only platform code | Proven by the experiments compiling shared sources; a workspace makes it real |
+| A Cargo workspace with a shared core; hosts keep only platform code | Every host runs the same drawing and deciding code, so a fix lands once and the pixel match holds |
 | The core is synchronous and single-threaded, driven by each host | wasm has no threads; determinism for simulation testing comes free |
 | Every dependency must earn its keep | See [the dependency register](#the-dependency-register) |
 | TigerStyle for the core | See [TIGERSTYLE.md](../TIGERSTYLE.md) |
@@ -34,9 +34,9 @@ web build is the demo: the real UI in a browser before anyone installs.
 | Android baseline: API 23 (Android 6), armv7 | The SNUG frame; an emulator pass may later lower it |
 | applicationId `io.github.noctonca.raam` | Anchored to an account already owned; F-Droid-friendly; no domain obligation |
 | Licence MIT OR Apache-2.0 | Rust convention; patent grant plus simplicity |
-| Releases: manual APKs now; signed releases and CI later | Reuse the proven signed-release setup when the time comes; the release key is created and backed up before the first public APK |
-| v1 scope | Everything the experiments proved, plus WiFi setup, brightness, and on-device photos via USB/SD. The phone-upload page is the first post-v1 feature. "Remote" means adding photos, not remote control |
-| Fresh start on the frame | Raam installs under its own id with a fresh DB; curation (hidden/favourite photos) carries over via the existing JSON export; no schema-lineage obligation to the experiments |
+| Releases: manual APKs now; signed releases and CI later | The release key is created and backed up before the first public APK |
+| v1 scope | What the frame runs today (collages, Ken Burns, transitions, clips, the clock and weather, Immich albums and a local folder, curation, the sleep schedule, the settings UI), plus WiFi setup, brightness, and on-device photos via USB/SD. The phone-upload page is the first post-v1 feature. "Remote" means adding photos, not remote control |
+| Fresh start on the frame | Raam installs under its own id with a fresh DB; curation (hidden/favourite photos) carries over through a JSON export, the prototype's included; no schema lineage from the prototype |
 
 ## The workspace
 
@@ -66,9 +66,9 @@ meet only through traits the core defines. Nothing depends on a host.
 and `limits.rs` — **every named limit in the product, in one file.** No
 dependencies, no platform types, no I/O.
 
-The experiments' three type-level dependency cycles all came from value
-types living in GPU and UI modules; this crate is what breaks them, so
-it exists from day one and stays a leaf forever.
+Value types kept in GPU and UI modules tie those modules into type-level
+dependency cycles; this crate holds them instead, so it stays a leaf
+forever.
 
 ### raam-core — draws and decides
 
@@ -82,8 +82,8 @@ it exists from day one and stays a leaf forever.
   pause, loop and end, one decoder at a time, the decoder-failure
   backoff and the wedged-decoder watch — plus the OES program that
   draws a decoded frame.
-- **The App controller** — the product's behaviour, extracted from the
-  experiment's 800-line `android_main`: input routing (tap-slop, menu
+- **The App controller** — the product's behaviour, shared by every
+  host: input routing (tap-slop, menu
   open/close, auto-dismiss, undo-hide), the sleep/wake state machine,
   settings dirty/debounce, and the computation of the next wake
   deadline.
@@ -101,9 +101,9 @@ function names and GLSL ES 1.00 shaders over three linkages:
 | macOS / Linux desktop | extern desktop GL with the small shader rewrite, and GLES2's `GL_ALPHA` textures as `GL_R8` swizzled to (0, 0, 0, a), which core profiles lack |
 | wasm32 | the WebGL1 shim (integer names → tables of WebGL objects), `gl/webgl.rs` |
 
-This formalises what the experiments proved: the same painter renders
-pixel-identically on all three (the web build matched the desktop's
-`--exact` screenshots to within anti-aliased-edge rounding). The shim
+The same painter renders pixel-identically on all three: the web build
+matches the desktop's `--exact` screenshots to within anti-aliased-edge
+rounding. The shim
 implements the entry points themselves, status and info-log queries
 included, so `link_program`, `RenderTarget` and the other helpers are
 one copy over all three linkages. Its `web-sys` use is the core's only
@@ -175,19 +175,17 @@ core never awaits.
 ## Settings and persistence
 
 One `Settings` struct in raam-model. The pipeline reads `&Settings`
-directly (the experiments' per-frame copied `SlideshowSettings` dies);
-the UI edits the same type (the drifted UI mirror dies).
+directly and the UI edits the same type, so there is no per-frame copy
+and no UI mirror to drift.
 
 Persistence lives in the engine: SQLite, WAL, string-keyed JSON settings
-rows, schema versioned by `PRAGMA user_version` with a migrations array
-— the proven shape, restarted at v1 for Raam. The frame's existing
-curation arrives through the curation-JSON import; everything else is
-re-entered once or re-fetched.
+rows, schema versioned by `PRAGMA user_version` with a migrations array,
+starting at v1. Curation arrives through the curation-JSON import;
+everything else is re-entered once or re-fetched.
 
 Secrets: the Immich API key is entered in the UI and stored in the DB
 (plaintext, as the device is single-user and the DB is app-private), and
-is never compiled into the binary. The experiments' baked-in `.env`
-(URL, key, LAN IP pin) does not carry over.
+is never compiled into the binary.
 
 ## The root map
 
@@ -210,7 +208,7 @@ panic policy relies on (crash → exit(70) → relaunched).
 ## Video
 
 Android-only in v1, behind `MediaProbe` + `VideoPlayer`. The core runs
-the orchestration the lab proved — probe-then-play, one decoder at a
+the orchestration — probe-then-play, one decoder at a
 time (the live open waits for the probe's release), exponential backoff
 on failure, the wedged-VPU watch — as a state machine with simulation
 tests over a fake player. The Android host keeps the decoders
@@ -230,8 +228,8 @@ Raam's problem.
 
 ## Memory budget
 
-The design target is the measured envelope of the final experiment on
-the real frame, as named limits in `raam-model::limits`:
+The design target is the envelope measured on the frame with the full
+slideshow and clips running, as named limits in `raam-model::limits`:
 
 | Budget | Value | Source |
 |---|---|---|
@@ -245,7 +243,8 @@ GPU allocation failing when a plan composes during a transition under
 memory pressure. Reserving the tile and scratch targets once removes
 the per-plan allocation that raced. Every GPU allocation failure path
 stays survivable regardless (drop the plan, retry, cut the transition)
-— that recovery is proven and must survive the port.
+— the injection run checks that recovery on the frame, and it must
+not regress.
 
 ## Photos without Immich
 
@@ -290,12 +289,14 @@ Four layers, cheapest first:
    backoff caps; budgets never exceeded; recovery after every injected
    failure). Logic-only, no GL.
 3. **Pixel** — the desktop host's `--exact` golden screenshots, and the
-   headless-Chrome diff of the web build against them. Both proven in
-   the experiments; they are the render-regression net and the pixel
-   match's enforcement.
-4. **On-frame** — manual, per migration step: the checked items in
-   [plan/migration.md](plan/migration.md), always including the
-   GPU-failure injection run.
+   headless-Chrome diff of the web build against them: the
+   render-regression net and the pixel match's enforcement (the golden
+   suite is the first item in [plan/next.md](plan/next.md)).
+4. **On-frame** — manual, for any change to rendering, video, memory or
+   a recovery path: collages and transitions, a clip with its sound in
+   step, one decoder at a time, settings surviving a restart, and always
+   the GPU-failure injection run (`debug.video.fail=rt`: plans drop,
+   then the slideshow recovers once it is cleared).
 
 **CI** (GitHub Actions): fmt, clippy (`-D warnings`), `cargo test
 --workspace`, and a wasm build, on every push and PR. PR titles follow
@@ -305,9 +306,8 @@ releases are automated.
 ## The dependency register
 
 Every dependency earns a row here before it enters a `Cargo.toml`; a
-dependency without a row is a review failure. The audit of the
-experiments (private lab repo, `docs/raam-prep/dependencies.md`) is the
-basis; its replacements are adopted as decisions:
+dependency without a row is a review failure. Where a row replaces a
+heavier crate, the replacement is a decision:
 
 | Crate | Where | Why it earns its keep |
 |---|---|---|

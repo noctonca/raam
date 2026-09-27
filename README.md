@@ -13,14 +13,25 @@ desktop app, on a Linux box, and in the browser.
 
 ## Status
 
-**Pre-alpha: design done, port in progress.** Everything Raam will do
-has been proven on the real hardware across 28 experiments in a private
-lab repo; the productisation into this repo is under way. Nothing here
-runs a frame yet.
+**Pre-alpha.** Raam runs as the home app on the SNUG frame, as a
+desktop app and as a browser demo, but there is no release yet: putting
+it on a frame means building the APK yourself, and root.
 
 - The design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- The route from experiments to product: [docs/plan/migration.md](docs/plan/migration.md)
+- What's next: [docs/plan/next.md](docs/plan/next.md)
 - The coding discipline: [TIGERSTYLE.md](TIGERSTYLE.md)
+
+## Running it
+
+- **Desktop:** `cargo run --release` runs the slideshow over
+  `~/Pictures/Raam` (or `--photos DIR`), with Immich set up in its
+  settings; the mouse is a finger. `--page NAME` shows one screen of
+  the UI instead. The flags are listed at the top of
+  [src/main.rs](src/main.rs).
+- **Web:** `hosts/web/build.sh`, then serve `hosts/web/www` (e.g.
+  `python3 -m http.server -d hosts/web/www`).
+- **Android:** `cd hosts/android && cargo apk2 build --release`, with
+  the NDK set up; `.claude/env-check.sh` checks the machine first.
 
 ## What it will be
 
@@ -30,9 +41,7 @@ runs a frame yet.
 - **The desktop build** is for development and doubles as a Linux
   frame (Raspberry Pi class).
 - **The web build is the demo** — the real UI, compiled to wasm,
-  pixel-matched to the device. To run it locally: `hosts/web/build.sh`,
-  then serve `hosts/web/www` (e.g. `python3 -m http.server -d
-  hosts/web/www`).
+  pixel-matched to the device.
 
 ## Licence
 

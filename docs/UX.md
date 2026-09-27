@@ -1,11 +1,12 @@
 # UX rules for the frame
 
 This file is the design system's contract (`crates/raam-core/src/theme.rs`,
-`kit.rs`, `gallery.rs`, `frame_ui.rs`; measured and QA'd as experiment 026
-in the lab repo). The tokens say *what* the pieces are. This file says
-*how they're put together*, and why. Visual QA (the ux-qa skill) checks
-the gallery and the product's screens against it, and a change that
-breaks a rule either fixes the rule here or doesn't land.
+`kit.rs`, `gallery.rs`, `frame_ui.rs`; its numbers were measured on the
+frame). The tokens say *what* the pieces are. This file says *how they're
+put together*, and why. Visual QA (the ux-qa skill, in
+`.claude/skills/ux-qa`) checks the gallery and the product's screens
+against it, and a change that breaks a rule either fixes the rule here or
+doesn't land.
 
 The "why" comes from [Laws of UX](https://lawsofux.com). Each law below is
 turned into rules for this device, not restated.
@@ -156,7 +157,7 @@ misalignment makes the frame feel broken. It's why this file exists.
 **Doherty Threshold** (feedback within 400 ms keeps people engaged).
 - The pressed state shows on the frame the touch lands on.
 - Anything over 400 ms shows progress. A theme switch measured 94 to
-  110 ms to its third frame on the frame (step 2.3), which is inside.
+  110 ms to its third frame on the frame, which is inside.
 
 **Tesler's Law** (complexity has to live somewhere).
 - The frame carries it, not the person: sensible defaults, discovery,
@@ -186,7 +187,7 @@ first photo appears right away, not a blank screen.
 specific ("Iceland" is not on the server any more). A note that's always
 there stops being read.
 
-## Settings, menu and keyboard (step 2.6)
+## Settings, menu and keyboard
 
 - **Settings are opaque and full-screen**, in the list/detail shell. The
   sections are Photos, Slideshow, Display, Sleep and Server. The
@@ -228,7 +229,7 @@ there stops being read.
 
   Each key's target covers its share of the gaps, and sits 8 px higher
   than its keycap. On this panel fingers land 15 to 25 px above the glyph
-  aimed at (the owner's taps on backspace hit the row above).
+  aimed at (taps on backspace hit the row above).
 
 ## Colour and text
 

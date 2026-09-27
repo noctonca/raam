@@ -1,7 +1,7 @@
 # How to contribute
 
-Raam is young — one maintainer, a design, and a port in progress from a
-private lab of 28 experiments. Contributions are welcome, and the bar
+Raam is young — one maintainer, a written design, and no release yet.
+Contributions are welcome, and the bar
 is the same for everyone (AI-assisted or not): the code has to be
 correct, the scope has to match what the PR claims, and the pixel
 match across hosts has to hold.

@@ -652,6 +652,9 @@ impl App {
                 events: egui_events,
                 ..Default::default()
             };
+            // The screen these presses landed on (run_ui below may flip
+            // it, e.g. Back: Settings -> Menu in the same pass).
+            let menu_at_input = self.state.screen == frame_ui::Screen::Menu;
             let mut actions = frame_ui::Actions::default();
             let need_run = !self.egui_uploaded
                 || !raw_input.events.is_empty()
@@ -782,13 +785,18 @@ impl App {
 
             let typing = self.ctx.egui_wants_keyboard_input();
             // `run_ui`'s root Ui is itself a full-screen Background-order
-            // layer, so "outside the chrome" means a hit on nothing above
-            // it.
-            let tapped_outside = presses.iter().any(|p| {
-                self.ctx
-                    .layer_id_at(*p)
-                    .is_none_or(|l| l.order == egui::Order::Background)
-            });
+            // layer, so on the menu screen "outside the chrome" means a hit
+            // on nothing above it (the toolbar is an Area). The settings
+            // draw as Panels IN the root layer, so there every tap would
+            // read as outside: tap-to-dismiss is a menu-screen rule only
+            // (found on the frame at step 6; settings leave via Back or
+            // the idle timeout).
+            let tapped_outside = menu_at_input
+                && presses.iter().any(|p| {
+                    self.ctx
+                        .layer_id_at(*p)
+                        .is_none_or(|l| l.order == egui::Order::Background)
+                });
             let timed_out = !typing && clock::elapsed(self.last_input) >= AUTO_DISMISS;
             if actions.close || tapped_outside || timed_out {
                 log::info!(
@@ -1263,6 +1271,28 @@ mod tests {
         rig.tap(100.0, 100.0);
         assert!(rig.app.overlay_open());
         assert_eq!(rig.show.selected.get(), 1);
+    }
+
+    #[test]
+    fn a_tap_on_the_open_settings_never_reads_as_outside() {
+        let mut rig = Rig::new(None);
+        rig.tap(100.0, 100.0);
+        assert!(rig.app.overlay_open());
+        // On the Settings screen (drawn as Panels in the root layer, which
+        // is Background order), a tap anywhere is UI, not tap-outside.
+        rig.app.state.screen = frame_ui::Screen::Settings;
+        let out = rig.frame(&[]);
+        assert!(out.chrome_opaque, "settings cover the slideshow");
+        rig.tap(640.0, 400.0);
+        rig.tap(180.0, 204.0);
+        assert!(
+            rig.app.overlay_open(),
+            "settings taps must not dismiss the overlay"
+        );
+        // The idle timeout still applies there.
+        advance(AUTO_DISMISS + Duration::from_secs(1));
+        rig.frame(&[]);
+        assert!(!rig.app.overlay_open());
     }
 
     #[test]

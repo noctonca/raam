@@ -3,12 +3,6 @@
 What's planned, roughly in order. A larger item gets its own plan in
 this directory when work on it starts.
 
-## Hosting the web demo
-
-The real UI and slideshow over the bundled sample photos, hosted
-(GitHub Pages, say) so the README can link it and anyone can try Raam
-without building it.
-
 ## Smaller items
 
 - A `--fullscreen` flag, so the desktop host can run a Linux frame.

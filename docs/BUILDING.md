@@ -33,6 +33,8 @@ The last needs the NDK's clang for the C in the dependencies: set
 `toolchains/llvm/prebuilt/<host>/bin/armv7a-linux-androideabi23-clang`
 and `AR_armv7_linux_androideabi` to `llvm-ar` in the same folder.
 
+Pull requests also build the web demo ([below](#web)).
+
 ## Goldens
 
 The desktop host's preset shots are the render-regression net: every
@@ -72,6 +74,11 @@ python3 -m http.server -d hosts/web/www
 `build.sh` prints the exact `cargo install` command when the installed
 wasm-bindgen-cli differs from Cargo.lock's. It runs wasm-opt too when
 binaryen is installed.
+
+Every push to main builds the demo with the same script and deploys
+`hosts/web/www` to [GitHub Pages](https://noctonca.github.io/raam/)
+([.github/workflows/pages.yml](../.github/workflows/pages.yml)); a
+pull request builds it without deploying.
 
 ## Android APK
 

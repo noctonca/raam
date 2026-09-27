@@ -988,6 +988,21 @@ pub fn mark_unplayable(conn: &Connection, asset: i64, reason: &str) -> Vec<PathB
     drop_cached(conn, asset)
 }
 
+/// The host has no player (`MediaProbe::no_player`): every clip not yet
+/// marked is marked unplayable for `reason`, without its file. Returns
+/// how many were marked and the files to remove.
+pub fn mark_clips_unplayable(conn: &Connection, reason: &str) -> (usize, Vec<PathBuf>) {
+    let ids: Vec<i64> = conn
+        .prepare("SELECT id FROM asset WHERE kind = 'video' AND COALESCE(playable, 1) = 1")
+        .and_then(|mut s| s.query_map([], |r| r.get(0))?.collect())
+        .unwrap_or_default();
+    let files = ids
+        .iter()
+        .flat_map(|&id| mark_unplayable(conn, id, reason))
+        .collect();
+    (ids.len(), files)
+}
+
 pub fn set_playable(conn: &Connection, asset: i64) -> rusqlite::Result<usize> {
     conn.execute(
         "UPDATE asset SET playable = 1, unplayable_reason = NULL WHERE id = ?1",
@@ -1175,4 +1190,74 @@ pub fn counts(conn: &Connection, kind: SourceKind) -> (i64, i64) {
         |r| Ok((r.get(0)?, r.get(1)?)),
     )
     .unwrap_or((0, 0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fixed clock: the DB only stamps rows with it.
+    fn install_clock() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            clock::set_source(clock::Source {
+                monotonic: || std::time::Duration::ZERO,
+                wall: || std::time::Duration::from_secs(1_790_000_000),
+                local: |_| raam_model::LocalTime {
+                    hour: 12,
+                    min: 0,
+                    sec: 0,
+                    mday: 1,
+                    mon: 0,
+                    wday: 0,
+                },
+            })
+        });
+    }
+
+    fn asset(conn: &Connection, id: &str, kind: &str, playable: Option<(bool, &str)>) {
+        conn.execute(
+            "INSERT INTO asset (source_id, remote_id, kind, width, height, added_at_ms, playable, unplayable_reason)
+             VALUES ((SELECT id FROM source WHERE kind = 'immich'), ?1, ?2, 640, 480, 0, ?3, ?4)",
+            params![id, kind, playable.map(|p| p.0), playable.map(|p| p.1)],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_host_with_no_player_keeps_every_clip_out_of_the_queue() {
+        install_clock();
+        let db = open(Path::new(":memory:"), "").unwrap();
+        let conn = db.lock().unwrap();
+        asset(&conn, "photo", "image", None);
+        asset(&conn, "clip", "video", None);
+        asset(&conn, "big", "video", Some((false, "1920x1088 at most")));
+        let queued = |conn: &Connection| -> Vec<String> {
+            let mut ids: Vec<String> = eligible(conn, false)
+                .into_iter()
+                .map(|m| m.remote_id)
+                .collect();
+            ids.sort();
+            ids
+        };
+        // A clip nobody has tried yet is queued, as on the frame.
+        assert_eq!(queued(&conn), ["clip", "photo"]);
+
+        let (marked, files) = mark_clips_unplayable(&conn, "no video player on this host");
+        assert_eq!((marked, files.len()), (1, 0));
+        assert_eq!(queued(&conn), ["photo"]);
+        let reason = |id: &str| -> String {
+            conn.query_row(
+                "SELECT unplayable_reason FROM asset WHERE remote_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(reason("clip"), "no video player on this host");
+        // A clip already out keeps the reason it had.
+        assert_eq!(reason("big"), "1920x1088 at most");
+        // Nothing left to mark the second time.
+        assert_eq!(mark_clips_unplayable(&conn, "again").0, 0);
+    }
 }

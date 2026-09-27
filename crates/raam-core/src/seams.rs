@@ -18,6 +18,13 @@ pub trait MediaProbe: Send + Sync {
     fn probe(&self, path: &str) -> Result<ClipInfo, String>;
     /// Why this device can't play the clip, if it can't.
     fn unplayable(&self, info: &ClipInfo) -> Option<String>;
+    /// Why no clip plays here at all, on a host with no player (the
+    /// desktop's `NoVideo`). The engine then marks every clip unplayable
+    /// with this reason as it lists it, so none is fetched just to be
+    /// probed, and none is planned. `None` on a host with decoders.
+    fn no_player(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Test-only debug switches (`debug.video.*`): Android system properties,

@@ -626,8 +626,14 @@ fn handle(lib: &Library, st: &mut Loop, cmd: Cmd) {
                  WHERE source_id = (SELECT id FROM source WHERE kind = 'immich')",
                 [],
             );
+            // Not on a host with no player: nothing has changed for it.
+            let stale = match lib.host.probe.no_player() {
+                Some(why) => db::mark_clips_unplayable(&conn, &why).1,
+                None => Vec::new(),
+            };
             drop(conn);
             db::remove_files(&files);
+            db::remove_files(&stale);
             log::info!(
                 "library: Immich cache cleared, {} previews in {:?}",
                 ids.len(),
@@ -787,10 +793,20 @@ fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, S
     if kind == SourceKind::Immich {
         db::set_memberships(&tx, source, &items).map_err(|e| format!("memberships: {e}"))?;
     }
+    // A host with no player: the clips just listed are out before anything
+    // can plan them or fetch them to probe.
+    let (left_out, stale) = match lib.host.probe.no_player() {
+        Some(why) => db::mark_clips_unplayable(&tx, &why),
+        None => (0, Vec::new()),
+    };
     tx.commit().map_err(|e| e.to_string())?;
     drop(conn);
     db::remove_files(&files);
-    if added + changed + moved + removed > 0 {
+    db::remove_files(&stale);
+    if left_out > 0 {
+        log::info!("library: {left_out} clips left out, this host plays none");
+    }
+    if added + changed + moved + removed + left_out > 0 {
         lib.bump();
     }
     Ok(format!(

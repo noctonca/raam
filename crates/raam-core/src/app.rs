@@ -128,8 +128,9 @@ pub struct Deps<'a> {
     pub power: Option<&'a mut dyn Power>,
 }
 
-/// What the host executes after `frame`: engine commands and host-side
-/// setters, in order.
+/// The engine's commands from a `frame` pass, to run in order. The native
+/// hosts hand them to `raam_engine::run_effects`; the web demo maps them
+/// onto its stand-ins. What only a host can do is a `FrameOut` field.
 pub enum Effect {
     SaveSettings {
         rows: Vec<(&'static str, serde_json::Value)>,
@@ -151,8 +152,6 @@ pub enum Effect {
     SyncNow,
     /// The fetch side's collage group size.
     SetMaxGroup(usize),
-    /// The music stream's volume, set when it changes while sound is on.
-    SetMusicVolume(f32),
     /// Whether the weather worker may call out: the setting is on, the
     /// clock shows, and the app is in front. Sent when that changes; the
     /// worker starts with it off.
@@ -190,6 +189,11 @@ pub struct FrameOut {
     pub chrome_opaque: bool,
     /// Just came back from hidden: the host resets its frame stats.
     pub became_visible: bool,
+    /// Set the music stream's volume. Sent while sound is on, whenever the
+    /// volume differs from the last one sent (so at start, and on a
+    /// change). The stream is the system's, so this is the host's to set,
+    /// not the engine's.
+    pub music_volume: Option<f32>,
     /// How long the slideshow's `update` took, for the host's stats line.
     pub advance: Duration,
     pub overlay: Option<OverlayRebuild>,
@@ -322,6 +326,7 @@ impl App {
             skip_draw: false,
             chrome_opaque: false,
             became_visible: false,
+            music_volume: None,
             advance: Duration::ZERO,
             overlay: None,
             egui: None,
@@ -561,9 +566,7 @@ impl App {
             .video_sound
             .then_some(self.state.settings.video_volume);
         if want_volume.is_some() && want_volume != self.music_volume {
-            if let Some(v) = want_volume {
-                out.effects.push(Effect::SetMusicVolume(v));
-            }
+            out.music_volume = want_volume;
             self.music_volume = want_volume;
         }
         // The weather worker calls out only while its answer can show.
@@ -1293,6 +1296,31 @@ mod tests {
 
         rig.app.state.settings.weather_enabled = false;
         assert_eq!(weather_sent(&rig.frame(&[])), [false]);
+    }
+
+    #[test]
+    fn the_music_volume_is_sent_while_sound_is_on_and_only_on_a_change() {
+        let mut rig = Rig::new(None);
+        // Sound is off by default: the system's volume is left alone.
+        assert_eq!(rig.frame(&[]).music_volume, None);
+
+        rig.app.state.settings.video_sound = true;
+        assert_eq!(rig.frame(&[]).music_volume, Some(0.5));
+        assert_eq!(rig.frame(&[]).music_volume, None);
+        rig.app.state.settings.video_volume = 0.8;
+        assert_eq!(rig.frame(&[]).music_volume, Some(0.8));
+
+        // Sound off leaves the stream where it was, and back on at the same
+        // volume there is nothing to set; at another, there is.
+        rig.app.state.settings.video_sound = false;
+        assert_eq!(rig.frame(&[]).music_volume, None);
+        rig.app.state.settings.video_sound = true;
+        assert_eq!(rig.frame(&[]).music_volume, None);
+        rig.app.state.settings.video_sound = false;
+        rig.app.state.settings.video_volume = 0.3;
+        assert_eq!(rig.frame(&[]).music_volume, None);
+        rig.app.state.settings.video_sound = true;
+        assert_eq!(rig.frame(&[]).music_volume, Some(0.3));
     }
 
     #[test]

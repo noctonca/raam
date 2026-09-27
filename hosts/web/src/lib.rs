@@ -307,7 +307,6 @@ fn effect_name(e: &Effect) -> &'static str {
         Effect::Rescan => "rescanning",
         Effect::SyncNow => "syncing",
         Effect::SetMaxGroup(_) => "the collage max",
-        Effect::SetMusicVolume(_) => "the volume",
         Effect::SetWeather(_) => "the weather",
     }
 }

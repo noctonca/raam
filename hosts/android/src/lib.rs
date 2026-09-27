@@ -30,14 +30,14 @@ use android_activity::{
     AndroidApp, AndroidAppWaker, InputStatus, MainEvent, PollEvent, WindowManagerFlags,
 };
 use ndk::native_window::NativeWindow;
-use raam_core::app::{App, Deps, Effect, Event, Inputs, Overrides, Stage, Touch};
+use raam_core::app::{App, Deps, Event, Inputs, Overrides, Stage, Touch};
 use raam_core::frame_ui::{AppState, Screen};
 use raam_core::gl::{GL_RENDERER, GL_VENDOR, GL_VERSION, gl_string, glDisableVertexAttribArray};
 use raam_core::overlay::ClockOverlay;
 use raam_core::painter::Painter;
 use raam_core::slideshow::{Pipeline, SlideshowSettings};
 use raam_core::{clock, collage, switches};
-use raam_engine::{db, fetch, immich, library, weather};
+use raam_engine::{db, fetch, library, weather};
 use raam_model::limits::LARGEST_LAYOUT;
 use raam_model::{FitBackground, GapColour, SourceKind};
 use std::ffi::c_void;
@@ -151,53 +151,16 @@ fn ms(d: Duration, n: u32) -> f64 {
     }
 }
 
-/// The controller's effects, mapped onto the engine and the host plumbing.
-fn run_effects(
-    effects: Vec<Effect>,
-    lib: &library::Library,
-    fetch: Option<&fetch::FetchShared>,
-    power: Option<&power::Power>,
-    weather: Option<&weather::WeatherShared>,
-) {
-    for effect in effects {
-        match effect {
-            Effect::SaveSettings { rows, sleep } => {
-                lib.send(library::Cmd::SaveSettings { rows, sleep })
-            }
-            Effect::SetScale(key, mode) => lib.send(library::Cmd::SetScale(key, mode)),
-            Effect::SetHidden(key, hidden) => lib.send(library::Cmd::SetHidden(key, hidden)),
-            Effect::SetSourceEnabled(kind, on) => lib.set_enabled(kind, on),
-            Effect::SetServer { url, key } => {
-                lib.send(library::Cmd::SetServer(immich::Config { url, key }))
-            }
-            Effect::ExportCuration => lib.send(library::Cmd::ExportCuration),
-            Effect::SelectAlbum(album, on) => lib.send(library::Cmd::SelectAlbum(album, on)),
-            Effect::SetCap(cap) => lib.send(library::Cmd::SetCap(cap)),
-            Effect::ClearCache => lib.send(library::Cmd::ClearCache),
-            Effect::Rescan => lib.send(library::Cmd::Rescan),
-            Effect::SyncNow => lib.send(library::Cmd::SyncNow),
-            Effect::SetMaxGroup(max) => {
-                if let Some(f) = fetch {
-                    f.set_max_group(max);
-                }
-            }
-            // The volume is the music stream's (see power.rs).
-            Effect::SetMusicVolume(v) => {
-                if let Some(p) = power {
-                    match p.set_music_volume(v) {
-                        Ok((i, max)) => {
-                            log::info!("music stream volume {i}/{max} ({:.0}%)", v * 100.0)
-                        }
-                        Err(e) => log::error!("setting the music stream volume: {e}"),
-                    }
-                }
-            }
-            Effect::SetWeather(on) => {
-                if let Some(w) = weather {
-                    w.set_enabled(on);
-                }
-            }
-        }
+/// The music stream's volume, when the controller asks for it. The
+/// stream is the system's (see power.rs), so the host sets it, not the
+/// engine.
+fn set_music_volume(v: Option<f32>, power: Option<&power::Power>) {
+    let (Some(v), Some(p)) = (v, power) else {
+        return;
+    };
+    match p.set_music_volume(v) {
+        Ok((i, max)) => log::info!("music stream volume {i}/{max} ({:.0}%)", v * 100.0),
+        Err(e) => log::error!("setting the music stream volume: {e}"),
     }
 }
 
@@ -449,7 +412,8 @@ fn android_main(app: AndroidApp) {
                         .map(|p| p as &mut dyn raam_core::seams::Power),
                 },
             );
-            run_effects(out.effects, &lib, None, power.as_ref(), None);
+            raam_engine::run_effects(out.effects, &lib, None, None);
+            set_music_volume(out.music_volume, power.as_ref());
             let Some(window) = app.native_window() else {
                 next_wait = out.wait;
                 continue;
@@ -563,13 +527,8 @@ fn android_main(app: AndroidApp) {
                     .map(|p| p as &mut dyn raam_core::seams::Power),
             },
         );
-        run_effects(
-            out.effects,
-            &lib,
-            fetch.as_deref(),
-            power.as_ref(),
-            weather.as_deref(),
-        );
+        raam_engine::run_effects(out.effects, &lib, fetch.as_deref(), weather.as_deref());
+        set_music_volume(out.music_volume, power.as_ref());
         if out.became_visible {
             stats = Stats::default();
             last_log = clock::now();

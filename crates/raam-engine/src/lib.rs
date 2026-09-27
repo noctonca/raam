@@ -1,7 +1,8 @@
 //! The data engine: fetch/library/writer/weather threads, SQLite, HTTP,
 //! the providers (Immich, local folder) and the cache. Native only —
-//! never compiled for wasm. Implements the core's `TileSource` and wakes
-//! the host through the core's `Waker` seam.
+//! never compiled for wasm. Implements the core's `TileSource`, wakes
+//! the host through the core's `Waker` seam, and runs the App
+//! controller's effects (`run_effects`).
 
 pub mod db;
 pub mod fetch;
@@ -10,6 +11,7 @@ pub mod library;
 pub mod provider;
 pub mod weather;
 
+use raam_core::app::Effect;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -38,6 +40,47 @@ pub struct Paths {
     /// never scanned. Also where a fresh install imports curation from
     /// (`db::import_curation`).
     pub curation_export: PathBuf,
+}
+
+/// Runs the App controller's effects on the engine, in order: a native
+/// host's step after each `frame` pass. The fetch and weather workers
+/// start with the first window, so before it a host has neither to give
+/// (and the controller sends nothing for them).
+pub fn run_effects(
+    effects: Vec<Effect>,
+    lib: &library::Library,
+    fetch: Option<&fetch::FetchShared>,
+    weather: Option<&weather::WeatherShared>,
+) {
+    for effect in effects {
+        match effect {
+            Effect::SaveSettings { rows, sleep } => {
+                lib.send(library::Cmd::SaveSettings { rows, sleep })
+            }
+            Effect::SetScale(key, mode) => lib.send(library::Cmd::SetScale(key, mode)),
+            Effect::SetHidden(key, hidden) => lib.send(library::Cmd::SetHidden(key, hidden)),
+            Effect::SetSourceEnabled(kind, on) => lib.set_enabled(kind, on),
+            Effect::SetServer { url, key } => {
+                lib.send(library::Cmd::SetServer(immich::Config { url, key }))
+            }
+            Effect::ExportCuration => lib.send(library::Cmd::ExportCuration),
+            Effect::SelectAlbum(album, on) => lib.send(library::Cmd::SelectAlbum(album, on)),
+            Effect::SetCap(cap) => lib.send(library::Cmd::SetCap(cap)),
+            Effect::ClearCache => lib.send(library::Cmd::ClearCache),
+            Effect::Rescan => lib.send(library::Cmd::Rescan),
+            Effect::SyncNow => lib.send(library::Cmd::SyncNow),
+            Effect::SetMaxGroup(max) => {
+                if let Some(f) = fetch {
+                    f.set_max_group(max);
+                }
+            }
+            Effect::SetWeather(on) => {
+                if let Some(w) = weather {
+                    w.set_enabled(on);
+                }
+            }
+        }
+    }
 }
 
 /// A fixed clock for the engine's tests, installed once per test process:

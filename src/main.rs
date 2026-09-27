@@ -19,6 +19,10 @@
 //!   up in the settings, as on the frame
 //! - `--size WxH`: the screen in device pixels (default 1280x800); the
 //!   window is always exact, as `--exact` makes the presets
+//! - `--fullscreen`: fill the monitor instead, borderless and with the
+//!   pointer hidden, as a Linux frame runs. The primary monitor, or the
+//!   first where none is (Wayland); the screen is the window's size once
+//!   it has held still for half a second
 //! - `--click X,Y` / `--press X,Y`: scripted taps, the first once the
 //!   first collage is up and still, each 1.5 s after the step before
 //! - `--set NAME=VALUE`: a scripted step that sets a debug switch, as F5
@@ -107,7 +111,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::monitor::MonitorHandle;
 use winit::raw_window_handle::HasWindowHandle;
+#[cfg(not(target_os = "macos"))]
+use winit::window::Fullscreen;
 use winit::window::Window;
 
 /// A scripted step of the slideshow's, run in the order given.
@@ -140,6 +147,9 @@ struct Args {
     backdrop: String,
     ppp: f32,
     size: [u32; 2],
+    /// --fullscreen (the slideshow): the screen is the full-screen
+    /// window's size, not `size`.
+    fullscreen: bool,
     exact: bool,
     screenshot: Option<PathBuf>,
     /// --hash: print the shot's hash (and exit, as --screenshot does).
@@ -179,6 +189,7 @@ fn parse_args() -> Result<Args, String> {
         backdrop: "still".into(),
         ppp: 1.0,
         size: [1280, 800],
+        fullscreen: false,
         exact: false,
         screenshot: None,
         hash: false,
@@ -194,13 +205,14 @@ fn parse_args() -> Result<Args, String> {
     let (mut preset_only, mut live_only) = (None, None);
     // --diff's own flags, and the first flag it has no use for.
     let (mut diff_only, mut not_diff) = (None, None);
+    let mut size_given = false;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         match flag.as_str() {
             "--theme" | "--text" | "--backdrop" | "--ppp" | "--scroll" | "--hold" | "--hash" => {
                 preset_only.get_or_insert(flag.clone());
             }
-            "--data" | "--photos" | "--set" | "--wait" => {
+            "--data" | "--photos" | "--set" | "--wait" | "--fullscreen" => {
                 live_only.get_or_insert(flag.clone());
             }
             _ => {}
@@ -287,7 +299,9 @@ fn parse_args() -> Result<Args, String> {
                     w.parse().map_err(|e| format!("--size: {e}"))?,
                     h.parse().map_err(|e| format!("--size: {e}"))?,
                 ];
+                size_given = true;
             }
+            "--fullscreen" => a.fullscreen = true,
             "--exact" => a.exact = true,
             "--screenshot" => a.screenshot = Some(val()?.into()),
             "--hash" => a.hash = true,
@@ -346,6 +360,9 @@ fn parse_args() -> Result<Args, String> {
             "{f} is the preset host's (--page); the slideshow takes its look from its settings"
         )),
         (false, _, Some(f)) => Err(format!("{f} is the slideshow's (no --page)")),
+        _ if a.fullscreen && size_given => {
+            Err("--size is no use to --fullscreen: the screen is the monitor's".into())
+        }
         _ => Ok(a),
     }
 }
@@ -362,12 +379,33 @@ pub struct Gl {
 /// linkage ready (gl.rs). `exact` asks for that many device pixels, so a
 /// retina window is half size but its pixels match `adb screencap`.
 /// `focus`: the window takes the keyboard focus as it opens.
-fn create_gl(el: &ActiveEventLoop, size: [u32; 2], exact: bool, focus: bool) -> Result<Gl, String> {
+/// `fullscreen`: the window fills that monitor instead, `size` being the
+/// monitor's in pixels.
+fn create_gl(
+    el: &ActiveEventLoop,
+    size: [u32; 2],
+    exact: bool,
+    focus: bool,
+    fullscreen: Option<MonitorHandle>,
+) -> Result<Gl, String> {
     let [w, h] = size;
-    let attrs = Window::default_attributes()
+    let mut attrs = Window::default_attributes()
         .with_title("raam")
         .with_inner_size(LogicalSize::new(w, h))
         .with_active(focus);
+    if let Some(m) = &fullscreen {
+        // On that monitor: a Mac's simple full screen (below) fills the
+        // screen the window is on.
+        attrs = attrs.with_position(m.position());
+        // The monitor's size to start with too: an X server with no window
+        // manager ignores the full-screen request.
+        #[cfg(not(target_os = "macos"))]
+        {
+            attrs = attrs
+                .with_inner_size(PhysicalSize::new(w, h))
+                .with_fullscreen(Some(Fullscreen::Borderless(Some(m.clone()))));
+        }
+    }
     let template = ConfigTemplateBuilder::new();
     let (window, config) = DisplayBuilder::new()
         .with_window_attributes(Some(attrs))
@@ -377,7 +415,15 @@ fn create_gl(el: &ActiveEventLoop, size: [u32; 2], exact: bool, focus: bool) -> 
         })
         .map_err(|e| format!("no GL config: {e}"))?;
     let window = window.ok_or("no window")?;
-    if exact {
+    if fullscreen.is_some() {
+        // A Mac's own full screen animates into a Space of its own; the
+        // simple kind covers the screen in place.
+        #[cfg(target_os = "macos")]
+        {
+            use winit::platform::macos::WindowExtMacOS;
+            window.set_simple_fullscreen(true);
+        }
+    } else if exact {
         let _ = window.request_inner_size(PhysicalSize::new(w, h));
     }
     let display = config.display();

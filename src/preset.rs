@@ -149,7 +149,7 @@ impl Preset {
     }
 
     fn create_window(&mut self, el: &ActiveEventLoop) -> Result<(), String> {
-        let gl = crate::create_gl(el, self.args.size, self.args.exact, !self.hermetic)?;
+        let gl = crate::create_gl(el, self.args.size, self.args.exact, !self.hermetic, None)?;
         self.info.gl_max_texture = gl.max_texture;
         let mut painter = unsafe { Painter::new() };
         painter.text_boost = self.opts.text_mode == TextMode::Shader;

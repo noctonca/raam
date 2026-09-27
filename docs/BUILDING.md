@@ -61,5 +61,5 @@ root.
 - **Your values** (the NDK path, the keystore) can live in an untracked
   `.env` at the repo root, which git ignores. Load it with
   `set -a; . ./.env; set +a`.
-- **Checking the machine:** `.claude/env-check.sh` checks the NDK,
+- **Checking the machine:** `scripts/env-check.sh` checks the NDK,
   cargo-apk2, signing and adb.

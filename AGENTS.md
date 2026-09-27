@@ -48,8 +48,9 @@ cargo fmt --all
 
 [docs/BUILDING.md](docs/BUILDING.md) has each host's prerequisites.
 Android builds use cargo-apk2 from `hosts/android` (workspace target
-dir); `.claude/env-check.sh` verifies the NDK, signing env and device
-setup first (personal values live in the untracked `.env`, never here). The web build has its own script under `hosts/web` (wasm32 +
+dir); `scripts/env-check.sh` verifies the NDK, signing env and device
+setup first (personal values live in the untracked `.env`, never
+here). The web build has its own script under `hosts/web` (wasm32 +
 wasm-bindgen + wasm-opt). APK releases are manual for now.
 
 ## When modifying X, do Y

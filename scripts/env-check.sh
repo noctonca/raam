@@ -5,7 +5,8 @@
 # untracked .env at the repo root, or in the environment. Hard
 # requirements FAIL; conveniences warn.
 #
-#   bash "$(git rev-parse --git-common-dir)/../.claude/env-check.sh"
+#   scripts/env-check.sh     (from the repo root; a worktree reads the
+#                            main checkout's .env)
 #
 #   ANDROID_NDK_ROOT                      the VERSIONED NDK dir
 #                                         (cargo-apk2 rejects ndk/ itself)

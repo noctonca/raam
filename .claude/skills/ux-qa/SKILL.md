@@ -138,7 +138,7 @@ weight with the shader boost, fingers, and timing.
    restore the frame afterwards (raam is the home app: force-stop
    relaunches it clean).
 2. **Build and install,** with the machine's `.env` loaded (see
-   `.claude/env-check.sh`): `cd hosts/android && cargo apk2 build
+   `scripts/env-check.sh`): `cd hosts/android && cargo apk2 build
    --release`, `adb install -r target/release/apk/raam-android.apk`, and
    launch it (`am start -n
    io.github.noctonca.raam/android.app.NativeActivity`).

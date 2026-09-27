@@ -63,7 +63,7 @@ debuggable = true
 # Release signing: no keystore path in this public manifest. Point
 # CARGO_APK_RELEASE_KEYSTORE / CARGO_APK_RELEASE_KEYSTORE_PASSWORD at
 # yours (the dev debug keystore until the release key exists; see the
-# release row in docs/ARCHITECTURE.md and .claude/env-check.sh).
+# release row in docs/ARCHITECTURE.md and scripts/env-check.sh).
 
 [[package.metadata.android.application.activity]]
 name = "android.app.NativeActivity"

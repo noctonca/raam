@@ -48,6 +48,7 @@ pub fn settings_rows(s: &Settings) -> Vec<(&'static str, serde_json::Value)> {
                 Corner::BottomRight => "bottomright",
             }),
         ),
+        ("overlay.weather", json!(s.weather_enabled)),
         ("locale.clock_24h", json!(s.clock_24h)),
         (
             "ui.theme",

@@ -4,6 +4,12 @@
 //! render thread: results land in a mutex, a version counter bumps, and the
 //! host's `Waker` wakes the loop so the overlay rebuilds its text.
 //!
+//! It calls out only while enabled (`set_enabled`, from the controller's
+//! `SetWeather` effect: the setting is on, the clock shows, the app is in
+//! front). It starts disabled and waits on a condvar, so with the setting
+//! off there is no location lookup and no weather call at all. Turning it
+//! off and on again within the 15 minutes makes no extra call.
+//!
 //! Privacy: the IP lookup necessarily sends the frame's public IP to the geo
 //! service; only the city is logged, never the IP or the coordinates.
 use raam_core::seams::Waker;
@@ -12,7 +18,8 @@ use raam_model::limits::{
     WEATHER_HTTP_TIMEOUT, WEATHER_REFRESH, WEATHER_RETRY_MAX, WEATHER_RETRY_MIN,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct Location {
@@ -30,16 +37,47 @@ pub struct Current {
 
 #[derive(Default)]
 struct State {
+    enabled: bool,
     location: Option<Location>,
     current: Option<Current>,
 }
 
 pub struct WeatherShared {
     state: Mutex<State>,
+    /// Signalled when `enabled` changes, so a waiting worker re-checks.
+    toggled: Condvar,
     version: AtomicU64,
 }
 
 impl WeatherShared {
+    /// Lets the worker call out, or stops it; it notices at once, even
+    /// mid-wait. The snapshot is kept either way.
+    pub fn set_enabled(&self, on: bool) {
+        let mut s = self.state.lock().unwrap();
+        if s.enabled != on {
+            s.enabled = on;
+            log::info!("weather calls {}", if on { "on" } else { "off" });
+            self.toggled.notify_all();
+        }
+    }
+
+    /// Blocks until the worker is enabled and `due` (a `clock::now()`
+    /// reading) has come.
+    fn wait_turn(&self, due: Duration) {
+        let mut s = self.state.lock().unwrap();
+        loop {
+            if !s.enabled {
+                s = self.toggled.wait(s).unwrap();
+                continue;
+            }
+            let left = due.saturating_sub(clock::now());
+            if left.is_zero() {
+                return;
+            }
+            s = self.toggled.wait_timeout(s, left).unwrap().0;
+        }
+    }
+
     pub fn version(&self) -> u64 {
         self.version.load(Ordering::Acquire)
     }
@@ -56,17 +94,25 @@ impl WeatherShared {
     }
 }
 
-pub fn spawn(waker: Arc<dyn Waker>) -> Arc<WeatherShared> {
-    let shared = Arc::new(WeatherShared {
-        state: Mutex::new(State::default()),
-        version: AtomicU64::new(0),
-    });
-    let s = shared.clone();
-    std::thread::spawn(move || weather_loop(s, waker));
-    shared
+/// The worker's two calls; a test counts them through a fake.
+trait Api: Send + 'static {
+    fn locate(&self) -> Result<Location, String>;
+    fn current(&self, loc: &Location) -> Result<Current, String>;
 }
 
-fn weather_loop(shared: Arc<WeatherShared>, waker: Arc<dyn Waker>) {
+struct Http(ureq::Agent);
+
+impl Api for Http {
+    fn locate(&self) -> Result<Location, String> {
+        locate(&self.0)
+    }
+    fn current(&self, loc: &Location) -> Result<Current, String> {
+        current_weather(&self.0, loc)
+    }
+}
+
+/// Starts the worker disabled; the host enables it on `SetWeather`.
+pub fn spawn(waker: Arc<dyn Waker>) -> Arc<WeatherShared> {
     let client = crate::immich::agent(
         WEATHER_HTTP_TIMEOUT,
         concat!(
@@ -75,51 +121,75 @@ fn weather_loop(shared: Arc<WeatherShared>, waker: Arc<dyn Waker>) {
             " (github.com/noctonca/raam)"
         ),
     );
+    spawn_with(waker, Http(client))
+}
 
-    let mut backoff = WEATHER_RETRY_MIN;
-    let location = loop {
-        let t = clock::now();
-        match locate(&client) {
-            Ok(loc) => {
-                log::info!(
-                    "location resolved by IP: {} in {:?}",
-                    loc.city,
-                    clock::elapsed(t)
-                );
-                break loc;
-            }
-            Err(e) => {
-                log::warn!("IP location failed ({e}), retrying in {backoff:?}");
-                std::thread::sleep(backoff);
-                backoff = (backoff * 2).min(WEATHER_RETRY_MAX);
-            }
-        }
-    };
-    shared.publish(waker.as_ref(), |s| s.location = Some(location.clone()));
+fn spawn_with(waker: Arc<dyn Waker>, api: impl Api) -> Arc<WeatherShared> {
+    let shared = Arc::new(WeatherShared {
+        state: Mutex::new(State::default()),
+        toggled: Condvar::new(),
+        version: AtomicU64::new(0),
+    });
+    let s = shared.clone();
+    std::thread::spawn(move || weather_loop(s, waker, api));
+    shared
+}
 
+fn weather_loop(shared: Arc<WeatherShared>, waker: Arc<dyn Waker>, api: impl Api) {
+    let mut due = clock::now();
     let mut backoff = WEATHER_RETRY_MIN;
     loop {
+        shared.wait_turn(due);
+        let location = shared.state.lock().unwrap().location.clone();
         let t = clock::now();
-        match current_weather(&client, &location) {
-            Ok(c) => {
-                log::info!(
-                    "Open-Meteo current: {:.1}C code={} is_day={} ({}) in {:?}",
-                    c.temp_c,
-                    c.code,
-                    c.is_day,
-                    weather_icons::describe(c.code, c.is_day).0,
-                    clock::elapsed(t)
-                );
-                shared.publish(waker.as_ref(), |s| s.current = Some(c));
+        // The wait before the next call on success; `None` retries.
+        let next = match location {
+            None => match api.locate() {
+                Ok(loc) => {
+                    log::info!(
+                        "location resolved by IP: {} in {:?}",
+                        loc.city,
+                        clock::elapsed(t)
+                    );
+                    shared.publish(waker.as_ref(), |s| s.location = Some(loc));
+                    Some(Duration::ZERO)
+                }
+                Err(e) => {
+                    log::warn!("IP location failed ({e}), retrying in {backoff:?}");
+                    None
+                }
+            },
+            Some(loc) => match api.current(&loc) {
+                Ok(c) => {
+                    log::info!(
+                        "Open-Meteo current: {:.1}C code={} is_day={} ({}) in {:?}",
+                        c.temp_c,
+                        c.code,
+                        c.is_day,
+                        weather_icons::describe(c.code, c.is_day).0,
+                        clock::elapsed(t)
+                    );
+                    shared.publish(waker.as_ref(), |s| s.current = Some(c));
+                    Some(WEATHER_REFRESH)
+                }
+                Err(e) => {
+                    log::warn!("Open-Meteo failed ({e}), retrying in {backoff:?}");
+                    None
+                }
+            },
+        };
+        let wait = match next {
+            Some(wait) => {
                 backoff = WEATHER_RETRY_MIN;
-                std::thread::sleep(WEATHER_REFRESH);
+                wait
             }
-            Err(e) => {
-                log::warn!("Open-Meteo failed ({e}), retrying in {backoff:?}");
-                std::thread::sleep(backoff);
+            None => {
+                let wait = backoff;
                 backoff = (backoff * 2).min(WEATHER_RETRY_MAX);
+                wait
             }
-        }
+        };
+        due = clock::now() + wait;
     }
 }
 
@@ -206,5 +276,86 @@ impl raam_core::app::WeatherInfo for WeatherShared {
                 is_day: c.is_day,
             }),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    #[derive(Default)]
+    struct Calls {
+        locate: AtomicUsize,
+        current: AtomicUsize,
+    }
+
+    impl Calls {
+        fn get(&self) -> (usize, usize) {
+            (
+                self.locate.load(Ordering::SeqCst),
+                self.current.load(Ordering::SeqCst),
+            )
+        }
+    }
+
+    struct Fake(Arc<Calls>);
+
+    impl Api for Fake {
+        fn locate(&self) -> Result<Location, String> {
+            self.0.locate.fetch_add(1, Ordering::SeqCst);
+            Ok(Location {
+                city: "Lisbon".into(),
+                lat: 38.7,
+                lon: -9.1,
+            })
+        }
+        fn current(&self, _loc: &Location) -> Result<Current, String> {
+            self.0.current.fetch_add(1, Ordering::SeqCst);
+            Ok(Current {
+                temp_c: 18.0,
+                code: 0,
+                is_day: true,
+            })
+        }
+    }
+
+    struct NoWake;
+
+    impl Waker for NoWake {
+        fn wake(&self) {}
+    }
+
+    /// Polls until `f` holds, for up to 5 s.
+    fn eventually(f: impl Fn() -> bool) -> bool {
+        (0..500).any(|_| {
+            f() || {
+                std::thread::sleep(Duration::from_millis(10));
+                false
+            }
+        })
+    }
+
+    #[test]
+    fn the_worker_calls_out_only_while_enabled() {
+        // The test clock stands still, so the 15-minute refresh never
+        // comes round: any call after the first pair is a toggle's.
+        crate::install_test_clock();
+        let calls = Arc::new(Calls::default());
+        let w = spawn_with(Arc::new(NoWake), Fake(calls.clone()));
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(calls.get(), (0, 0), "a disabled worker called out");
+
+        w.set_enabled(true);
+        assert!(eventually(|| w.snapshot().1.is_some()));
+        assert_eq!(calls.get(), (1, 1));
+        assert_eq!(w.snapshot().0.as_deref(), Some("Lisbon"));
+
+        // Off and on again within the refresh: no extra call, and the
+        // location is never looked up twice.
+        w.set_enabled(false);
+        w.set_enabled(true);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(calls.get(), (1, 1));
     }
 }

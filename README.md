@@ -21,7 +21,8 @@ APK, and a frame with root. If that's not you, watch for a release.
   Immich found, and five **GPU transitions**, one of your choice or all
   in turn.
 - **Video clips**, with sound if you want it.
-- **A clock** with the local weather, in two styles and any corner.
+- **A clock** in two styles and any corner, with the local weather if
+  you turn it on.
 - **From the frame:** hide a photo (with undo), switch it between
   filling the screen and fitting it, and change every setting on the
   touchscreen, the server address and API key included.
@@ -60,10 +61,11 @@ for new photos every 30 minutes), captions and reactions, Wi-Fi and
 brightness settings, and updates without a computer.
 
 **What Raam sends where:** photos and clips come from your Immich
-server. For the weather, it looks up the frame's location from its IP
-address (ipwho.is, or ipapi.co) at start, then asks
-[Open-Meteo](https://open-meteo.com) every 15 minutes, even with the
-clock off.
+server, and nothing else goes out unless you turn on the weather
+(Settings → Display; off by default). Then Raam looks up the frame's
+location from its IP address once per start (ipwho.is, or ipapi.co),
+and asks [Open-Meteo](https://open-meteo.com) for the weather every 15
+minutes while the clock is on the screen.
 
 **Why not ImmichFrame or Immich Kiosk?** Immich Kiosk needs its own
 server and a browser from 2022 or later (Chrome 106+); the SNUG's

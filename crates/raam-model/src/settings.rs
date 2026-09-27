@@ -191,6 +191,10 @@ pub struct Settings {
     pub clock_style: ClockStyle,
     pub clock_corner: Corner,
     pub clock_24h: bool,
+    /// The local weather on the clock. Off by default: it sends the
+    /// frame's public IP to a geolocation service and asks Open-Meteo
+    /// every 15 minutes while the clock shows.
+    pub weather_enabled: bool,
     pub sleep_enabled: bool,
     /// Minutes after local midnight.
     pub sleep_min: u32,
@@ -227,6 +231,7 @@ impl Settings {
             clock_style: ClockStyle::Simple,
             clock_corner: Corner::TopRight,
             clock_24h: true,
+            weather_enabled: false,
             sleep_enabled: true,
             sleep_min: limits::DEFAULT_SLEEP_MIN,
             wake_min: limits::DEFAULT_WAKE_MIN,

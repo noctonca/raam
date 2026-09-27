@@ -389,7 +389,7 @@ impl Live {
                 power: None,
             },
         );
-        run_effects(out.effects, &self.lib, &run.fetch);
+        run_effects(out.effects, &self.lib, &run.fetch, &run.weather);
         self.next_run = out.wait.and_then(|w| Instant::now().checked_add(w));
         if out.skip_draw {
             return;
@@ -489,7 +489,12 @@ impl Live {
 
 /// The controller's effects, mapped onto the engine as the Android host
 /// maps them.
-fn run_effects(effects: Vec<Effect>, lib: &library::Library, fetch: &fetch::FetchShared) {
+fn run_effects(
+    effects: Vec<Effect>,
+    lib: &library::Library,
+    fetch: &fetch::FetchShared,
+    weather: &weather::WeatherShared,
+) {
     for effect in effects {
         match effect {
             Effect::SaveSettings { rows, sleep } => {
@@ -510,6 +515,7 @@ fn run_effects(effects: Vec<Effect>, lib: &library::Library, fetch: &fetch::Fetc
             Effect::SetMaxGroup(max) => fetch.set_max_group(max),
             // No clip plays here, so there is no sound to turn up.
             Effect::SetMusicVolume(_) => {}
+            Effect::SetWeather(on) => weather.set_enabled(on),
         }
     }
 }

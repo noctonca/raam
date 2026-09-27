@@ -157,6 +157,7 @@ fn run_effects(
     lib: &library::Library,
     fetch: Option<&fetch::FetchShared>,
     power: Option<&power::Power>,
+    weather: Option<&weather::WeatherShared>,
 ) {
     for effect in effects {
         match effect {
@@ -189,6 +190,11 @@ fn run_effects(
                         }
                         Err(e) => log::error!("setting the music stream volume: {e}"),
                     }
+                }
+            }
+            Effect::SetWeather(on) => {
+                if let Some(w) = weather {
+                    w.set_enabled(on);
                 }
             }
         }
@@ -443,7 +449,7 @@ fn android_main(app: AndroidApp) {
                         .map(|p| p as &mut dyn raam_core::seams::Power),
                 },
             );
-            run_effects(out.effects, &lib, None, power.as_ref());
+            run_effects(out.effects, &lib, None, power.as_ref(), None);
             let Some(window) = app.native_window() else {
                 next_wait = out.wait;
                 continue;
@@ -557,7 +563,13 @@ fn android_main(app: AndroidApp) {
                     .map(|p| p as &mut dyn raam_core::seams::Power),
             },
         );
-        run_effects(out.effects, &lib, fetch.as_deref(), power.as_ref());
+        run_effects(
+            out.effects,
+            &lib,
+            fetch.as_deref(),
+            power.as_ref(),
+            weather.as_deref(),
+        );
         if out.became_visible {
             stats = Stats::default();
             last_log = clock::now();

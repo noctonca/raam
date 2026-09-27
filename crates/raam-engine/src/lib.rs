@@ -39,3 +39,25 @@ pub struct Paths {
     /// (`db::import_curation`).
     pub curation_export: PathBuf,
 }
+
+/// A fixed clock for the engine's tests, installed once per test process:
+/// the DB only stamps rows with it, and a wait on it never runs out.
+#[cfg(test)]
+pub(crate) fn install_test_clock() {
+    use raam_core::clock;
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        clock::set_source(clock::Source {
+            monotonic: || std::time::Duration::ZERO,
+            wall: || std::time::Duration::from_secs(1_790_000_000),
+            local: |_| raam_model::LocalTime {
+                hour: 12,
+                min: 0,
+                sec: 0,
+                mday: 1,
+                mon: 0,
+                wday: 0,
+            },
+        })
+    });
+}

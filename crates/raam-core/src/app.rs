@@ -153,6 +153,10 @@ pub enum Effect {
     SetMaxGroup(usize),
     /// The music stream's volume, set when it changes while sound is on.
     SetMusicVolume(f32),
+    /// Whether the weather worker may call out: the setting is on, the
+    /// clock shows, and the app is in front. Sent when that changes; the
+    /// worker starts with it off.
+    SetWeather(bool),
 }
 
 /// An egui pass ran: upload `textures_delta.set`, upload `primitives`,
@@ -212,7 +216,7 @@ pub struct App {
     egui_uploaded: bool,
     last_status: String,
     // Re-derive the overlay's text only when one of these changes.
-    clock_inputs: Option<(u64, u64, ClockStyle, Corner, bool)>,
+    clock_inputs: Option<(u64, u64, ClockStyle, Corner, bool, bool)>,
     weather_status: String,
     // What was last sent for saving, so only changes are written.
     saved_rows: Vec<(&'static str, serde_json::Value)>,
@@ -226,6 +230,7 @@ pub struct App {
     sent_max_group: usize,
     sent_enabled: (bool, bool),
     music_volume: Option<f32>,
+    sent_weather: bool,
     // Lifecycle and the sleep state machine.
     resumed: bool,
     check_wake: bool,
@@ -288,6 +293,7 @@ impl App {
             weather_status: String::from("weather: waiting"),
             settings_dirty: None,
             music_volume: None,
+            sent_weather: false,
             resumed: false,
             check_wake: false,
             asleep_since: None,
@@ -412,6 +418,10 @@ impl App {
                 stage.slideshow.set_clock_paused(true);
                 // A playing clip (and its sound) stops with it.
                 stage.slideshow.pause_video();
+                // So do the weather calls: nothing shows their answer.
+                if std::mem::take(&mut self.sent_weather) {
+                    out.effects.push(Effect::SetWeather(false));
+                }
                 if self.overlay_open {
                     self.overlay_open = false;
                     stage.slideshow.clear_selection();
@@ -556,6 +566,13 @@ impl App {
             }
             self.music_volume = want_volume;
         }
+        // The weather worker calls out only while its answer can show.
+        let shows_weather = self.state.settings.weather_enabled
+            && self.state.settings.clock_style != ClockStyle::Off;
+        if shows_weather != self.sent_weather {
+            self.sent_weather = shows_weather;
+            out.effects.push(Effect::SetWeather(shows_weather));
+        }
         stage.slideshow.set_menu_open(self.overlay_open);
         let t = clock::now();
         stage.slideshow.update(stage.source);
@@ -565,16 +582,18 @@ impl App {
         // the egui chrome. The host rebuilds and draws; the text and its
         // change detection live here.
         let minute = clock::wall().as_secs() / 60;
+        let weather = stage.weather.filter(|_| shows_weather);
         let clock_inputs = (
             minute,
-            stage.weather.map_or(0, |w| w.version()),
+            weather.map_or(0, |w| w.version()),
             self.state.settings.clock_style,
             self.state.settings.clock_corner,
             self.state.settings.clock_24h,
+            shows_weather,
         );
         if self.clock_inputs != Some(clock_inputs) {
             self.clock_inputs = Some(clock_inputs);
-            let (city, current) = stage.weather.map_or((None, None), |w| w.snapshot());
+            let (city, current) = weather.map_or((None, None), |w| w.snapshot());
             let w = current.map(|c| {
                 let (description, icon) = weather_icons::describe(c.code, c.is_day);
                 overlay::Weather {
@@ -591,7 +610,7 @@ impl App {
                     weather_icons::describe(c.code, c.is_day).0
                 ),
                 (Some(city), None) => format!("{city}, weather pending"),
-                _ if stage.weather.is_none() => String::new(),
+                _ if weather.is_none() => String::new(),
                 _ => "locating...".to_string(),
             };
             let now = clock::local((minute * 60) as i64);
@@ -627,6 +646,7 @@ impl App {
                 .map(|u| UNDO_HIDE.saturating_sub(clock::elapsed(u.1)).as_secs() + 1);
             let (version, lib_stats) = stage.library.stats();
             let layout = stage.slideshow.shown_layout();
+            self.state.has_weather = stage.weather.is_some();
             self.state.status = Status {
                 layout: (layout != "-").then_some(layout),
                 weather: self.weather_status.clone(),
@@ -1221,14 +1241,58 @@ mod tests {
     fn a_host_without_weather_leaves_it_out_of_the_status_line() {
         // The status line is published while the menu is up.
         let mut rig = Rig::new(None);
+        rig.app.state.settings.weather_enabled = true;
         rig.tap(640.0, 400.0);
         assert!(rig.app.overlay_open());
         assert_eq!(rig.app.state.status.weather, "locating...");
+        assert!(rig.app.state.has_weather);
         let mut rig = Rig::new(None);
+        rig.app.state.settings.weather_enabled = true;
         rig.weather = None;
         rig.tap(640.0, 400.0);
         assert!(rig.app.overlay_open());
         assert_eq!(rig.app.state.status.weather, "");
+        // The Weather switch greys out.
+        assert!(!rig.app.state.has_weather);
+    }
+
+    /// The `SetWeather` effects a pass sent.
+    fn weather_sent(out: &FrameOut) -> Vec<bool> {
+        out.effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::SetWeather(on) => Some(*on),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_weather_calls_out_only_while_its_answer_can_show() {
+        let mut rig = Rig::new(None);
+        // Off by default: the worker is never told to start.
+        assert_eq!(weather_sent(&rig.frame(&[])), [] as [bool; 0]);
+        rig.tap(640.0, 400.0);
+        assert_eq!(rig.app.state.status.weather, "");
+
+        rig.app.state.settings.weather_enabled = true;
+        assert_eq!(weather_sent(&rig.frame(&[])), [true]);
+        assert_eq!(weather_sent(&rig.frame(&[])), [] as [bool; 0]);
+        assert_eq!(rig.app.state.status.weather, "locating...");
+
+        // The clock off hides the weather, so the calls stop.
+        rig.app.state.settings.clock_style = ClockStyle::Off;
+        assert_eq!(weather_sent(&rig.frame(&[])), [false]);
+        rig.app.state.settings.clock_style = ClockStyle::Detailed;
+        assert_eq!(weather_sent(&rig.frame(&[])), [true]);
+
+        // Hidden (asleep, or another app in front): no calls either.
+        assert_eq!(weather_sent(&rig.frame(&[Event::Pause])), [false]);
+        assert_eq!(weather_sent(&rig.frame(&[])), [] as [bool; 0]);
+        assert_eq!(weather_sent(&rig.frame(&[Event::Resume])), [true]);
+
+        rig.app.state.settings.weather_enabled = false;
+        assert_eq!(weather_sent(&rig.frame(&[])), [false]);
     }
 
     #[test]

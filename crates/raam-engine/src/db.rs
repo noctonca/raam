@@ -353,6 +353,9 @@ pub fn load_settings(conn: &Connection, s: &mut Settings) -> Vec<String> {
             _ => Corner::TopRight,
         };
     }
+    if let Some(v) = rows.get("overlay.weather").and_then(|v| v.as_bool()) {
+        s.weather_enabled = v;
+    }
     if let Some(v) = rows.get("locale.clock_24h").and_then(|v| v.as_bool()) {
         s.clock_24h = v;
     }
@@ -1202,25 +1205,7 @@ pub fn counts(conn: &Connection, kind: SourceKind) -> (i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A fixed clock: the DB only stamps rows with it.
-    fn install_clock() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            clock::set_source(clock::Source {
-                monotonic: || std::time::Duration::ZERO,
-                wall: || std::time::Duration::from_secs(1_790_000_000),
-                local: |_| raam_model::LocalTime {
-                    hour: 12,
-                    min: 0,
-                    sec: 0,
-                    mday: 1,
-                    mon: 0,
-                    wday: 0,
-                },
-            })
-        });
-    }
+    use crate::install_test_clock as install_clock;
 
     fn asset(conn: &Connection, id: &str, kind: &str, playable: Option<(bool, &str)>) {
         conn.execute(
@@ -1266,5 +1251,46 @@ mod tests {
         assert_eq!(reason("big"), "1920x1088 at most");
         // Nothing left to mark the second time.
         assert_eq!(mark_clips_unplayable(&conn, "again").0, 0);
+    }
+
+    #[test]
+    fn every_setting_round_trips_through_the_db() {
+        install_clock();
+        let db = open(Path::new(":memory:"), "").unwrap();
+        let conn = db.lock().unwrap();
+        let mut s = Settings::defaults("", "");
+        s.interval_secs = 25.0;
+        s.transition = TransitionChoice::Cube;
+        s.ken_burns_enabled = false;
+        s.fill_by_default = false;
+        s.fit_background = FitBackground::Black;
+        s.collage_max = 2;
+        s.gap_colour = GapColour::White;
+        s.clock_style = ClockStyle::Detailed;
+        s.clock_corner = Corner::BottomLeft;
+        s.weather_enabled = true;
+        s.clock_24h = false;
+        s.dark_theme = false;
+        s.cache_cap_mb = 2048;
+        s.video_playback = VideoPlayback::Loop;
+        s.video_sound = true;
+        s.video_volume = 0.25;
+        s.audio_delay_ms = 90;
+        // Every row off its default, so one that doesn't load shows (and
+        // a new setting fails here until it is added above).
+        let rows = raam_core::store::settings_rows(&s);
+        let defaults = raam_core::store::settings_rows(&Settings::defaults("", ""));
+        for (row, default) in rows.iter().zip(&defaults) {
+            assert_ne!(row, default, "{} is at its default", row.0);
+        }
+        save_settings(&conn, &rows, (false, 60, 420)).unwrap();
+
+        let mut loaded = Settings::defaults("", "");
+        load_settings(&conn, &mut loaded);
+        assert_eq!(raam_core::store::settings_rows(&loaded), rows);
+        assert_eq!(
+            (loaded.sleep_enabled, loaded.sleep_min, loaded.wake_min),
+            (false, 60, 420)
+        );
     }
 }

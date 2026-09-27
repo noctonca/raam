@@ -186,6 +186,9 @@ pub struct AppState {
     /// flick back while the writer thread commits.
     pub pending_albums: HashMap<String, bool>,
     pub status: Status,
+    /// The host runs a weather worker (the web demo doesn't), set by the
+    /// controller; without one the Weather switch is greyed out.
+    pub has_weather: bool,
     /// The time an open Sleep at / Wake at dialog is editing.
     time_draft: u32,
     /// The interval an open Photo interval dialog is editing.
@@ -223,6 +226,7 @@ impl AppState {
             undo_secs: None,
             pending_albums: HashMap::new(),
             status: Status::default(),
+            has_weather: true,
             time_draft: 0,
             interval_draft: 10.0,
             delay_draft: 0.0,
@@ -1439,6 +1443,7 @@ fn display_page(ui: &mut Ui, st: &mut AppState) {
         "How the frame looks, and what it shows over the photos.",
     );
     ui.spacing_mut().item_spacing.y = 0.0;
+    let has_weather = st.has_weather;
     let s = &mut st.settings;
 
     kit::section_header(ui, "Appearance");
@@ -1499,6 +1504,21 @@ fn display_page(ui: &mut Ui, st: &mut AppState) {
                 .supporting("17:34 rather than 5:34 PM")
                 .trailing(Trailing::Switch(&mut s.clock_24h)),
         );
+        // Open-Meteo's licence (CC BY 4.0) asks for credit; this line
+        // gives it in the app, the README's credits in the repo.
+        ui.add_enabled_ui(has_weather, |ui| {
+            kit::list_item(
+                ui,
+                ListItem::new("Weather")
+                    .blank_icon()
+                    .supporting(if has_weather {
+                        "Weather data by Open-Meteo.com"
+                    } else {
+                        "Not available here"
+                    })
+                    .trailing(Trailing::Switch(&mut s.weather_enabled)),
+            );
+        });
     });
 }
 

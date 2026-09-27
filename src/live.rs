@@ -11,7 +11,8 @@
 //! The window is the frame's screen in device pixels, since the controller
 //! runs egui at one pixel per point: a retina window is half size, as
 //! `--exact` makes it for the presets. The mouse is a finger: a press, a
-//! drag and a release are one touch, fed as the Android host feeds one.
+//! drag and a release are one touch, fed as the Android host feeds one. A
+//! touchscreen's first finger is fed the same way.
 use crate::platform::{self, EnvSwitches};
 use crate::{Args, Gl, Step, save_png};
 use glutin::surface::GlSurface;
@@ -112,6 +113,8 @@ pub struct Live {
     next_run: Option<Instant>,
     pointer: egui::Pos2,
     down: bool,
+    /// The touchscreen's finger being fed, while one is down.
+    finger: Option<u64>,
     /// --click/--press/--screenshot: they start once the first collage is
     /// up and still, then each step waits for the one before to play out.
     script_started: bool,
@@ -205,6 +208,7 @@ impl Live {
             next_run: Some(Instant::now()),
             pointer: egui::Pos2::ZERO,
             down: false,
+            finger: None,
             script_started: false,
             // The start limit, so the loop wakes to check it.
             script_at: scripted.then(|| Instant::now() + SCRIPT_START_LIMIT),
@@ -286,6 +290,28 @@ impl Live {
         });
         self.next_run = Some(Instant::now());
         Ok(())
+    }
+
+    /// A touchscreen's touch, fed only while it is the first finger down,
+    /// as the Android host reads only a motion's first pointer.
+    fn finger(&mut self, t: winit::event::Touch) {
+        use winit::event::TouchPhase as P;
+        match self.finger {
+            None if t.phase == P::Started => self.finger = Some(t.id),
+            Some(id) if id == t.id => {}
+            _ => return,
+        }
+        let phase = match t.phase {
+            P::Started => egui::TouchPhase::Start,
+            P::Moved => egui::TouchPhase::Move,
+            P::Ended => egui::TouchPhase::End,
+            P::Cancelled => egui::TouchPhase::Cancel,
+        };
+        if matches!(t.phase, P::Ended | P::Cancelled) {
+            self.finger = None;
+        }
+        let pos = egui::pos2(t.location.x as f32, t.location.y as f32);
+        self.touch(phase, pos);
     }
 
     fn touch(&mut self, phase: egui::TouchPhase, pos: egui::Pos2) {
@@ -559,6 +585,9 @@ impl ApplicationHandler<Wake> for Live {
                 }
                 ElementState::Released => {}
             },
+            // X11 sends no button presses for a touch (winit asks for the
+            // touches themselves), and Wayland keeps the two apart.
+            WindowEvent::Touch(t) => self.finger(t),
             // A scripted run draws regardless, or a window stacked behind
             // another would never take its screenshot.
             WindowEvent::Occluded(hidden) if self.scripted() => log::info!(

@@ -3,7 +3,8 @@
 //! the shaders to the 4.1 core context). Two modes:
 //!
 //! - **The slideshow** (no `--page`; live.rs): the product as the frame
-//!   runs it, on the engine, with no video player. The mouse is a finger.
+//!   runs it, on the engine, with no video player. The mouse is a finger,
+//!   and so is a touchscreen's first.
 //! - **The preset host** (`--page`; preset.rs): the widget gallery and
 //!   every frame_ui screen by name, over a stand-in for the slideshow, so
 //!   theme, kit and screen changes are iterated and QA'd on the

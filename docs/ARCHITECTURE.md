@@ -99,11 +99,15 @@ function names and GLSL ES 1.00 shaders over three linkages:
 |---|---|
 | Android | extern GLES2 |
 | macOS / Linux desktop | extern desktop GL with the small shader rewrite |
-| wasm32 | the WebGL1 shim (integer names → tables of WebGL objects) |
+| wasm32 | the WebGL1 shim (integer names → tables of WebGL objects), `gl/webgl.rs` |
 
 This formalises what the experiments proved: the same painter renders
 pixel-identically on all three (the web build matched the desktop's
-`--exact` screenshots to within anti-aliased-edge rounding).
+`--exact` screenshots to within anti-aliased-edge rounding). The shim
+implements the entry points themselves, status and info-log queries
+included, so `link_program`, `RenderTarget` and the other helpers are
+one copy over all three linkages. Its `web-sys` use is the core's only
+platform dependency, and it is gated to wasm32.
 
 ### raam-engine — the data engine
 
@@ -121,7 +125,7 @@ not sleep-polling.
 |---|---|
 | `hosts/android` (the product) | NativeActivity, EGL, input events, the decoders behind `VideoPlayer` (MediaCodec onto a SurfaceTexture, OpenSL audio and its A/V alignment, the process-wide decoder count, the reaper thread), power (wake alarm, wake lock, screen off), root helpers, storage paths |
 | `raam` at the root (desktop/Linux) | winit/glutin window, screenshot tooling (`--exact` goldens), env-var debug switches. On a Pi it runs under X/Wayland; a bare KMS/DRM host is a possible later addition, not v1 |
-| `hosts/web` (the demo) | canvas + rAF loop, its own `TileSource` over browser fetch and `<img>` decode, bundled sample photos, "try with Immich" against demo.immich.app (CORS-open), URL-query debug switches |
+| `hosts/web` (the demo) | canvas + rAF loop, its own synchronous `TileSource` over bundled sample photos (the browser decodes them; faces come from a checked-in `faces.json`), `NoVideo`, URL-query debug switches; later, "try with Immich" against demo.immich.app (CORS-open) |
 
 ## The seams
 
@@ -252,12 +256,21 @@ stays survivable regardless (drop the plan, retry, cut the transition)
 
 ## The web demo
 
-The real core compiled to wasm — not a mock. Bundled CC0 sample photos
-by default; "try with Immich" runs against demo.immich.app straight
-from the browser (its CORS allows it). A user's own server generally
-won't allow a browser origin, so the demo makes that limit clear. The
-wasm is built `opt-level = "s"` through a root `[profile.web]` (profiles
-live at the workspace root only) and runs through wasm-opt.
+The real core compiled to wasm — not a mock: the App controller, the
+pipeline and the chrome, as the frame runs them. Bundled CC0 sample
+photos by default, stored as previews the way Immich serves them
+(uncropped JPEGs, short side 1080 at q75: 4.5 MB for twenty, and only
+a portrait shown alone is upscaled, by 1.2×), with their faces in a checked-in `faces.json` that a detector
+wrote once (`tools/web-faces.swift`, Apple's Vision), so Ken Burns and
+the Fill crop aim as they do on the frame. The web `TileSource` offers no clips.
+Settings live for the page's lifetime only; the `Store` seam's
+localStorage option waits until it's wanted.
+
+Later, "try with Immich" runs against demo.immich.app straight from the
+browser (its CORS allows it). A user's own server generally won't allow
+a browser origin, so the demo will make that limit clear. The wasm is
+built `opt-level = "s"` through a root `[profile.web]` (profiles live at
+the workspace root only) and runs through wasm-opt when it's installed.
 
 ## Testing
 
@@ -308,7 +321,7 @@ basis; its replacements are adopted as decisions:
 | `libc` | engine | `statvfs` (free space for the cache cap) and `mktime` (EXIF local times); the engine is native-only by design |
 | OpenSL bindings, checked in | android | Pre-generated and pruned; no bindgen, no libclang at build time |
 | `winit`, `glutin`, `glutin-winit`, `egui-winit` (no `links`), `png` | raam (desktop) | The window host and the screenshot tool |
-| `wasm-bindgen`, `js-sys`, `web-sys` | web | Unavoidable wasm glue |
+| `wasm-bindgen`, `js-sys`, `web-sys` | web; core on wasm32 only (the WebGL1 module) | Unavoidable wasm glue, and egui already brings all three on wasm32. The web host logs and reports panics to the console itself (about 20 lines), so no `console_log` or `console_error_panic_hook` |
 | Baked colour table (generator in `tools/`) | core | Replaces `material-colors` at runtime (−20 crates, −getrandom); a test asserts the table matches the derivation |
 
 Notably absent, by decision: wgpu, glow, tokio, reqwest, `image`,

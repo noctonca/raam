@@ -6,8 +6,8 @@
 //! Blocking HTTP over ureq (rustls). Roots are bundled (webpki): the
 //! frame is API 23 and its system trust store is stale. Errors are typed:
 //! `ProviderError::Transport` is the offline signal, never a string match.
-use raam_model::ProviderError;
 use raam_model::limits;
+use raam_model::{Focus, ProviderError};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Config {
@@ -19,9 +19,6 @@ pub struct Client {
     http: ureq::Agent,
     pub config: Config,
 }
-
-/// A photo's (fill-crop centre, largest face centre), both 0..1.
-pub type FaceFocus = ((f32, f32), Option<(f32, f32)>);
 
 /// An album as the picker lists it.
 #[derive(Clone, Debug)]
@@ -214,10 +211,10 @@ impl Client {
     /// `GET /api/faces?id=` (probed live in the experiments): each face's
     /// bounding box in whatever resolution the ML pass used
     /// (`imageWidth/Height`, per asset), so every centre is taken as a
-    /// fraction of that. Returns the fill-crop centre and the largest
-    /// face's centre (0..1, `v=0` at the top). `Err` only when the server
-    /// couldn't be asked; a photo with no faces is `Ok(((0.5, 0.5), None))`.
-    pub fn faces(&self, id: &str) -> Result<FaceFocus, ProviderError> {
+    /// fraction of that, and Frameo's rule turns them into the focus
+    /// (`Focus::from_faces`). `Err` only when the server couldn't be asked;
+    /// a photo with no faces gets the middle and no target.
+    pub fn faces(&self, id: &str) -> Result<Focus, ProviderError> {
         let faces = self.get_json(&format!("/api/faces?id={id}"))?;
         let mut found: Vec<(f32, (f32, f32))> = Vec::new();
         for face in faces.as_array().into_iter().flatten() {
@@ -240,8 +237,7 @@ impl Client {
                 ((x1 + x2) / 2.0 / iw, (y1 + y2) / 2.0 / ih),
             ));
         }
-        let largest = found.iter().max_by(|a, b| a.0.total_cmp(&b.0)).map(|f| f.1);
-        Ok((fill_centre(&found), largest))
+        Ok(Focus::from_faces(&found))
     }
 
     fn get_json(&self, path: &str) -> Result<serde_json::Value, ProviderError> {
@@ -294,18 +290,6 @@ fn read_json(
 
 fn strip_query(path: &str) -> &str {
     path.split('?').next().unwrap_or(path)
-}
-
-/// Frameo's rule: the mean of all face centres, with `v` moved 0.05
-/// lower (headroom above the faces) and capped at 1.0.
-fn fill_centre(faces: &[(f32, (f32, f32))]) -> (f32, f32) {
-    if faces.is_empty() {
-        return (0.5, 0.5);
-    }
-    let n = faces.len() as f32;
-    let u = faces.iter().map(|f| f.1.0).sum::<f32>() / n;
-    let v = faces.iter().map(|f| f.1.1).sum::<f32>() / n;
-    (u, (v + 0.05).min(1.0))
 }
 
 /// Standard base64 (with padding) to lowercase hex.

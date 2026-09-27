@@ -25,7 +25,7 @@ use crate::library::{self, Library};
 use crate::provider::{ImmichProvider, Provider};
 use raam_core::clock;
 use raam_core::collage::{self, Orientation};
-use raam_core::source::TileSource;
+use raam_core::source::{TileSource, shrink_to_cover};
 use raam_model::limits::{
     FETCH_BACKOFF_WAIT, FETCH_EMPTY_WAIT, FETCH_FAILED_WAIT, FETCH_SKIP_WAIT, FETCH_SLOT_POLL,
     FETCH_TILE_POLL,
@@ -673,48 +673,6 @@ fn load_video(
         },
         from,
     ))
-}
-
-/// Halves a decoded preview here on the fetch thread (2x2 box average)
-/// while it stays at least the tile's cover size, so the render thread
-/// uploads a near-tile-sized texture (a 420x398 tile needs about a quarter
-/// of a 1440x1920 preview's pixels) instead of stalling ~100 ms per tile on
-/// `glTexImage2D`. The GPU's final copy then shrinks by under 2x, where one
-/// bilinear tap doesn't alias. (The image crate's triangle-filter resize did
-/// the same job at 0.35-2.4 s per tile on this CPU.) Fill needs the cover
-/// scale; Fit is smaller, so it is enough for both.
-fn shrink_to_cover(photo: &mut Photo, rect: collage::Rect) -> Duration {
-    let start = clock::now();
-    let (tw, th) = (rect.w as u32, rect.h as u32);
-    let s = (tw as f32 / photo.width as f32).max(th as f32 / photo.height as f32);
-    let (cover_w, cover_h) = (
-        (photo.width as f32 * s).ceil() as u32,
-        (photo.height as f32 * s).ceil() as u32,
-    );
-    while photo.width / 2 >= cover_w && photo.height / 2 >= cover_h {
-        let (w, h) = (photo.width / 2, photo.height / 2);
-        let src = &photo.rgba;
-        let stride = photo.width as usize * 4;
-        let mut out = vec![0u8; (w * h * 4) as usize];
-        for y in 0..h as usize {
-            let r0 = 2 * y * stride;
-            let r1 = r0 + stride;
-            for x in 0..w as usize {
-                let (c, o) = (8 * x, 4 * (y * w as usize + x));
-                for k in 0..4 {
-                    let sum = src[r0 + c + k] as u16
-                        + src[r0 + c + 4 + k] as u16
-                        + src[r1 + c + k] as u16
-                        + src[r1 + c + 4 + k] as u16;
-                    out[o + k] = ((sum + 2) / 4) as u8;
-                }
-            }
-        }
-        photo.rgba = out;
-        photo.width = w;
-        photo.height = h;
-    }
-    clock::elapsed(start)
 }
 
 /// A tiny xorshift64 draw seeded from the clock plus a caller-supplied

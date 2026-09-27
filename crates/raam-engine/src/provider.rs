@@ -142,8 +142,9 @@ impl Provider for ImmichProvider {
     }
 
     fn fetch_focus(&mut self, media: &MediaRef) -> Result<Option<Focus>, ProviderError> {
-        let (centre, face) = self.client.as_ref().ok_or(no_client())?.faces(&media.id)?;
-        Ok(Some(Focus { centre, face }))
+        Ok(Some(
+            self.client.as_ref().ok_or(no_client())?.faces(&media.id)?,
+        ))
     }
 
     fn fetch_video(&mut self, media: &MediaRef, dest: &Path) -> Result<u64, ProviderError> {

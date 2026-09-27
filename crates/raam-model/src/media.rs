@@ -50,6 +50,30 @@ pub struct Focus {
     pub face: Option<(f32, f32)>,
 }
 
+impl Focus {
+    /// Frameo's rule over a detector's faces, each `(area, centre)` with
+    /// the centre in 0..1 fractions, `v=0` at the top: the fill-crop centre
+    /// is the mean of every face centre with `v` moved 0.05 lower (headroom
+    /// above the faces) and capped at 1.0, and the Ken Burns target is the
+    /// largest face's centre. No faces: the middle, and no target.
+    pub fn from_faces(faces: &[(f32, (f32, f32))]) -> Self {
+        let face = faces.iter().max_by(|a, b| a.0.total_cmp(&b.0)).map(|f| f.1);
+        if faces.is_empty() {
+            return Self {
+                centre: (0.5, 0.5),
+                face,
+            };
+        }
+        let n = faces.len() as f32;
+        let u = faces.iter().map(|f| f.1.0).sum::<f32>() / n;
+        let v = faces.iter().map(|f| f.1.1).sum::<f32>() / n;
+        Self {
+            centre: (u, (v + 0.05).min(1.0)),
+            face,
+        }
+    }
+}
+
 /// One item as a provider lists it. It carries only what the renderer
 /// needs — a stable id, the size after rotation, the capture time (UTC ms,
 /// normalised at the provider boundary), the kind and an optional focus —
@@ -186,4 +210,31 @@ pub struct TilePhoto {
     pub seq: u64,
     pub slot: usize,
     pub photo: Photo,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Focus;
+
+    #[test]
+    fn no_faces_is_the_middle_with_no_target() {
+        assert_eq!(
+            Focus::from_faces(&[]),
+            Focus {
+                centre: (0.5, 0.5),
+                face: None
+            }
+        );
+    }
+
+    #[test]
+    fn faces_give_frameos_fill_centre_and_the_largest_as_target() {
+        // Two faces: the mean centre, 0.05 lower; the bigger one is aimed at.
+        let f = Focus::from_faces(&[(0.01, (0.2, 0.3)), (0.04, (0.6, 0.5))]);
+        assert!((f.centre.0 - 0.4).abs() < 1e-6 && (f.centre.1 - 0.45).abs() < 1e-6);
+        assert_eq!(f.face, Some((0.6, 0.5)));
+        // The headroom nudge never leaves the photo.
+        let low = Focus::from_faces(&[(0.02, (0.5, 0.98))]);
+        assert_eq!(low.centre, (0.5, 1.0));
+    }
 }

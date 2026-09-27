@@ -5,7 +5,8 @@ readme = "README.md"
 keywords = ["photo-frame", "immich", "slideshow", "egui", "android"]
 categories = ["multimedia::images"]
 # Ship only code, README and licences (the docs live in the repo).
-include = ["src/**", "README.md", "LICENSE-*"]
+include = ["src/**", "build.rs", "README.md", "LICENSE-*"]
+build = "build.rs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,7 +15,21 @@ rust-version.workspace = true
 
 # The `raam` binary is the desktop/Linux host: the UX-iteration window on a
 # dev machine, and the frame itself on a Linux box (Raspberry Pi under
-# X/Wayland). See docs/ARCHITECTURE.md "Hosts".
+# X/Wayland). See docs/ARCHITECTURE.md "Hosts". Today it is the preset
+# host: the widget gallery and every frame_ui screen by name, for the
+# ux-qa pass; it adopts the whole pipeline at migration step 8.
+
+[dependencies]
+raam-core.workspace = true
+raam-model.workspace = true
+log.workspace = true
+egui = { version = "=0.36.2", default-features = false }
+egui-winit = { version = "=0.36.2", default-features = false }
+winit = "0.30"
+glutin = "0.32"
+glutin-winit = "0.5"
+# F12 / --screenshot.
+png = "0.17"
 
 [workspace]
 members = ["crates/*", "hosts/*", "tools/palette"]

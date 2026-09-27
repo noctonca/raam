@@ -1,8 +1,11 @@
 //! Raw GLES2 FFI: the GLES2 half of the experiments' gl.rs (the painter's
 //! and pipeline's whole GL surface), plus `RenderTarget`. This is the
-//! cfg-selected GL layer's Android/extern linkage; the desktop rewrite and
-//! the WebGL1 shim replace this file by name when those hosts adopt the
-//! core (migration steps 7-8). The EGL half lives with the Android host.
+//! cfg-selected GL layer's extern linkage, shared by Android (GLES2) and
+//! the desktop host: macOS/Linux GL exports the same entry points, and a
+//! cfg block below rewrites the GLSL ES 1.00 shaders to 1.50 for the core
+//! contexts glutin makes there. The WebGL1 shim replaces this file by name
+//! when the web host adopts the core (migration step 7). The EGL half
+//! lives with the Android host.
 use std::ffi::{CStr, c_char, c_void};
 
 pub type GlUint = u32;
@@ -153,7 +156,65 @@ unsafe extern "C" {
     pub fn glCheckFramebufferStatus(target: GlEnum) -> GlEnum;
     pub fn glDeleteTextures(n: GlSizei, textures: *const GlUint);
     pub fn glDeleteFramebuffers(n: GlSizei, framebuffers: *const GlUint);
+    pub fn glGetIntegerv(pname: GlEnum, params: *mut GlInt);
 }
+
+pub const GL_MAX_TEXTURE_SIZE: GlEnum = 0x0D33;
+
+// The desktop linkage: OpenGL.framework / libGL export the same names,
+// but glutin only makes core-profile contexts there (4.1 on macOS), so
+// GLSL ES 1.00 is rewritten to 1.50 on the way into `link_program`, and a
+// core context needs one vertex array object bound before any draw.
+#[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
+mod desktop {
+    use super::*;
+
+    unsafe extern "C" {
+        fn glGenVertexArrays(n: GlSizei, arrays: *mut GlUint);
+        fn glBindVertexArray(array: GlUint);
+        pub fn glReadPixels(
+            x: GlInt,
+            y: GlInt,
+            w: GlSizei,
+            h: GlSizei,
+            format: GlEnum,
+            type_: GlEnum,
+            data: *mut c_void,
+        );
+    }
+
+    /// Once after the context is made current: core profiles refuse to
+    /// draw with the default VAO.
+    ///
+    /// # Safety
+    /// Requires a current GL context.
+    pub unsafe fn bind_vao() {
+        unsafe {
+            let mut vao = 0;
+            glGenVertexArrays(1, &mut vao);
+            glBindVertexArray(vao);
+        }
+    }
+
+    /// GLSL ES 1.00 -> 1.50. `precision` statements are legal (and
+    /// ignored) in 1.50, so only the removed keywords and built-ins need
+    /// replacing.
+    pub fn to_150(src: &str, fragment: bool) -> String {
+        if fragment {
+            let body = src
+                .replace("gl_FragColor", "fragColor")
+                .replace("texture2D(", "texture(")
+                .replace("varying ", "in ");
+            format!("#version 150\nout vec4 fragColor;\n{body}")
+        } else {
+            let body = src.replace("attribute ", "in ").replace("varying ", "out ");
+            format!("#version 150\n{body}")
+        }
+    }
+}
+
+#[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
+pub use desktop::{bind_vao, glReadPixels};
 
 ///
 /// # Safety
@@ -179,6 +240,11 @@ pub unsafe fn gl_string(name: GlEnum) -> String {
 /// # Safety
 /// Requires a current GL context.
 pub unsafe fn link_program(label: &str, vs_src: &str, fs_src: &str) -> GlUint {
+    #[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
+    let (vs_src, fs_src) = (
+        &desktop::to_150(vs_src, false),
+        &desktop::to_150(fs_src, true),
+    );
     unsafe {
         let vs = compile(label, GL_VERTEX_SHADER, vs_src);
         let fs = compile(label, GL_FRAGMENT_SHADER, fs_src);

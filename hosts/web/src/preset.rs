@@ -7,12 +7,19 @@
 //!
 //! Input goes to egui as a finger, as the Android host feeds it (the
 //! controller's `push_touch`): no hover states the frame can't show.
+//!
+//! `shot=1` is a screenshot run, as the desktop's `--screenshot` is:
+//! egui's clock is the pass count, a pass every animation frame, and the
+//! passes stop once egui has settled, so the canvas holds still for the
+//! test and its pixels can't depend on when it's read. The golden suite's
+//! web diff (scripts/web-diff.py) shoots this way.
 
+use raam_core::clock;
+use raam_core::frame_ui::{self, SHOT_PASS, SHOT_SETTLED};
 use raam_core::gallery::{self, Gallery};
 use raam_core::gl::*;
 use raam_core::painter::Painter;
 use raam_core::theme::{self, Options, TextMode};
-use raam_core::{clock, frame_ui};
 use std::time::Duration;
 
 pub struct Preset {
@@ -30,6 +37,9 @@ pub struct Preset {
     events: Vec<egui::Event>,
     due: Duration,
     passes: u32,
+    /// `shot=1`: the virtual clock, and no pass once settled.
+    shot: bool,
+    settled: bool,
 }
 
 impl Preset {
@@ -97,6 +107,8 @@ impl Preset {
             events: Vec::new(),
             due: Duration::ZERO,
             passes: 0,
+            shot: query.get("shot").as_deref() == Some("1"),
+            settled: false,
         })
     }
 
@@ -132,8 +144,17 @@ impl Preset {
     }
 
     pub fn frame(&mut self) {
-        let now = clock::now();
-        if self.events.is_empty() && now < self.due {
+        let now = if self.shot {
+            SHOT_PASS * self.passes
+        } else {
+            clock::now()
+        };
+        if self.shot {
+            // Held still for the test, until it taps.
+            if self.settled && self.events.is_empty() {
+                return;
+            }
+        } else if self.events.is_empty() && now < self.due {
             return;
         }
         let (w, h) = self.screen;
@@ -198,6 +219,7 @@ impl Preset {
             .viewport_output
             .get(&egui::ViewportId::ROOT)
             .map_or(Duration::MAX, |v| v.repaint_delay);
+        self.settled = self.passes > 2 && delay >= SHOT_SETTLED;
         // The first passes lay out and then settle, as the desktop's do.
         self.due = if self.passes < 3 {
             now
@@ -234,11 +256,15 @@ impl Preset {
 
     /// Settled once egui has nothing due soon: a test screenshots then.
     pub fn status(&self) -> String {
-        let idle = self.passes > 2
-            && self
-                .due
-                .checked_sub(clock::now())
-                .is_some_and(|d| d >= Duration::from_millis(200));
+        let idle = if self.shot {
+            self.settled
+        } else {
+            self.passes > 2
+                && self
+                    .due
+                    .checked_sub(clock::now())
+                    .is_some_and(|d| d >= SHOT_SETTLED)
+        };
         serde_json::json!({ "mode": "page", "page": self.page, "idle": idle, "passes": self.passes })
             .to_string()
     }

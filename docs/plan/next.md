@@ -9,17 +9,6 @@ The real UI and slideshow over the bundled sample photos, hosted
 (GitHub Pages, say) so the README can link it and anyone can try Raam
 without building it.
 
-## The golden suite
-
-Every preset's `--exact` shot, in both themes, checked in; a compare
-mode in the `raam` binary; and a script that blesses and checks the set.
-The suite runs locally, not in CI, because Apple's GL and CI's software
-GL differ in their pixels. It also pins the display scale: two presets
-(the server page with the keyboard up, and the albums page scrolled)
-come out differently in a scale-1 and a scale-2 window. The first bless
-is a commit of its own. The web build is then diffed against the suite,
-by a script checked in beside it.
-
 ## Smaller items
 
 - A `--fullscreen` flag, so the desktop host can run a Linux frame.

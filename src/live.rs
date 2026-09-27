@@ -219,7 +219,7 @@ impl Live {
 
     /// The window, and everything that needs its GL context or its size.
     fn start(&mut self, el: &ActiveEventLoop) -> Result<(), String> {
-        let gl = crate::create_gl(el, self.args.size, true)?;
+        let gl = crate::create_gl(el, self.args.size, true, true)?;
         // The pipeline's targets are made once for the screen, which on a
         // frame never changes size.
         gl.window.set_resizable(false);

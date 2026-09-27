@@ -103,8 +103,8 @@ function names and GLSL ES 1.00 shaders over three linkages:
 | wasm32 | the WebGL1 shim (integer names → tables of WebGL objects), `gl/webgl.rs` |
 
 The same painter renders pixel-identically on all three: the web build
-matches the desktop's `--exact` screenshots to within anti-aliased-edge
-rounding. The shim
+matches the desktop's `--exact` shots to within 2 levels a channel, on
+a few dozen pixels at most. The shim
 implements the entry points themselves, status and info-log queries
 included, so `link_program`, `RenderTarget` and the other helpers are
 one copy over all three linkages. Its `web-sys` use is the core's only
@@ -289,10 +289,14 @@ Four layers, cheapest first:
    asserting the invariants (never two decoders; sleep/wake honoured;
    backoff caps; budgets never exceeded; recovery after every injected
    failure). Logic-only, no GL.
-3. **Pixel** — the desktop host's `--exact` golden screenshots, and the
-   headless-Chrome diff of the web build against them: the
-   render-regression net and the pixel match's enforcement (the golden
-   suite is the first item in [plan/next.md](plan/next.md)).
+3. **Pixel** — the golden suite: every preset's `--exact` shot from the
+   desktop host, in both themes, pinned as a hash of its pixels, and the
+   web build diffed against the same shots in headless Chromium: the
+   render-regression net and the pixel match's enforcement. A shot run
+   is hermetic (a virtual clock, no input from the machine), so a hash
+   moves only when the pixels do. Pixels are exact per GPU and driver,
+   so the suite runs on the kind of machine that blessed it, not in CI
+   ([BUILDING.md](BUILDING.md#goldens) has the commands).
 4. **On-frame** — manual, for any change to rendering, video, memory or
    a recovery path: collages and transitions, a clip with its sound in
    step, one decoder at a time, settings surviving a restart, and always

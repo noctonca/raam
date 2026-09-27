@@ -452,6 +452,15 @@ fn fetch_loop(shared: Arc<FetchShared>, host: Host, screen: Screen, lib: Arc<Lib
                     loop {
                         {
                             let mut slot = shared.slot.lock().unwrap();
+                            // The last tile taken: the plan is fetched, even
+                            // if the render thread has already shown it and
+                            // called `consumed` (the first collage, or one
+                            // the slideshow was waiting on). Checked before
+                            // the test below, which would read that as
+                            // abandoned and skip saving the queue position.
+                            if slot.tile.is_none() && slot_idx + 1 == plan.assets.len() {
+                                break;
+                            }
                             // A Prev request, or the render thread dropped
                             // this plan (`consumed` without showing it: a
                             // backoff, or no GPU memory for a tile).

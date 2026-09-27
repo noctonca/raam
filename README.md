@@ -12,6 +12,10 @@ slideshow of your own photos, straight from your
 there is no release yet. Today you need a computer that can build the
 APK, and a frame with root. If that's not you, watch for a release.
 
+**Try it in your browser:** the
+[web demo](https://noctonca.github.io/raam/) runs the frame's slideshow
+and settings over twenty sample photos.
+
 ## What it does
 
 - **Photos from Immich albums** you pick on the frame, or from a folder
@@ -136,7 +140,9 @@ Every build needs Rust 1.95 or newer;
   `--page NAME` shows one screen of the UI instead; every flag is listed
   at the top of [src/main.rs](src/main.rs). A Linux frame (a Raspberry
   Pi, say) is planned, not tested.
-- **Web:** `hosts/web/build.sh`, then serve `hosts/web/www` (e.g.
+- **Web:** the [hosted demo](https://noctonca.github.io/raam/) is
+  built from main. To build it yourself, run `hosts/web/build.sh`, then
+  serve `hosts/web/www` (e.g.
   `python3 -m http.server -d hosts/web/www`). It shows twenty bundled
   sample photos, with no clips and no weather, and forgets its settings
   on reload.
@@ -150,7 +156,7 @@ threads), and three hosts: Android, desktop and web. The same drawing
 code runs on all three. No wgpu, glow or async.
 
 `cargo test --workspace` runs the tests; CI also runs fmt and clippy
-(`-D warnings`, native and wasm).
+(`-D warnings`, native and wasm), and deploys the web demo from main.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the design, the seams
   and the dependency register

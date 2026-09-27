@@ -1,0 +1,79 @@
+name: Pages
+
+# The web demo at https://noctonca.github.io/raam/, built from main. A
+# pull request builds it without deploying, so a break only the web
+# build sees (Cargo.lock moving wasm-bindgen, say) shows up before main.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# On main a newer push waits for the deploy in progress instead of
+# cancelling it halfway; a pull request's newer push cancels its build.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build:
+    name: Web demo builds
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      BINARYEN_VERSION: "133"
+      BINARYEN_SHA256: 2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # The JS glue and the wasm must come from the same wasm-bindgen, so
+      # build.sh refuses a CLI other than the version Cargo.lock pins.
+      - name: wasm-bindgen's version in Cargo.lock
+        id: lock
+        run: |
+          v=$(sed -n '/^name = "wasm-bindgen"$/{n;s/version = "\(.*\)"/\1/p;}' Cargo.lock)
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ steps.lock.outputs.version }}
+      # build.sh skips wasm-opt when it's missing, and the hosted demo
+      # should always be optimised. Ubuntu 24.04's binaryen is version
+      # 108, so a pinned release instead, checked against its hash.
+      - name: binaryen (wasm-opt)
+        working-directory: ${{ runner.temp }}
+        run: |
+          f="binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz"
+          curl -fsSL --retry 3 -o "$f" \
+            "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/$f"
+          echo "${BINARYEN_SHA256}  $f" | sha256sum -c -
+          tar xzf "$f" "binaryen-version_${BINARYEN_VERSION}/bin/wasm-opt"
+          echo "$PWD/binaryen-version_${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
+      - run: hosts/web/build.sh
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: hosts/web/www
+
+  deploy:
+    name: Deploy to Pages
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

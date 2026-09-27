@@ -304,9 +304,11 @@ Four layers, cheapest first:
    then the slideshow recovers once it is cleared).
 
 **CI** (GitHub Actions): fmt, clippy (`-D warnings`), `cargo test
---workspace`, and clippy for the wasm target, on every push and PR. PR titles follow
-Conventional Commits, CI-enforced. APK builds stay manual until
-releases are automated.
+--workspace`, and clippy for the wasm and the frame's Android targets,
+on every push and PR. PR titles follow Conventional Commits,
+CI-enforced. The web demo is built on every PR and deployed from main
+to [GitHub Pages](https://noctonca.github.io/raam/). APK builds stay
+manual until releases are automated.
 
 ## The dependency register
 

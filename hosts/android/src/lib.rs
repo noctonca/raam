@@ -616,7 +616,8 @@ fn android_main(app: AndroidApp) {
                 })
                 .sum::<usize>();
             let t = clock::now();
-            painter.upload(&e.primitives, egl_state.width, egl_state.height);
+            // The frame runs at pixels_per_point 1.0 (160 dpi: 1 dp = 1 px).
+            painter.upload(&e.primitives, 1.0, egl_state.width, egl_state.height);
             stats.upload += clock::elapsed(t);
             // Textures freed this pass are no longer referenced by the
             // primitives just uploaded, so freeing now is safe.
@@ -628,7 +629,7 @@ fn android_main(app: AndroidApp) {
         }
         if out.draw_egui {
             let t = clock::now();
-            painter.draw(egl_state.width, egl_state.height);
+            painter.draw(1.0, egl_state.width, egl_state.height);
             stats.paint += clock::elapsed(t);
             stats.egui_frames += 1;
         }

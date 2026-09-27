@@ -1,0 +1,14 @@
+[package]
+name = "raam-palette"
+description = "Generates raam-core's baked M3 colour table (palette.rs) so material-colors stays a tool-time dependency"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Tool-time only: the register's "baked colour table" row keeps this (and
+# its ~20 crates, getrandom included) out of the product builds.
+material-colors = "0.4"

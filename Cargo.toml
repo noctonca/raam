@@ -17,7 +17,7 @@ rust-version.workspace = true
 # X/Wayland). See docs/ARCHITECTURE.md "Hosts".
 
 [workspace]
-members = ["crates/*", "hosts/*"]
+members = ["crates/*", "hosts/*", "tools/palette"]
 
 [workspace.package]
 version = "0.0.0"

@@ -40,6 +40,10 @@ pub fn settings_rows(s: &Settings) -> Vec<(&'static str, serde_json::Value)> {
             }),
         ),
         ("locale.clock_24h", json!(s.clock_24h)),
+        (
+            "ui.theme",
+            json!(if s.dark_theme { "dark" } else { "light" }),
+        ),
         ("cache.cap_mb", json!(s.cache_cap_mb)),
         ("video.playback", json!(s.video_playback.as_str())),
         ("video.sound", json!(s.video_sound)),

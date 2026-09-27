@@ -333,6 +333,9 @@ pub fn load_settings(conn: &Connection, s: &mut Settings) -> Vec<String> {
     if let Some(v) = rows.get("locale.clock_24h").and_then(|v| v.as_bool()) {
         s.clock_24h = v;
     }
+    if let Some(v) = str_of("ui.theme") {
+        s.dark_theme = v != "light";
+    }
     if let Some(v) = rows.get("cache.cap_mb").and_then(|v| v.as_u64()) {
         s.cache_cap_mb = v as u32;
     }

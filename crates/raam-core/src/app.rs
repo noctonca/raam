@@ -12,17 +12,17 @@
 //! swap. The outside world enters through the deps traits and leaves as
 //! `Effect`s the host maps onto its engine and power plumbing.
 
+use crate::frame_ui::{self, AppState, Status};
 use crate::overlay;
 use crate::schedule::{self, Schedule};
 use crate::seams::Power;
 use crate::slideshow::SlideshowSettings;
 use crate::source::TileSource;
-use crate::ui::{self, AppState};
-use crate::{clock, store, weather_icons};
+use crate::{clock, store, theme, weather_icons};
 use raam_model::limits::{
     AUTO_DISMISS, DEFAULT_MANUAL_IDLE, MAX_EGUI_WAIT, SAVE_DEBOUNCE, TAP_SLOP_PX, UNDO_HIDE,
 };
-use raam_model::{ClockStyle, ScaleMode, Settings, SourceKind, Stats};
+use raam_model::{ClockStyle, ScaleMode, SourceKind, Stats};
 use std::time::Duration;
 
 /// What the host's event loop feeds in each pass.
@@ -85,7 +85,6 @@ pub trait Slideshow {
     fn shown_scale_mode(&self) -> Option<ScaleMode>;
     fn shown_is_video(&self) -> bool;
     fn shown_layout(&self) -> String;
-    fn history_len(&self) -> usize;
     fn is_animating(&self) -> bool;
     fn recompose_pending(&self) -> bool;
     fn next_deadline(&self) -> Option<Duration>;
@@ -178,6 +177,11 @@ pub struct FrameOut {
     pub effects: Vec<Effect>,
     /// Hidden or not yet initialised: draw nothing, skip the swap.
     pub skip_draw: bool,
+    /// The full-screen settings cover everything: the host skips the
+    /// slideshow and clock overlay draws under them (026's step 2.4
+    /// lever; a covered Mali-400 transition still costs 23-58 ms). The
+    /// overlay rebuild is still applied, so its text stays current.
+    pub chrome_opaque: bool,
     /// Just came back from hidden: the host resets its frame stats.
     pub became_visible: bool,
     /// How long the slideshow's `update` took, for the host's stats line.
@@ -240,6 +244,15 @@ impl App {
     pub fn new(state: AppState, mem_free_kb: fn() -> Option<u64>) -> Self {
         let ctx = egui::Context::default();
         ctx.set_pixels_per_point(1.0);
+        // The design system: fonts (egui's defaults are off), both themes'
+        // styles, and the saved theme choice.
+        theme::install_fonts(&ctx);
+        theme::install(&ctx, theme::Schemes::baked(), theme::Options::default());
+        ctx.set_theme(if state.settings.dark_theme {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        });
         let now = clock::now();
         Self {
             saved_rows: store::settings_rows(&state.settings),
@@ -299,6 +312,7 @@ impl App {
             wait: None,
             effects: Vec::new(),
             skip_draw: false,
+            chrome_opaque: false,
             became_visible: false,
             advance: Duration::ZERO,
             overlay: None,
@@ -607,33 +621,23 @@ impl App {
                 .as_ref()
                 .map(|u| UNDO_HIDE.saturating_sub(clock::elapsed(u.1)).as_secs() + 1);
             let (version, lib_stats) = stage.library.stats();
+            let layout = stage.slideshow.shown_layout();
+            self.state.status = Status {
+                layout: (layout != "-").then_some(layout),
+                weather: self.weather_status.clone(),
+                online: stage.library.online(),
+            };
+            // What the menu shows that egui can't see change by itself:
+            // a run is due whenever any of it moved.
             let status = format!(
-                "{}  ·  {}  ·  {}  ·  {}  ·  every {:.0}s  ·  back history: {}  ·  {}  ·  {}  ·  {}",
-                if self.state.paused {
-                    "Paused"
-                } else {
-                    "Playing"
-                },
-                stage.slideshow.shown_layout(),
-                match self.state.shown_scale {
-                    Some(ScaleMode::Fill) => "Fill frame",
-                    Some(ScaleMode::Fit) => "Fit to frame",
-                    None => "-",
-                },
-                self.state.settings.transition.label(),
-                self.state.settings.interval_secs,
-                stage.slideshow.history_len(),
-                self.weather_status,
-                if sched.enabled {
-                    format!(
-                        "sleeps {}-{}",
-                        schedule::fmt_hm(sched.sleep_min),
-                        schedule::fmt_hm(sched.wake_min)
-                    )
-                } else {
-                    "no sleep schedule".to_string()
-                },
-                sources_status(&self.state.settings, &lib_stats, stage.library.online()),
+                "{:?}|{}|{}|{:?}|{:?}|{}|{}",
+                self.state.status.layout,
+                self.state.status.weather,
+                self.state.status.online,
+                self.state.shown_scale,
+                self.state.undo_secs,
+                self.state.shown_video,
+                self.state.paused,
             );
             let raw_input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -645,7 +649,7 @@ impl App {
                 events: egui_events,
                 ..Default::default()
             };
-            let mut actions = ui::Actions::default();
+            let mut actions = frame_ui::Actions::default();
             let need_run = !self.egui_uploaded
                 || !raw_input.events.is_empty()
                 || clock::now() >= self.egui_due
@@ -656,10 +660,21 @@ impl App {
                 self.state.library = lib_stats;
                 let t = clock::now();
                 let state = &mut self.state;
-                let mut full_output = self
-                    .ctx
-                    .run_ui(raw_input, |ui| ui::draw(ui.ctx(), state, &status));
+                let mut full_output = self.ctx.run_ui(raw_input, |ui| frame_ui::draw(ui, state));
                 let run = clock::elapsed(t);
+
+                // The Display page's theme choice, applied and persisted
+                // like any other setting. set_theme doesn't ask for a
+                // repaint itself, so the next pass runs at once.
+                let want = if self.state.settings.dark_theme {
+                    egui::Theme::Dark
+                } else {
+                    egui::Theme::Light
+                };
+                if self.ctx.theme() != want {
+                    self.ctx.set_theme(want);
+                    self.egui_due = clock::now();
+                }
 
                 actions = std::mem::take(&mut self.state.actions);
                 self.apply(stage.slideshow, &mut out.effects);
@@ -786,20 +801,21 @@ impl App {
                 self.ctx.memory_mut(|m| m.stop_text_input());
                 force_redraw = true;
                 // The server and key apply (and save) when the menu
-                // closes, not per keystroke.
-                let server = (
-                    self.state.settings.server_url.trim().to_string(),
-                    self.state.settings.api_key.trim().to_string(),
-                );
-                if server != self.saved_server && !server.0.is_empty() {
-                    self.saved_server = server.clone();
-                    out.effects.push(Effect::SetServer {
-                        url: server.0,
-                        key: server.1,
-                    });
+                // closes, not per keystroke. The URL goes out as the
+                // settings page said it would ("Will use http://…").
+                if let Some(url) = frame_ui::normalise_url(&self.state.settings.server_url) {
+                    let server = (url, self.state.settings.api_key.trim().to_string());
+                    if server != self.saved_server {
+                        self.saved_server = server.clone();
+                        out.effects.push(Effect::SetServer {
+                            url: server.0,
+                            key: server.1,
+                        });
+                    }
                 }
             }
         }
+        out.chrome_opaque = self.overlay_open && self.state.opaque();
         // Save changed settings once they settle, or at once when the menu
         // has closed. A debug schedule override is never saved.
         if let Some(since) = self.settings_dirty
@@ -895,31 +911,6 @@ impl App {
         // there is nothing to draw on, and this only runs while drawing.
         slideshow.set_clock_paused(self.state.paused);
     }
-}
-
-/// e.g. "Immich 213 (1 album) + folder 6, offline: cached only".
-fn sources_status(s: &Settings, lib: &Stats, online: bool) -> String {
-    let mut parts = Vec::new();
-    if s.immich_enabled {
-        let picked = lib
-            .albums
-            .iter()
-            .filter(|a| a.selected && !a.missing)
-            .count();
-        parts.push(format!(
-            "Immich {} ({picked} album{})",
-            lib.immich_assets,
-            if picked == 1 { "" } else { "s" }
-        ));
-    }
-    if s.local_enabled {
-        parts.push(format!("folder {}", lib.local_ready));
-    }
-    let mut out = parts.join(" + ");
-    if s.immich_enabled && !online {
-        out.push_str(", offline: cached only");
-    }
-    out
 }
 
 fn min_wait(a: Option<Duration>, b: Duration) -> Option<Duration> {
@@ -1080,9 +1071,6 @@ mod tests {
         }
         fn shown_layout(&self) -> String {
             "1 (single)".into()
-        }
-        fn history_len(&self) -> usize {
-            0
         }
         fn is_animating(&self) -> bool {
             false

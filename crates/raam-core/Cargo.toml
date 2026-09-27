@@ -10,10 +10,9 @@ rust-version.workspace = true
 [dependencies]
 raam-model.workspace = true
 log.workspace = true
-# `default_fonts` stays on until the 026 theme (its own Roboto + Material
-# Symbols subsets) crosses at migration step 6; the register's end state is
-# no default features at all.
-egui = { version = "=0.36.2", default-features = false, features = ["default_fonts"] }
+# No default features (the register's end state): the theme ships its own
+# Roboto + Material Symbols subsets (-1.4 MB of default fonts).
+egui = { version = "=0.36.2", default-features = false }
 # The clock/weather overlay's glyph atlas rasterisation.
 fontdue = "0.9"
 # Vendored on-screen keyboard (upstream LICENSE included); `clipboard` off:

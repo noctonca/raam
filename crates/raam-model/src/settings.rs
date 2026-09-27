@@ -164,6 +164,8 @@ pub struct Settings {
     /// Lip-sync calibration (ms) on top of Android's reported output
     /// latency; +180 measured on the SNUG frame with a filmed flash/beep.
     pub audio_delay_ms: i32,
+    /// The menus' and settings' theme (the slideshow is photos either way).
+    pub dark_theme: bool,
 }
 
 impl Settings {
@@ -192,6 +194,7 @@ impl Settings {
             video_sound: false,
             video_volume: 0.5,
             audio_delay_ms: limits::AUDIO_DELAY_DEFAULT_MS,
+            dark_theme: true,
         }
     }
 }

@@ -2012,9 +2012,6 @@ impl<V: VideoSeam> crate::app::Slideshow for Pipeline<V> {
     fn shown_layout(&self) -> String {
         Pipeline::shown_layout(self)
     }
-    fn history_len(&self) -> usize {
-        Pipeline::history_len(self)
-    }
     fn is_animating(&self) -> bool {
         Pipeline::is_animating(self)
     }

@@ -31,11 +31,11 @@ use android_activity::{
 };
 use ndk::native_window::NativeWindow;
 use raam_core::app::{App, Deps, Effect, Event, Inputs, Overrides, Stage, Touch};
+use raam_core::frame_ui::{AppState, Screen};
 use raam_core::gl::{GL_RENDERER, GL_VENDOR, GL_VERSION, gl_string, glDisableVertexAttribArray};
 use raam_core::overlay::ClockOverlay;
 use raam_core::painter::Painter;
 use raam_core::slideshow::{Pipeline, SlideshowSettings};
-use raam_core::ui::{AppState, Screen};
 use raam_core::{clock, collage, switches};
 use raam_engine::{db, fetch, immich, library, weather};
 use raam_model::limits::LARGEST_LAYOUT;
@@ -478,6 +478,8 @@ fn android_main(app: AndroidApp) {
                 lib.clone(),
             ));
             painter = Some(unsafe { Painter::new() });
+            // The theme's text mode is the shader boost (026's probe).
+            painter.as_mut().unwrap().text_boost = true;
             clock_overlay = Some(unsafe { ClockOverlay::new() });
             weather = Some(weather::spawn(host.waker.clone()));
             pipeline = Some(unsafe {
@@ -564,20 +566,26 @@ fn android_main(app: AndroidApp) {
             lib.send(library::Cmd::SetUnplayable(asset, why));
         }
 
-        let t = clock::now();
-        pipeline.draw_frame();
-        unsafe {
-            for i in 0..8 {
-                glDisableVertexAttribArray(i);
+        // The full-screen settings cover everything: skip the slideshow
+        // and overlay draws under them (the controller's opaque lever).
+        if !out.chrome_opaque {
+            let t = clock::now();
+            pipeline.draw_frame();
+            unsafe {
+                for i in 0..8 {
+                    glDisableVertexAttribArray(i);
+                }
             }
-        }
-        stats.slide += clock::elapsed(t);
-        if pipeline.is_transitioning() {
-            stats.trans_frames += 1;
+            stats.slide += clock::elapsed(t);
+            if pipeline.is_transitioning() {
+                stats.trans_frames += 1;
+            }
         }
 
         // Clock overlay: over the slideshow (transitions included), under
-        // the egui chrome. The controller says when the text changed.
+        // the egui chrome. The controller says when the text changed; the
+        // rebuild is applied even under opaque settings so the text is
+        // current when they close.
         let clock_overlay = clock_overlay.as_mut().unwrap();
         if let Some(r) = out.overlay {
             let t = clock::now();
@@ -592,9 +600,11 @@ fn android_main(app: AndroidApp) {
                 );
             }
         }
-        let t = clock::now();
-        clock_overlay.draw(egl_state.width, egl_state.height);
-        stats.clock_draw += clock::elapsed(t);
+        if !out.chrome_opaque {
+            let t = clock::now();
+            clock_overlay.draw(egl_state.width, egl_state.height);
+            stats.clock_draw += clock::elapsed(t);
+        }
 
         // The egui chrome: upload a fresh run's output, then draw from the
         // painter's persistent buffers while the menu is up.

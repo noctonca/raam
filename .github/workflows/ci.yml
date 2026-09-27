@@ -42,3 +42,31 @@ jobs:
       # so the native clippy above never sees them.
       - name: web host lints clean for wasm
         run: cargo clippy -p raam-web --target wasm32-unknown-unknown -- -D warnings
+
+  # hosts/android is cfg(target_os = "android") throughout, so the native
+  # clippy above sees an empty crate. This lints it for the frame's target
+  # (32-bit ARM, API 23) with a pinned NDK.
+  android:
+    name: Android host lints clean
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      NDK_VERSION: 28.2.13676358
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: armv7-linux-androideabi
+      - uses: Swatinem/rust-cache@v2
+      # The runner's SDK has sdkmanager; the NDK's clang builds the C in
+      # the dependencies (ring, SQLite).
+      - name: NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            --install "ndk;${NDK_VERSION}" > /dev/null
+          TC="$ANDROID_HOME/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -x "$TC/armv7a-linux-androideabi23-clang"
+          echo "CC_armv7_linux_androideabi=$TC/armv7a-linux-androideabi23-clang" >> "$GITHUB_ENV"
+          echo "AR_armv7_linux_androideabi=$TC/llvm-ar" >> "$GITHUB_ENV"
+      - run: cargo clippy -p raam-android --target armv7-linux-androideabi -- -D warnings

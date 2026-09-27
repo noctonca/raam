@@ -18,14 +18,20 @@ The flags are listed at the top of [src/main.rs](../src/main.rs).
 
 ## Checks
 
-The same four CI runs on every push and PR:
+The same five CI runs on every push and PR:
 
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo clippy -p raam-web --target wasm32-unknown-unknown -- -D warnings
+cargo clippy -p raam-android --target armv7-linux-androideabi -- -D warnings
 ```
+
+The last needs the NDK's clang for the C in the dependencies: set
+`CC_armv7_linux_androideabi` to the NDK's
+`toolchains/llvm/prebuilt/<host>/bin/armv7a-linux-androideabi23-clang`
+and `AR_armv7_linux_androideabi` to `llvm-ar` in the same folder.
 
 ## Web
 

@@ -289,10 +289,14 @@ Four layers, cheapest first:
    asserting the invariants (never two decoders; sleep/wake honoured;
    backoff caps; budgets never exceeded; recovery after every injected
    failure). Logic-only, no GL.
-3. **Pixel** — the desktop host's `--exact` golden screenshots, and the
-   headless-Chrome diff of the web build against them: the
-   render-regression net and the pixel match's enforcement (the golden
-   suite is the first item in [plan/next.md](plan/next.md)).
+3. **Pixel** — the golden suite: every preset's `--exact` shot from the
+   desktop host, in both themes, pinned as a hash of its pixels, and the
+   web build diffed against the same shots in headless Chromium: the
+   render-regression net and the pixel match's enforcement. A shot run
+   is hermetic (a virtual clock, no input from the machine), so a hash
+   moves only when the pixels do. Pixels are exact per GPU and driver,
+   so the suite runs on the kind of machine that blessed it, not in CI
+   (the golden suite is the first item in [plan/next.md](plan/next.md)).
 4. **On-frame** — manual, for any change to rendering, video, memory or
    a recovery path: collages and transitions, a clip with its sound in
    step, one decoder at a time, settings surviving a restart, and always

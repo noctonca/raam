@@ -11,14 +11,18 @@ without building it.
 
 ## The golden suite
 
-Every preset's `--exact` shot, in both themes, checked in; a compare
-mode in the `raam` binary; and a script that blesses and checks the set.
-The suite runs locally, not in CI, because Apple's GL and CI's software
-GL differ in their pixels. It also pins the display scale: two presets
-(the server page with the keyboard up, and the albums page scrolled)
-come out differently in a scale-1 and a scale-2 window. The first bless
-is a commit of its own. The web build is then diffed against the suite,
-by a script checked in beside it.
+Every preset's `--exact` shot from the desktop host (every gallery page,
+and every frame_ui page with each fixture, in both themes), pinned in
+`tests/goldens.txt` as a hash of its pixels rather than as images; a
+hash and a compare mode in the `raam` binary; and a script that checks
+and blesses the set and, for a hash that moved, draws the shot at the
+last blessed commit and now. A shot run is hermetic: a virtual clock
+and no input from the machine, so neither load, nor the display's scale
+or refresh rate, nor the mouse can move a hash. The suite runs
+locally, not in CI, because Apple's GL and CI's software GL differ in
+their pixels. The first bless is a commit of its own. The web build is
+then diffed against the same shots by a script beside it, in headless
+Chromium through a web preset mode that runs the same way.
 
 ## Smaller items
 

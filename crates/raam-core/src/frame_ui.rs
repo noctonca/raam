@@ -359,9 +359,7 @@ fn too_big_stats() -> Stats {
     s
 }
 
-/// Every preset name. Any of them takes a fixture suffix: `-empty` (a first
-/// run), `-nopick` (albums listed, none picked) or `-full` (the picked
-/// albums hold more than the cache).
+/// Every preset name. Any of them takes a fixture suffix (`FIXTURES`).
 pub const PAGES: &[&str] = &[
     "menu",
     "menu-undo",
@@ -384,6 +382,11 @@ pub const PAGES: &[&str] = &[
     "set-server-cache",
     "set-server-clear",
 ];
+
+/// The fixture suffixes a preset name takes: `-empty` (a first run),
+/// `-nopick` (albums listed, none picked) and `-full` (the picked albums
+/// hold more than the cache).
+pub const FIXTURES: &[&str] = &["-empty", "-nopick", "-full"];
 
 /// A screenshot run (the desktop's `--screenshot`, the web's `shot=1`)
 /// steps a virtual clock this far a pass, as a 60 Hz display would, so a
@@ -1873,5 +1876,24 @@ fn dialogs(ctx: &egui::Context, st: &mut AppState) {
                 st.dialog = Dialog::None;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The golden suite shoots every page with every fixture by these
+    /// names, so each must resolve, and nothing else may.
+    #[test]
+    fn every_page_takes_every_fixture() {
+        for page in PAGES {
+            assert!(preset(page).is_some(), "{page}");
+            for f in FIXTURES {
+                assert!(preset(&format!("{page}{f}")).is_some(), "{page}{f}");
+            }
+        }
+        assert!(preset("menu-bogus").is_none());
+        assert!(preset("set-photos-empty-full").is_none());
     }
 }

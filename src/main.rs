@@ -63,6 +63,8 @@
 //!   steps 1/60 s a pass, and the window neither takes the focus nor
 //!   passes the real mouse or keyboard to egui, so the shot depends on the
 //!   flags alone, not on load, the display or where the pointer rests
+//! - `--hash`: as `--screenshot`, but print the shot's size and a hash of
+//!   its pixels (the golden suite's check); both flags may be given
 //! - `--scroll <px>`: scroll the detail pane down this far first, so a
 //!   screenshot can reach what's below the fold
 //! - `--click X,Y` / `--press X,Y`: a tap (or a press held down) at that
@@ -75,7 +77,14 @@
 //!   frame
 //!
 //! Keys: F1 theme, F2 next text mode, F12 screenshot into `shots/`.
+//!
+//! And two with no window, for scripts/goldens.sh:
+//! - `--pages`: print every `--page` name, fixture variants included
+//! - `--diff A.png B.png [--tolerance N] [--out D.png]`: compare two shots,
+//!   print how B differs from A, exit 1 if any pixel differs by more than
+//!   N levels (default 0); D.png gets B in grey with those pixels magenta
 mod backdrop;
+mod golden;
 mod live;
 mod platform;
 mod preset;
@@ -132,6 +141,8 @@ struct Args {
     size: [u32; 2],
     exact: bool,
     screenshot: Option<PathBuf>,
+    /// --hash: print the shot's hash (and exit, as --screenshot does).
+    hash: bool,
     scroll: f32,
     /// (point, release): --click releases, --press holds. In order.
     taps: Vec<(egui::Pos2, bool)>,
@@ -139,6 +150,10 @@ struct Args {
     script: Vec<Step>,
     /// --hold: the touch's point and how long it stays down.
     hold: Option<(egui::Pos2, Duration)>,
+    /// --diff A B, --tolerance and --out: no window.
+    diff: Option<(PathBuf, PathBuf)>,
+    tolerance: u8,
+    out: Option<PathBuf>,
 }
 
 fn text_mode(s: &str) -> Option<TextMode> {
@@ -165,17 +180,23 @@ fn parse_args() -> Result<Args, String> {
         size: [1280, 800],
         exact: false,
         screenshot: None,
+        hash: false,
         scroll: 0.0,
         taps: Vec::new(),
         script: Vec::new(),
         hold: None,
+        diff: None,
+        tolerance: 0,
+        out: None,
     };
     // The first flag given that the other mode has no use for.
     let (mut preset_only, mut live_only) = (None, None);
+    // --diff's own flags, and the first flag it has no use for.
+    let (mut diff_only, mut not_diff) = (None, None);
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         match flag.as_str() {
-            "--theme" | "--text" | "--backdrop" | "--ppp" | "--scroll" | "--hold" => {
+            "--theme" | "--text" | "--backdrop" | "--ppp" | "--scroll" | "--hold" | "--hash" => {
                 preset_only.get_or_insert(flag.clone());
             }
             "--data" | "--photos" | "--set" | "--wait" => {
@@ -183,12 +204,38 @@ fn parse_args() -> Result<Args, String> {
             }
             _ => {}
         }
+        match flag.as_str() {
+            "--diff" => {}
+            "--tolerance" | "--out" => {
+                diff_only.get_or_insert(flag.clone());
+            }
+            _ => {
+                not_diff.get_or_insert(flag.clone());
+            }
+        }
         let mut val = || it.next().ok_or(format!("{flag} needs a value"));
         match flag.as_str() {
             "--version" | "-V" => {
                 println!("raam {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
+            "--pages" => {
+                for p in gallery::Page::ALL {
+                    println!("{}", p.name());
+                }
+                for p in frame_ui::PAGES {
+                    println!("{p}");
+                    for f in frame_ui::FIXTURES {
+                        println!("{p}{f}");
+                    }
+                }
+                std::process::exit(0);
+            }
+            "--diff" => a.diff = Some((val()?.into(), val()?.into())),
+            "--tolerance" => {
+                a.tolerance = val()?.parse().map_err(|e| format!("--tolerance: {e}"))?
+            }
+            "--out" => a.out = Some(val()?.into()),
             "--theme" => {
                 a.theme = match val()?.as_str() {
                     "dark" => Theme::Dark,
@@ -242,6 +289,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--exact" => a.exact = true,
             "--screenshot" => a.screenshot = Some(val()?.into()),
+            "--hash" => a.hash = true,
             "--click" | "--press" => {
                 let v = val()?;
                 let (x, y) = v
@@ -285,6 +333,12 @@ fn parse_args() -> Result<Args, String> {
                 ));
             }
         }
+    }
+    match (&a.diff, diff_only, not_diff) {
+        (Some(_), _, Some(f)) => return Err(format!("{f} is no use to --diff")),
+        (None, Some(f), _) => return Err(format!("{f} goes with --diff")),
+        (Some(_), _, None) => return Ok(a),
+        _ => {}
     }
     match (a.live, preset_only, live_only) {
         (true, Some(f), _) => Err(format!(
@@ -361,8 +415,8 @@ fn create_gl(el: &ActiveEventLoop, size: [u32; 2], exact: bool, focus: bool) -> 
     })
 }
 
-/// The back buffer, bottom-up in GL, written top-down as RGB.
-fn save_png(path: &std::path::Path, w: i32, h: i32) -> Result<(), String> {
+/// The back buffer, bottom-up in GL, as a top-down RGB image.
+fn read_pixels(w: i32, h: i32) -> golden::Image {
     let mut rgba = vec![0u8; (w * h * 4) as usize];
     unsafe {
         glReadPixels(
@@ -386,13 +440,16 @@ fn save_png(path: &std::path::Path, w: i32, h: i32) -> Result<(), String> {
                 .flat_map(|p| [p[0], p[1], p[2]]),
         );
     }
-    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
-    enc.set_color(png::ColorType::Rgb);
-    enc.set_depth(png::BitDepth::Eight);
-    enc.write_header()
-        .and_then(|mut wr| wr.write_image_data(&rgb))
-        .map_err(|e| e.to_string())
+    golden::Image {
+        w: w as u32,
+        h: h as u32,
+        rgb,
+    }
+}
+
+/// The back buffer into a PNG file.
+fn save_png(path: &std::path::Path, w: i32, h: i32) -> Result<(), String> {
+    golden::write_png(path, &read_pixels(w, h))
 }
 
 /// A stderr logger: everything at info and up, no dependency.
@@ -422,6 +479,9 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if let Some((a, b)) = &args.diff {
+        std::process::exit(golden::run_diff(a, b, args.tolerance, args.out.as_deref()));
+    }
     let result = if args.live {
         let event_loop = EventLoop::<live::Wake>::with_user_event()
             .build()

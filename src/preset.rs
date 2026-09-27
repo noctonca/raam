@@ -5,12 +5,12 @@
 //! from winit, plus the scripted taps, holds and scroll of the flags in
 //! main.rs, and `--screenshot` saves once egui is idle.
 //!
-//! A shot run (`--screenshot`) is hermetic: egui's clock is the
+//! A shot run (`--screenshot`, `--hash`) is hermetic: egui's clock is the
 //! pass count, passes run back to back, and nothing from the machine
 //! reaches egui but the window's size, so the golden suite's shots are
 //! the same whatever the load, the display's refresh rate or scale, or
 //! where the mouse rests. The web host's `shot=1` runs the same way.
-use crate::{Args, Gl, PageArg, backdrop, save_png};
+use crate::{Args, Gl, PageArg, backdrop, golden, read_pixels};
 use egui::Theme;
 use glutin::surface::GlSurface;
 use raam_core::frame_ui::{self, SHOT_PASS, SHOT_SETTLED};
@@ -47,9 +47,11 @@ pub struct Preset {
     state: Option<egui_winit::State>,
     painter: Option<Painter>,
     next_run: Option<Instant>,
-    /// Save the next frame here (F12, or --screenshot once egui is idle).
+    /// F12: save the next frame here.
     shot: Option<PathBuf>,
-    exit_after_shot: bool,
+    /// A shot run whose shot is still to come: taken once egui settles,
+    /// then the host exits.
+    shot_pending: bool,
     passes: u32,
     /// --scroll left the pointer over the pane: lift it once the scroll has
     /// played out, as the device does, or the shot shows a fake hover.
@@ -97,10 +99,10 @@ impl Preset {
             ppp: args.ppp,
             ..Default::default()
         };
-        let hermetic = args.screenshot.is_some();
+        let hermetic = args.screenshot.is_some() || args.hash;
         Self {
             ppp: args.ppp,
-            exit_after_shot: hermetic,
+            shot_pending: hermetic,
             hermetic,
             args,
             ctx,
@@ -421,18 +423,27 @@ impl Preset {
                 self.tap_idx += 1;
                 self.tap_step = 1;
                 self.next_run = Some(Instant::now());
-            } else if let Some(p) = self.args.screenshot.take() {
-                self.shot = Some(p);
-                self.next_run = Some(Instant::now());
+            } else if self.shot_pending {
+                // Once: a pass already queued still runs after exit().
+                self.shot_pending = false;
+                let img = read_pixels(w, h);
+                if self.args.hash {
+                    println!("{w}x{h} {:016x}", golden::hash(&img));
+                }
+                if let Some(path) = &self.args.screenshot {
+                    match golden::write_png(path, &img) {
+                        Ok(()) => log::info!("saved {} ({w}x{h})", path.display()),
+                        Err(e) => log::error!("screenshot {}: {e}", path.display()),
+                    }
+                }
+                log::info!("shot after {} passes", self.passes);
+                el.exit();
             }
         }
         if let Some(path) = self.shot.take() {
-            match save_png(&path, w, h) {
+            match golden::write_png(&path, &read_pixels(w, h)) {
                 Ok(()) => log::info!("saved {} ({w}x{h})", path.display()),
                 Err(e) => log::error!("screenshot {}: {e}", path.display()),
-            }
-            if self.exit_after_shot {
-                el.exit();
             }
         }
         if let Err(e) = gl.surface.swap_buffers(&gl.context) {

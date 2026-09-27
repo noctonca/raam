@@ -118,6 +118,8 @@ unsafe extern "C" {
     pub fn glBlendFunc(sfactor: GlEnum, dfactor: GlEnum);
     pub fn glBlendFuncSeparate(src_rgb: GlEnum, dst_rgb: GlEnum, src_a: GlEnum, dst_a: GlEnum);
     pub fn glScissor(x: GlInt, y: GlInt, w: GlSizei, h: GlSizei);
+    // The desktop linkage wraps these two (GL_ALPHA).
+    #[cfg(target_os = "android")]
     pub fn glTexSubImage2D(
         target: GlEnum,
         level: GlInt,
@@ -142,6 +144,8 @@ unsafe extern "C" {
     pub fn glGenTextures(n: GlSizei, textures: *mut GlUint);
     pub fn glBindTexture(target: GlEnum, texture: GlUint);
     pub fn glActiveTexture(texture: GlEnum);
+    // The desktop linkage wraps these two (GL_ALPHA).
+    #[cfg(target_os = "android")]
     pub fn glTexImage2D(
         target: GlEnum,
         level: GlInt,
@@ -173,15 +177,46 @@ pub const GL_MAX_TEXTURE_SIZE: GlEnum = 0x0D33;
 
 // The desktop linkage: OpenGL.framework / libGL export the same names,
 // but glutin only makes core-profile contexts there (4.1 on macOS), so
-// GLSL ES 1.00 is rewritten to 1.50 on the way into `link_program`, and a
-// core context needs one vertex array object bound before any draw.
+// GLSL ES 1.00 is rewritten to 1.50 on the way into `link_program`, a
+// core context needs one vertex array object bound before any draw, and
+// GLES2's GL_ALPHA textures become swizzled one-channel ones.
 #[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
 mod desktop {
     use super::*;
 
+    const GL_RED: GlEnum = 0x1903;
+    const GL_R8: GlEnum = 0x8229;
+    const GL_TEXTURE_SWIZZLE_RGBA: GlEnum = 0x8E46;
+    const GL_ZERO: GlInt = 0;
+
     unsafe extern "C" {
         fn glGenVertexArrays(n: GlSizei, arrays: *mut GlUint);
         fn glBindVertexArray(array: GlUint);
+        fn glTexParameteriv(target: GlEnum, pname: GlEnum, params: *const GlInt);
+        #[link_name = "glTexImage2D"]
+        fn tex_image_2d(
+            target: GlEnum,
+            level: GlInt,
+            internalformat: GlInt,
+            width: GlSizei,
+            height: GlSizei,
+            border: GlInt,
+            format: GlEnum,
+            type_: GlEnum,
+            pixels: *const c_void,
+        );
+        #[link_name = "glTexSubImage2D"]
+        fn tex_sub_image_2d(
+            target: GlEnum,
+            level: GlInt,
+            xoffset: GlInt,
+            yoffset: GlInt,
+            width: GlSizei,
+            height: GlSizei,
+            format: GlEnum,
+            type_: GlEnum,
+            pixels: *const c_void,
+        );
         pub fn glReadPixels(
             x: GlInt,
             y: GlInt,
@@ -206,6 +241,80 @@ mod desktop {
         }
     }
 
+    /// GLES2's glTexImage2D. A core profile has no GL_ALPHA (the clock
+    /// overlay's glyph atlases): one byte a texel is GL_R8 there, swizzled
+    /// so a shader samples (0, 0, 0, a) as it does from GL_ALPHA.
+    ///
+    /// # Safety
+    /// Requires a current GL context, and `pixels` as glTexImage2D does.
+    #[allow(non_snake_case, clippy::too_many_arguments)]
+    pub unsafe fn glTexImage2D(
+        target: GlEnum,
+        level: GlInt,
+        internalformat: GlInt,
+        width: GlSizei,
+        height: GlSizei,
+        border: GlInt,
+        format: GlEnum,
+        type_: GlEnum,
+        pixels: *const c_void,
+    ) {
+        unsafe {
+            if format != GL_ALPHA {
+                tex_image_2d(
+                    target,
+                    level,
+                    internalformat,
+                    width,
+                    height,
+                    border,
+                    format,
+                    type_,
+                    pixels,
+                );
+                return;
+            }
+            tex_image_2d(
+                target,
+                level,
+                GL_R8 as GlInt,
+                width,
+                height,
+                border,
+                GL_RED,
+                type_,
+                pixels,
+            );
+            let swizzle = [GL_ZERO, GL_ZERO, GL_ZERO, GL_RED as GlInt];
+            glTexParameteriv(target, GL_TEXTURE_SWIZZLE_RGBA, swizzle.as_ptr());
+        }
+    }
+
+    /// GLES2's glTexSubImage2D, GL_ALPHA uploads going to the red channel
+    /// (see `glTexImage2D`).
+    ///
+    /// # Safety
+    /// Requires a current GL context, and `pixels` as glTexSubImage2D does.
+    #[allow(non_snake_case, clippy::too_many_arguments)]
+    pub unsafe fn glTexSubImage2D(
+        target: GlEnum,
+        level: GlInt,
+        xoffset: GlInt,
+        yoffset: GlInt,
+        width: GlSizei,
+        height: GlSizei,
+        format: GlEnum,
+        type_: GlEnum,
+        pixels: *const c_void,
+    ) {
+        let format = if format == GL_ALPHA { GL_RED } else { format };
+        unsafe {
+            tex_sub_image_2d(
+                target, level, xoffset, yoffset, width, height, format, type_, pixels,
+            )
+        }
+    }
+
     /// GLSL ES 1.00 -> 1.50. `precision` statements are legal (and
     /// ignored) in 1.50, so only the removed keywords and built-ins need
     /// replacing.
@@ -224,7 +333,7 @@ mod desktop {
 }
 
 #[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
-pub use desktop::{bind_vao, glReadPixels};
+pub use desktop::{bind_vao, glReadPixels, glTexImage2D, glTexSubImage2D};
 
 ///
 /// # Safety

@@ -98,7 +98,7 @@ function names and GLSL ES 1.00 shaders over three linkages:
 | Target | Backend |
 |---|---|
 | Android | extern GLES2 |
-| macOS / Linux desktop | extern desktop GL with the small shader rewrite |
+| macOS / Linux desktop | extern desktop GL with the small shader rewrite, and GLES2's `GL_ALPHA` textures as `GL_R8` swizzled to (0, 0, 0, a), which core profiles lack |
 | wasm32 | the WebGL1 shim (integer names → tables of WebGL objects), `gl/webgl.rs` |
 
 This formalises what the experiments proved: the same painter renders

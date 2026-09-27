@@ -987,44 +987,9 @@ fn push_egui_touch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::fake::{advance, install as install_clock, set_wall_hm};
     use raam_model::Plan;
     use std::cell::Cell;
-
-    // A fake clock the tests wind by hand: the source fns read
-    // thread-locals, so parallel tests don't share time. Installing the
-    // process-global source races across tests; first one wins, all use
-    // the same fns.
-    thread_local! {
-        static NOW_MS: Cell<u64> = const { Cell::new(0) };
-        static WALL_S: Cell<u64> = const { Cell::new(12 * 3600) };
-    }
-
-    fn install_clock() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            clock::set_source(clock::Source {
-                monotonic: || NOW_MS.with(|c| Duration::from_millis(c.get())),
-                wall: || WALL_S.with(|c| Duration::from_secs(c.get())),
-                local: |epoch| raam_model::LocalTime {
-                    hour: ((epoch / 3600) % 24) as i32,
-                    min: ((epoch / 60) % 60) as i32,
-                    sec: (epoch % 60) as i32,
-                    mday: 1,
-                    mon: 0,
-                    wday: 0,
-                },
-            });
-        });
-    }
-
-    fn advance(d: Duration) {
-        NOW_MS.with(|c| c.set(c.get() + d.as_millis() as u64));
-        WALL_S.with(|c| c.set(c.get() + d.as_secs()));
-    }
-
-    fn set_wall_hm(h: u64, m: u64) {
-        WALL_S.with(|c| c.set(h * 3600 + m * 60));
-    }
 
     #[derive(Default)]
     struct FakeShow {

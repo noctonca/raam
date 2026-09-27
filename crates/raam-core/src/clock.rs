@@ -58,3 +58,45 @@ pub fn wall() -> Duration {
 pub fn local(epoch: i64) -> LocalTime {
     (source().local)(epoch)
 }
+
+/// A fake clock the tests wind by hand. The source fns read thread-locals,
+/// so parallel tests don't share time; the process-global source is
+/// installed once, by whichever test gets there first, and every test
+/// module shares it (a second `set_source` would panic).
+#[cfg(test)]
+pub(crate) mod fake {
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    thread_local! {
+        static NOW_MS: Cell<u64> = const { Cell::new(0) };
+        static WALL_S: Cell<u64> = const { Cell::new(12 * 3600) };
+    }
+
+    pub fn install() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            super::set_source(super::Source {
+                monotonic: || NOW_MS.with(|c| Duration::from_millis(c.get())),
+                wall: || WALL_S.with(|c| Duration::from_secs(c.get())),
+                local: |epoch| raam_model::LocalTime {
+                    hour: ((epoch / 3600) % 24) as i32,
+                    min: ((epoch / 60) % 60) as i32,
+                    sec: (epoch % 60) as i32,
+                    mday: 1,
+                    mon: 0,
+                    wday: 0,
+                },
+            });
+        });
+    }
+
+    pub fn advance(d: Duration) {
+        NOW_MS.with(|c| c.set(c.get() + d.as_millis() as u64));
+        WALL_S.with(|c| c.set(c.get() + d.as_secs()));
+    }
+
+    pub fn set_wall_hm(h: u64, m: u64) {
+        WALL_S.with(|c| c.set(h * 3600 + m * 60));
+    }
+}

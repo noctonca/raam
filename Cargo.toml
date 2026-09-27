@@ -14,8 +14,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 # The `raam` binary is the desktop/Linux host: the UX-iteration window on a
-# dev machine, and meant to run a Linux frame too (a Raspberry Pi under
-# X/Wayland; untested). See docs/ARCHITECTURE.md "Hosts". A bare `raam`
+# dev machine, and a Linux frame's host too (`--fullscreen`, under X11 or
+# Wayland). See docs/ARCHITECTURE.md "Hosts". A bare `raam`
 # runs the slideshow on the engine; `--page` is the preset host, the widget
 # gallery and every frame_ui screen by name, for the ux-qa pass.
 

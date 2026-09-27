@@ -136,14 +136,17 @@ nothing here touches the system partition.
 Every build needs Rust 1.95 or newer;
 [docs/BUILDING.md](docs/BUILDING.md) has what else each one needs.
 
-- **Desktop** (macOS; Linux untested):
+- **Desktop** (macOS, and Linux under X11 or Wayland):
   `cargo run --release -- --photos DIR` runs the slideshow over a
   folder (by default `~/Pictures/Raam`); Immich is set up in its
   settings, and the mouse is a finger.
   `--size 1024x600` tries the 7″ panel. Clips don't play on the desktop.
   `--page NAME` shows one screen of the UI instead; every flag is listed
-  at the top of [src/main.rs](src/main.rs). A Linux frame (a Raspberry
-  Pi, say) is planned, not tested.
+  at the top of [src/main.rs](src/main.rs).
+  `--fullscreen` fills the screen, as a Linux frame would run it, and a
+  touchscreen works as on the frame. It has run on Linux only with
+  Mesa's software GL so far; a Raspberry Pi 4 or 5 can't run it yet,
+  since its GPU offers OpenGL 3.1 at most and the host asks for 3.2.
 - **Web:** the [hosted demo](https://noctonca.github.io/raam/) is
   built from main. To build it yourself, run `hosts/web/build.sh`, then
   serve `hosts/web/www` (e.g.

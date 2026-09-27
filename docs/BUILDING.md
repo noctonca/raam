@@ -6,7 +6,9 @@ builds and tests it on Linux. Putting the APK on a frame is in the
 
 ## Desktop
 
-Nothing beyond Rust:
+Nothing beyond Rust on macOS. On Linux the host links the system's
+libGL, so it needs its development files too (`libgl-dev` on Debian
+and Ubuntu):
 
 ```sh
 cargo run --release -- --photos DIR

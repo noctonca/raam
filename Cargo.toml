@@ -42,7 +42,7 @@ version = "0.0.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/noctonca/raam"
-rust-version = "1.88"
+rust-version = "1.95"
 
 [workspace.dependencies]
 raam-model = { path = "crates/raam-model" }

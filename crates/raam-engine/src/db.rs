@@ -266,16 +266,25 @@ pub fn set_local_dir(conn: &Connection, dir: &str) -> rusqlite::Result<usize> {
     )
 }
 
+/// The Immich server and key from settings. Either one empty is stored
+/// as none, as on a fresh install.
 pub fn set_immich_server(conn: &Connection, url: &str, key: &str) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE source SET base_url = ?1 WHERE kind = 'immich'",
+        "UPDATE source SET base_url = NULLIF(?1, '') WHERE kind = 'immich'",
         [url],
     )?;
-    conn.execute(
-        "INSERT INTO credential (source_id, api_key) SELECT id, ?1 FROM source WHERE kind = 'immich'
-         ON CONFLICT (source_id) DO UPDATE SET api_key = excluded.api_key",
-        [key],
-    )?;
+    if key.is_empty() {
+        conn.execute(
+            "DELETE FROM credential WHERE source_id = (SELECT id FROM source WHERE kind = 'immich')",
+            [],
+        )?;
+    } else {
+        conn.execute(
+            "INSERT INTO credential (source_id, api_key) SELECT id, ?1 FROM source WHERE kind = 'immich'
+             ON CONFLICT (source_id) DO UPDATE SET api_key = excluded.api_key",
+            [key],
+        )?;
+    }
     Ok(())
 }
 
@@ -849,14 +858,17 @@ pub const VARIANT_SQL: &str = "CASE a.kind WHEN 'video' THEN 'video' ELSE 'previ
 /// key: a photo in both sources plays once, from the local preview if it
 /// has one, else a cached Immich preview, else the server. A local photo
 /// needs its preview made; an Immich one needs a cached preview when
-/// `immich_cached_only` (offline).
+/// `immich_cached_only` (offline). With no server (never set, or
+/// removed) the Immich photos wait, cache and all, as the menu's "add a
+/// server" says; the same server entered again brings them straight back.
 pub fn eligible(conn: &Connection, immich_cached_only: bool) -> Vec<MediaItem> {
     let sql = format!(
         "SELECT a.id, {KEY_SQL}, s.kind, a.remote_id, a.location, a.width, a.height, f.asset_id IS NOT NULL, a.kind
          FROM asset a JOIN source s ON s.id = a.source_id
          LEFT JOIN curation c ON c.key = {KEY_SQL}
          LEFT JOIN cached_file f ON f.asset_id = a.id AND f.variant = {VARIANT_SQL}
-         WHERE s.enabled = 1 AND COALESCE(c.hidden, 0) = 0 AND a.width > 0 AND a.height > 0
+         WHERE s.enabled = 1 AND (s.kind = 'local' OR s.base_url <> '')
+           AND COALESCE(c.hidden, 0) = 0 AND a.width > 0 AND a.height > 0
            AND COALESCE(a.playable, 1) = 1
            AND (f.asset_id IS NOT NULL OR (s.kind = 'immich' AND ?1 = 0) OR (s.kind = 'local' AND a.kind = 'video'))"
     );
@@ -1221,6 +1233,7 @@ mod tests {
         install_clock();
         let db = open(Path::new(":memory:"), "").unwrap();
         let conn = db.lock().unwrap();
+        set_immich_server(&conn, "http://immich.local:2283", "key").unwrap();
         asset(&conn, "photo", "image", None);
         asset(&conn, "clip", "video", None);
         asset(&conn, "big", "video", Some((false, "1920x1088 at most")));
@@ -1251,6 +1264,57 @@ mod tests {
         assert_eq!(reason("big"), "1920x1088 at most");
         // Nothing left to mark the second time.
         assert_eq!(mark_clips_unplayable(&conn, "again").0, 0);
+    }
+
+    #[test]
+    fn a_removed_server_keeps_its_photos_out_until_one_is_set_again() {
+        install_clock();
+        let db = open(Path::new(":memory:"), "").unwrap();
+        let conn = db.lock().unwrap();
+        let queued = |conn: &Connection| -> Vec<String> {
+            eligible(conn, false)
+                .into_iter()
+                .map(|m| m.remote_id)
+                .collect()
+        };
+        let loaded = |conn: &Connection| -> (String, String) {
+            let mut s = Settings::defaults("", "");
+            load_settings(conn, &mut s);
+            (s.server_url, s.api_key)
+        };
+        asset(&conn, "photo", "image", None);
+        // A fresh install: no server, so nothing from Immich plays.
+        assert_eq!(queued(&conn), [] as [&str; 0]);
+
+        set_immich_server(&conn, "http://immich.local:2283", "key").unwrap();
+        assert_eq!(queued(&conn), ["photo"]);
+
+        // Emptied in settings: stored as none, as on a fresh install. The
+        // photo and its row stay for the server's return.
+        set_immich_server(&conn, "", "key").unwrap();
+        let url: Option<String> = conn
+            .query_row(
+                "SELECT base_url FROM source WHERE kind = 'immich'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(url, None);
+        assert_eq!(loaded(&conn), (String::new(), "key".to_string()));
+        assert_eq!(queued(&conn), [] as [&str; 0]);
+        assert_eq!(counts(&conn, SourceKind::Immich).0, 1);
+
+        // An emptied key goes too.
+        set_immich_server(&conn, "http://immich.local:2283", "").unwrap();
+        assert_eq!(
+            loaded(&conn),
+            ("http://immich.local:2283".to_string(), String::new())
+        );
+        let keys: i64 = conn
+            .query_row("SELECT COUNT(*) FROM credential", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(keys, 0);
+        assert_eq!(queued(&conn), ["photo"]);
     }
 
     #[test]

@@ -139,7 +139,8 @@ Every build needs Rust 1.95 or newer;
 - **Desktop** (macOS, and Linux under X11 or Wayland):
   `cargo run --release -- --photos DIR` runs the slideshow over a
   folder (by default `~/Pictures/Raam`); Immich is set up in its
-  settings, and the mouse is a finger.
+  settings. The mouse is a finger, and a keyboard works too: ← and →
+  go back and on, and any other key opens the menu.
   `--size 1024x600` tries the 7″ panel. Clips don't play on the desktop.
   `--page NAME` shows one screen of the UI instead; every flag is listed
   at the top of [src/main.rs](src/main.rs).

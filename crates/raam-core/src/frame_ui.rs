@@ -16,7 +16,9 @@ use crate::icons;
 use crate::kit::{self, DialogResult, ListItem, Tone, ToolItem, Trailing};
 use crate::theme::{self, Type, scheme, size, space};
 use egui::{Align, CornerRadius, Ui, UiBuilder};
-use raam_model::limits::{AUDIO_DELAY_RANGE, CAP_CHOICES_MB, DEFAULT_CAP_MB, LARGEST_LAYOUT};
+use raam_model::limits::{
+    AUDIO_DELAY_RANGE, CAP_CHOICES_MB, DEFAULT_CAP_MB, FOCUS_CLAIM_PASSES, LARGEST_LAYOUT,
+};
 use raam_model::{
     AlbumRow, ClockStyle, Corner, FitBackground, GapColour, ScaleMode, Settings, Stats,
     TransitionChoice, VideoPlayback,
@@ -198,6 +200,81 @@ pub struct AppState {
     delay_draft: f32,
     /// Focus the server URL field on the next pass (a preset, for QA).
     focus_url: bool,
+    /// The last input was a physical key, not a touch: the focus follows
+    /// the levels, and the on-screen keyboard stays away (UX.md, Keys).
+    /// Set by the controller when a key or a tap opens the menu, and from
+    /// egui's input after that.
+    pub keys: bool,
+    /// A text field had the keyboard at the end of the last pass, so an
+    /// Escape now only leaves it.
+    typing: bool,
+    /// The level drawn last pass; `None` once the overlay has closed.
+    seen: Option<Level>,
+    /// The control that opened each level now open, outermost first:
+    /// stepping back hands the focus back to it.
+    openers: Vec<Option<egui::Id>>,
+    /// Where the focus goes next, kept until a control takes it (an Area's
+    /// first pass sizes it unseen, with nothing in it taking it), for
+    /// `claim_passes` more passes at most.
+    claim: Option<Want>,
+    claim_passes: u32,
+}
+
+/// How deep the chrome is: the menu, settings, a sub page, a dialog.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Level {
+    screen: Screen,
+    sub: Sub,
+    dialog: Dialog,
+}
+
+impl Level {
+    fn depth(self) -> usize {
+        usize::from(self.screen == Screen::Settings)
+            + usize::from(self.sub != Sub::None)
+            + usize::from(self.dialog != Dialog::None)
+    }
+
+    /// Where the focus goes when this level opens by key, or when a key
+    /// is pressed while nothing has it (UX.md, Keys).
+    fn region(self) -> Region {
+        match self {
+            Level {
+                screen: Screen::Menu,
+                ..
+            } => Region::Menu,
+            Level {
+                dialog: Dialog::None,
+                sub: Sub::None,
+                ..
+            } => Region::Nav,
+            Level {
+                dialog: Dialog::None,
+                ..
+            } => Region::Content,
+            _ => Region::Dialog,
+        }
+    }
+}
+
+/// Where the focus should go.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Want {
+    /// A part's first control.
+    First(Region),
+    /// Back to the control that opened the level just left.
+    Back(egui::Id),
+}
+
+/// The part of the chrome that takes a claimed focus: the menu's first
+/// item that can act, the selected section, the page's first control, or
+/// the dialog's (its chosen option, its slider, or Cancel).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Region {
+    Menu,
+    Nav,
+    Content,
+    Dialog,
 }
 
 fn keyboard() -> egui_keyboard::Keyboard {
@@ -232,6 +309,12 @@ impl AppState {
             interval_draft: 10.0,
             delay_draft: 0.0,
             focus_url: false,
+            keys: false,
+            typing: false,
+            seen: None,
+            openers: Vec::new(),
+            claim: None,
+            claim_passes: 0,
         }
     }
 
@@ -243,6 +326,21 @@ impl AppState {
         self.sub = Sub::None;
         self.dialog = Dialog::None;
         self.keyboard = keyboard();
+        self.typing = false;
+        self.seen = None;
+        self.openers.clear();
+        self.claim = None;
+    }
+
+    /// The focus is on its way to a screen that opened by key: the
+    /// controller holds keys back until it has arrived, or given up.
+    pub fn focus_pending(&self) -> bool {
+        self.claim.is_some()
+    }
+
+    fn want(&mut self, w: Want) {
+        self.claim = Some(w);
+        self.claim_passes = FOCUS_CLAIM_PASSES;
     }
 
     /// Whether the full-screen settings are up: the host then skips drawing
@@ -616,6 +714,7 @@ fn cache_fits(lib: &Stats) -> i64 {
 
 pub fn draw(ui: &mut Ui, st: &mut AppState) {
     let ctx = ui.ctx().clone();
+    keys(&ctx, st);
     st.keyboard.pump_events(&ctx);
     // Keycaps in the theme being drawn. Boundary contrast (keycap against
     // keyboard): light 1.29 letters, 1.31 function keys; dark 1.57 and 2.06.
@@ -641,11 +740,136 @@ pub fn draw(ui: &mut Ui, st: &mut AppState) {
             radius: theme::shape::S,
         }
     });
+    // A claim back to a control spans every part: a dialog's opener is in
+    // the page, not where a dialog's first focus goes.
+    let back = match st.claim {
+        Some(Want::Back(id)) => {
+            kit::claim_focus_on(&ctx, id);
+            true
+        }
+        _ => false,
+    };
     match st.screen {
         Screen::Menu => draw_menu(&ctx, st),
         Screen::Settings => draw_settings(ui, st),
     }
+    if back && kit::drop_claim(&ctx) {
+        // Gone or disabled since: the level's first control instead.
+        st.want(Want::First(
+            Level {
+                screen: st.screen,
+                sub: st.sub,
+                dialog: st.dialog,
+            }
+            .region(),
+        ));
+    } else if back {
+        st.claim = None;
+    } else if st.claim.is_some() {
+        st.claim_passes = st.claim_passes.saturating_sub(1);
+        if st.claim_passes == 0 {
+            st.claim = None;
+        }
+    }
+    st.keyboard.set_away(st.keys);
     st.keyboard.show(&ctx);
+    st.typing = ctx.text_edit_focused();
+}
+
+/// A physical keyboard (UX.md, Keys), before anything draws: whether keys
+/// or touches are in use, Escape stepping back a level, and where the
+/// focus goes when the level changed or a key finds nothing focused.
+fn keys(ctx: &egui::Context, st: &mut AppState) {
+    use egui::{Event, Key};
+    let (mut key, mut touch) = (false, false);
+    ctx.input(|i| {
+        for e in &i.events {
+            match e {
+                Event::Key { pressed: true, .. } => key = true,
+                Event::PointerButton { pressed: true, .. }
+                | Event::Touch {
+                    phase: egui::TouchPhase::Start,
+                    ..
+                } => touch = true,
+                _ => {}
+            }
+        }
+    });
+    if touch {
+        st.keys = false;
+        st.claim = None;
+    } else if key {
+        st.keys = true;
+    }
+
+    // Escape: a dialog's is its own (egui's Modal closes on it), and a text
+    // field's only leaves the field (egui drops its focus).
+    if st.dialog == Dialog::None
+        && !st.typing
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape))
+    {
+        if st.sub != Sub::None {
+            st.sub = Sub::None;
+        } else if st.screen == Screen::Settings {
+            st.screen = Screen::Menu;
+            // The keyboard's hysteresis would flash it over the menu.
+            st.keyboard = keyboard();
+        } else {
+            st.actions.close = true;
+        }
+    }
+
+    // A level opened or closed since the last pass. The control that had
+    // the focus opened the new one; stepping back returns it there.
+    let now = Level {
+        screen: st.screen,
+        sub: st.sub,
+        dialog: st.dialog,
+    };
+    if st.seen != Some(now) {
+        if st.seen.is_none() {
+            st.openers.clear();
+        }
+        let (was, is) = (st.openers.len(), now.depth());
+        if is > was {
+            let opener = ctx.memory(|m| m.focused());
+            st.openers.push(opener);
+            st.openers.resize(is, None);
+            if st.keys {
+                st.want(Want::First(now.region()));
+            }
+        } else if is < was {
+            st.openers.truncate(is + 1);
+            let back = st.openers.pop().flatten();
+            if st.keys {
+                st.want(back.map_or(Want::First(now.region()), Want::Back));
+            }
+        } else if st.seen.is_none() && st.keys {
+            // The menu, just opened by key.
+            st.want(Want::First(now.region()));
+        }
+        st.seen = Some(now);
+    }
+
+    // A key that finds nothing focused only brings the focus in.
+    let nudged = ctx.input(|i| {
+        [
+            Key::ArrowUp,
+            Key::ArrowDown,
+            Key::ArrowLeft,
+            Key::ArrowRight,
+            Key::Tab,
+            Key::Enter,
+            Key::Space,
+        ]
+        .iter()
+        .any(|k| i.key_pressed(*k))
+    });
+    if nudged && !st.typing && ctx.memory(|m| m.focused().is_none()) {
+        st.want(Want::First(now.region()));
+        // Not a step on from the claimed control too, nor Tab's own pick.
+        ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+    }
 }
 
 /// Whether an album is picked, counting a pick not yet seen back from the
@@ -780,7 +1004,9 @@ fn draw_menu(ctx: &egui::Context, st: &mut AppState) {
             enabled: t.enabled,
         })
         .collect();
+    let claimed = claim(ctx, st, Region::Menu);
     let hit = kit::floating_toolbar(ctx, "frame.menu", &[&status], &tools, "Undo hide (5 s)");
+    claimed_by(ctx, st, claimed);
     if let Some(i) = hit {
         match items[i].1 {
             MenuAct::Pause => st.paused = !st.paused,
@@ -824,12 +1050,14 @@ fn draw_settings(ui: &mut Ui, st: &mut AppState) {
             )
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
+                let claimed = claim(ui.ctx(), st, Region::Nav);
                 for sec in Section::ALL {
                     if kit::nav_item(ui, sec.icon(), sec.label(), st.section == sec).clicked() {
                         st.section = sec;
                         st.sub = Sub::None;
                     }
                 }
+                claimed_by(ui.ctx(), st, claimed);
             });
         egui::CentralPanel::default()
             .frame(
@@ -847,6 +1075,7 @@ fn draw_settings(ui: &mut Ui, st: &mut AppState) {
                     .id_salt(id)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        let claimed = claim(ui.ctx(), st, Region::Content);
                         match (st.section, st.sub) {
                             (Section::Photos, Sub::Albums) => albums_page(ui, st),
                             (Section::Photos, Sub::Hidden) => hidden_page(ui, st),
@@ -857,6 +1086,7 @@ fn draw_settings(ui: &mut Ui, st: &mut AppState) {
                             (Section::Sleep, _) => sleep_page(ui, st),
                             (Section::Server, _) => server_page(ui, st),
                         }
+                        claimed_by(ui.ctx(), st, claimed);
                         ui.add_space(space::XXL);
                     });
             });
@@ -870,7 +1100,27 @@ fn draw_settings(ui: &mut Ui, st: &mut AppState) {
             st.keyboard = keyboard();
         }
     }
+    let claimed = claim(ui.ctx(), st, Region::Dialog);
     dialogs(ui.ctx(), st);
+    claimed_by(ui.ctx(), st, claimed);
+}
+
+/// Puts the pending claim on the part about to draw, if it's `region`'s.
+fn claim(ctx: &egui::Context, st: &AppState, region: Region) -> bool {
+    let mine = st.claim == Some(Want::First(region));
+    if mine {
+        kit::claim_focus(ctx);
+    }
+    mine
+}
+
+/// After the part drew: a claim it put out and a control took is done. A
+/// part that put out none leaves the claim alone (a claim back to a page's
+/// row outlives the nav pane drawn before it).
+fn claimed_by(ctx: &egui::Context, st: &mut AppState, claimed: bool) {
+    if claimed && !kit::drop_claim(ctx) {
+        st.claim = None;
+    }
 }
 
 /// A group of components on the content edge (400), as the gallery's

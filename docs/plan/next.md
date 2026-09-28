@@ -11,9 +11,13 @@ this directory when work on it starts.
 - Photos larger than the GPU's `GL_MAX_TEXTURE_SIZE`. A first-generation
   Pi's is 2048, and Immich's previews (short side 1440) of 3:2 and 16:9
   photos are 2160 to 2560 px long; nothing decodes them smaller yet.
-- The desktop host has no sleep schedule or screen power yet, and no
-  physical keyboard input. `--fullscreen` hides the pointer, so a mouse
-  on a Linux frame has no cursor to aim with.
+- The desktop host has no sleep schedule or screen power yet.
+  `--fullscreen` hides the pointer, so a mouse on a Linux frame has no
+  cursor to aim with.
+- The Android host reads no keys yet: a remote's D-pad or a USB
+  keyboard on a frame, with the volume and system keys left to Android.
+- Keys can't pick a collage's tile: a menu opened by key picks the
+  first photo for Hide and Fill/Fit.
 - A steady-state memory reading on the frame, stills only, against the
   budget in [ARCHITECTURE.md](../ARCHITECTURE.md#memory-budget).
 

@@ -33,6 +33,10 @@ group in):
 LIBSEAT_BACKEND=seatd cage -- raam --fullscreen --photos DIR
 ```
 
+A USB keyboard drives it with no touchscreen: ← and → go back and on,
+any other key opens the menu, and the arrows, Enter and Escape find
+their way through the settings ([UX.md](UX.md#keys)).
+
 A first-generation Pi or a Pi Zero is ARMv6: Rust's
 `arm-unknown-linux-gnueabihf` target, with a linker and C compiler
 aimed at ARMv6 (for ring and SQLite). Debian's armhf cross toolchain

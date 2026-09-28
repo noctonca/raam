@@ -58,6 +58,8 @@
     background: #000; touch-action: none; user-select: none; -webkit-user-select: none;
     cursor: pointer;
   }
+  canvas:focus { outline: none; }
+  canvas:focus-visible { outline: 2px solid var(--muted); outline-offset: 2px; }
   .status { color: var(--muted); font-size: 0.85rem; margin-top: 10px; min-height: 1.3em; }
   .status.err { color: var(--err); }
   details { margin-top: 28px; border-top: 1px solid var(--line); padding-top: 14px; color: var(--muted); font-size: 0.9rem; }
@@ -81,7 +83,7 @@
     <span class="hint" id="hint"></span>
   </div>
 
-  <div class="device"><canvas id="frame" width="1280" height="800" aria-label="Photo frame screen"></canvas></div>
+  <div class="device"><canvas id="frame" width="1280" height="800" tabindex="0" aria-label="Photo frame screen"></canvas></div>
   <div class="status" id="status" role="status">Loading…</div>
 
   <details>
@@ -98,7 +100,7 @@
     if (a.dataset.mode === mode) a.setAttribute("aria-current", "page");
   }
   document.getElementById("hint").textContent = mode === "live"
-    ? "Tap the photo for the menu. Settings are kept until you leave the page."
+    ? "Tap the photo for the menu, or press a key: ← and → go back and on, any other opens the menu. Settings are kept until you leave the page."
     : "The frame's component kit, in both themes.";
   const canvas = document.getElementById("frame");
   const status = document.getElementById("status");

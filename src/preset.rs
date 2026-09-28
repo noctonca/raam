@@ -2,8 +2,9 @@
 //! screen by name, drawn by the core's own GLES2 painter over a stand-in
 //! for the slideshow (backdrop.rs), so theme, kit and screen changes are
 //! iterated and QA'd on the desktop before the frame. Input is egui's own
-//! from winit, plus the scripted taps, holds and scroll of the flags in
-//! main.rs, and `--screenshot` saves once egui is idle.
+//! from winit (all but the host's F1, F2 and F12), plus the scripted taps,
+//! keys, holds and scroll of the flags in main.rs, and `--screenshot`
+//! saves once egui is idle.
 //!
 //! A shot run (`--screenshot`, `--hash`) is hermetic: egui's clock is the
 //! pass count, passes run back to back, and nothing from the machine
@@ -63,6 +64,9 @@ pub struct Preset {
     tap_idx: usize,
     /// --hold: when the touch lifts, on `now`'s clock.
     release_at: Option<Duration>,
+    /// --key: the next of `args.keys` goes in this pass.
+    key_due: bool,
+    key_idx: usize,
     fps_frames: u32,
     fps_start: Instant,
 }
@@ -124,6 +128,8 @@ impl Preset {
             tap_step: 0,
             tap_idx: 0,
             release_at: None,
+            key_due: false,
+            key_idx: 0,
             fps_frames: 0,
             fps_start: Instant::now(),
         }
@@ -315,6 +321,23 @@ impl Preset {
                 _ => {}
             }
         }
+        // --key, once the taps are done and egui is idle.
+        if std::mem::take(&mut self.key_due)
+            && let Some(&key) = self.args.keys.get(self.key_idx)
+        {
+            log::info!("key {key:?}");
+            for pressed in [true, false] {
+                raw.events.push(egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            self.key_idx += 1;
+            self.next_run = Some(Instant::now());
+        }
         let mut reqs = Vec::new();
         let (g, info, frame) = (&mut self.gallery, &self.info, &mut self.frame);
         let mut out = self.ctx.run_ui(raw, |ui| match frame.as_mut() {
@@ -422,6 +445,9 @@ impl Preset {
                 // The next tap, now that the last one has played out.
                 self.tap_idx += 1;
                 self.tap_step = 1;
+                self.next_run = Some(Instant::now());
+            } else if self.key_idx < self.args.keys.len() {
+                self.key_due = true;
                 self.next_run = Some(Instant::now());
             } else if self.shot_pending {
                 // Once: a pass already queued still runs after exit().
@@ -559,17 +585,22 @@ impl ApplicationHandler for Preset {
                 // A window moved to another display: keep --exact exact.
                 self.ctx.set_zoom_factor(self.zoom(self.ppp));
             }
+            // The host's own keys, pressed or let go, never reach egui.
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
-                        state: ElementState::Pressed,
-                        logical_key,
-                        repeat: false,
+                        state,
+                        logical_key:
+                            Key::Named(named @ (NamedKey::F1 | NamedKey::F2 | NamedKey::F12)),
+                        repeat,
                         ..
                     },
                 ..
-            } if !self.hermetic => {
-                self.key(&logical_key.clone());
+            } => {
+                if !self.hermetic && *state == ElementState::Pressed && !*repeat {
+                    self.key(&Key::Named(*named));
+                }
+                return;
             }
             _ => {}
         }

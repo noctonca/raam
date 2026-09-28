@@ -13,11 +13,13 @@
 //! `--exact` makes it for the presets. With `--fullscreen` it is the whole
 //! monitor, as on a Linux frame. The mouse is a finger: a press, a drag
 //! and a release are one touch, fed as the Android host feeds one. A
-//! touchscreen's first finger is fed the same way.
+//! touchscreen's first finger is fed the same way. A keyboard's keys go to
+//! the controller in egui's terms, egui-winit translating them, all but
+//! the host's own F5 and F12.
 use crate::platform::{self, EnvSwitches};
 use crate::{Args, Gl, Step, save_png};
 use glutin::surface::GlSurface;
-use raam_core::app::{App, Deps, Event, Inputs, Overrides, Stage, Touch};
+use raam_core::app::{App, Deps, Event, Inputs, KeyEvent as FrameKey, Overrides, Stage, Touch};
 use raam_core::frame_ui::AppState;
 use raam_core::gl::glDisableVertexAttribArray;
 use raam_core::overlay::ClockOverlay;
@@ -103,6 +105,8 @@ struct Running {
     fetch: Arc<fetch::FetchShared>,
     weather: Arc<weather::WeatherShared>,
     screen: (i32, i32),
+    /// Only its keyboard translation is used: winit's keys in egui's terms.
+    keys: egui_winit::State,
 }
 
 pub struct Live {
@@ -335,6 +339,14 @@ impl Live {
             pipeline.set_overrides(o);
         }
         log::info!("pipeline + painter ready, {w}x{h}");
+        let keys = egui_winit::State::new(
+            self.controller.ctx.clone(),
+            egui::ViewportId::ROOT,
+            &gl.window,
+            Some(gl.window.scale_factor() as f32),
+            None,
+            None,
+        );
         self.run = Some(Running {
             gl,
             pipeline,
@@ -343,6 +355,7 @@ impl Live {
             fetch,
             weather,
             screen: (w, h),
+            keys,
         });
         self.next_run = Some(Instant::now());
         Ok(())
@@ -464,6 +477,23 @@ impl Live {
                 self.switches.set(&name, &value);
             }
             Step::Wait(d) => next += d,
+            Step::Key(key) => {
+                log::info!("script: key {key:?}");
+                for pressed in [true, false] {
+                    self.events.push(Event::Key(FrameKey {
+                        key,
+                        pressed,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }));
+                }
+                self.next_run = Some(now);
+            }
+            Step::Text(text) => {
+                log::info!("script: type {} characters", text.chars().count());
+                self.events.push(Event::Text(text));
+                self.next_run = Some(now);
+            }
         }
         self.script_step += 1;
         self.script_at = Some(now + next);
@@ -575,17 +605,74 @@ impl Live {
         }
     }
 
-    fn key(&mut self, key: &Key) {
+    /// A key or modifier change for the controller, translated by
+    /// egui-winit. Before the window is up there is nothing to route to.
+    fn keyboard(&mut self, event: &WindowEvent) {
+        let Some(run) = self.run.as_mut() else {
+            return;
+        };
+        // What winit makes up for keys held as the window gains the focus.
+        if matches!(
+            event,
+            WindowEvent::KeyboardInput {
+                is_synthetic: true,
+                ..
+            }
+        ) {
+            return;
+        }
+        let repeat = matches!(
+            event,
+            WindowEvent::KeyboardInput {
+                event: KeyEvent { repeat: true, .. },
+                ..
+            }
+        );
+        let _ = run.keys.on_window_event(&run.gl.window, event);
+        let translated = std::mem::take(&mut run.keys.egui_input_mut().events);
+        for e in translated {
+            match e {
+                egui::Event::Key {
+                    key,
+                    pressed,
+                    modifiers,
+                    ..
+                } => self.events.push(Event::Key(FrameKey {
+                    key,
+                    pressed,
+                    repeat,
+                    modifiers,
+                })),
+                egui::Event::Text(t) => self.events.push(Event::Text(t)),
+                // No clipboard here, and nothing else is a key.
+                _ => {}
+            }
+        }
+        self.next_run = Some(Instant::now());
+    }
+
+    /// The host's own keys, pressed or let go: they never reach the frame.
+    fn host_key(&mut self, event: &KeyEvent) -> bool {
+        let Key::Named(named @ (NamedKey::F5 | NamedKey::F12)) = &event.logical_key else {
+            return false;
+        };
+        if event.state == ElementState::Pressed && !event.repeat {
+            self.key(named);
+        }
+        true
+    }
+
+    fn key(&mut self, key: &NamedKey) {
         match key {
             // The GPU-failure injection, on and off without a restart.
-            Key::Named(NamedKey::F5) => {
+            NamedKey::F5 => {
                 let on = self.switches.get("debug.video.fail") != "rt";
                 self.switches
                     .set("debug.video.fail", if on { "rt" } else { "" });
                 log::info!("debug.video.fail {}", if on { "rt" } else { "cleared" });
                 self.next_run = Some(Instant::now());
             }
-            Key::Named(NamedKey::F12) => {
+            NamedKey::F12 => {
                 let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shots");
                 let _ = std::fs::create_dir_all(&dir);
                 let secs = clock::wall().as_secs();
@@ -653,16 +740,10 @@ impl ApplicationHandler<Wake> for Live {
                     .push(if hidden { Event::Pause } else { Event::Resume });
                 self.next_run = Some(Instant::now());
             }
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ElementState::Pressed,
-                        logical_key,
-                        repeat: false,
-                        ..
-                    },
-                ..
-            } => self.key(&logical_key),
+            WindowEvent::KeyboardInput { ref event, .. } if self.host_key(event) => {}
+            WindowEvent::KeyboardInput { .. } | WindowEvent::ModifiersChanged(_) => {
+                self.keyboard(&event)
+            }
             _ => {}
         }
     }

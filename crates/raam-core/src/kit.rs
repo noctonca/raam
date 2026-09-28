@@ -17,12 +17,15 @@ use egui::{
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 
-/// The state layer for a response: pressed beats hovered. With touch input
-/// egui only sees a hover while the finger is down (the host sends
-/// `PointerGone` on lift), so nothing stays highlighted after a tap.
+/// The state layer for a response: pressed beats focused beats hovered.
+/// With touch input egui only sees a hover while the finger is down (the
+/// host sends `PointerGone` on lift), so nothing stays highlighted after a
+/// tap; only keys give focus (UX.md, Keys).
 fn state_opacity(resp: &Response) -> f32 {
     if resp.is_pointer_button_down_on() {
         state::PRESSED
+    } else if resp.has_focus() {
+        state::FOCUS
     } else if resp.hovered() {
         state::HOVER
     } else {
@@ -52,6 +55,166 @@ fn icon_font(px: f32, filled: bool) -> FontId {
             theme::ICONS.clone()
         },
     )
+}
+
+// ---------------------------------------------------------------------------
+// Focus, for a physical keyboard (UX.md, Keys).
+// ---------------------------------------------------------------------------
+
+/// The focus ring's width, and its gap outside the control.
+const RING: f32 = 3.0;
+const RING_GAP: f32 = 2.0;
+
+fn claim_id() -> Id {
+    Id::new("kit.claim_focus")
+}
+
+/// Who a pending claim is for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Claim {
+    /// The next control drawn that can be a screen's first focus.
+    First,
+    /// This control, which had the focus before.
+    On(Id),
+}
+
+/// Hands the focus to the next control drawn that can be a screen's first
+/// focus: a screen that opened by key calls this just before drawing the
+/// part that should take it, and `drop_claim` after that part.
+pub fn claim_focus(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.insert_temp(claim_id(), Claim::First));
+}
+
+/// Hands the focus back to the control `id` as it draws. Taken even in the
+/// pass after a dialog closes, when egui still keeps the focus from what
+/// was under it.
+pub fn claim_focus_on(ctx: &egui::Context, id: Id) {
+    ctx.data_mut(|d| d.insert_temp(claim_id(), Claim::On(id)));
+}
+
+/// Ends a claim; true if nothing took it (the part was all disabled, or
+/// drawn unseen to size it, or the control has gone).
+pub fn drop_claim(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|d| {
+        let pending = d.get_temp::<Claim>(claim_id()).is_some();
+        d.remove::<Claim>(claim_id());
+        pending
+    })
+}
+
+/// The controls of the dialog being drawn, in order, while one is.
+fn dialog_order_id() -> Id {
+    Id::new("kit.dialog_order")
+}
+
+/// The focused control that takes ← and → itself (a slider).
+fn own_arrows_id() -> Id {
+    Id::new("kit.own_arrows")
+}
+
+/// Every control that can have the focus calls this as it draws. It takes
+/// a pending claim that's for it (one for its id, or, if `first`, one for
+/// a screen's first focus), and in a dialog it joins the dialog's order
+/// for the arrows (`step_focus`).
+fn focusable(ui: &Ui, resp: &Response, first: bool) {
+    if !(resp.enabled() && resp.sense.is_focusable()) {
+        return;
+    }
+    let ctx = ui.ctx();
+    if ctx.data(|d| d.get_temp::<Vec<Id>>(dialog_order_id()).is_some()) {
+        ctx.data_mut(|d| {
+            d.get_temp_mut_or_default::<Vec<Id>>(dialog_order_id())
+                .push(resp.id)
+        });
+        // egui's own arrow search would find the page under the dialog.
+        ctx.memory_mut(|m| {
+            m.set_focus_lock_filter(
+                resp.id,
+                egui::EventFilter {
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    ..Default::default()
+                },
+            )
+        });
+    }
+    let take = match ctx.data(|d| d.get_temp::<Claim>(claim_id())) {
+        Some(Claim::First) => first,
+        Some(Claim::On(id)) => id == resp.id,
+        None => false,
+    };
+    if take {
+        ctx.data_mut(|d| d.remove::<Claim>(claim_id()));
+        resp.request_focus();
+    }
+}
+
+/// The focus ring round `shape`, 2 px outside it, while the control has the
+/// focus; a control that gains it scrolls into view.
+fn focus_ring(ui: &Ui, resp: &Response, shape: Rect, corner: CornerRadius) {
+    if !resp.has_focus() {
+        return;
+    }
+    if resp.gained_focus() {
+        resp.scroll_to_me(None);
+    }
+    let s = scheme(ui);
+    let grow = |r: u8| r.saturating_add(RING_GAP as u8);
+    let corner = CornerRadius {
+        nw: grow(corner.nw),
+        ne: grow(corner.ne),
+        sw: grow(corner.sw),
+        se: grow(corner.se),
+    };
+    ring_painter(ui).rect_stroke(
+        shape.expand(RING_GAP),
+        corner,
+        Stroke::new(RING, s.secondary),
+        StrokeKind::Outside,
+    );
+}
+
+/// A painter whose clip lets a ring outside a control reach past the part
+/// that draws it (the nav pane's top edge clipped the first item's). Grown
+/// by only the ring's own reach.
+fn ring_painter(ui: &Ui) -> Painter {
+    let mut p = ui.painter().clone();
+    p.set_clip_rect(ui.clip_rect().expand(RING_GAP + RING));
+    p
+}
+
+/// The focus ring round a circle of `radius`.
+fn focus_ring_circle(ui: &Ui, resp: &Response, centre: egui::Pos2, radius: f32) {
+    if !resp.has_focus() {
+        return;
+    }
+    if resp.gained_focus() {
+        resp.scroll_to_me(None);
+    }
+    let s = scheme(ui);
+    ring_painter(ui).circle_stroke(
+        centre,
+        radius + RING_GAP + RING / 2.0,
+        Stroke::new(RING, s.secondary),
+    );
+}
+
+/// The focus ring just inside `shape`, for a control that spans its pane
+/// (a list row, a picker's option), where the pane would clip it outside.
+fn focus_ring_inside(ui: &Ui, resp: &Response, shape: Rect, corner: CornerRadius) {
+    if !resp.has_focus() {
+        return;
+    }
+    if resp.gained_focus() {
+        resp.scroll_to_me(None);
+    }
+    let s = scheme(ui);
+    ui.painter().rect_stroke(
+        shape,
+        corner,
+        Stroke::new(RING, s.secondary),
+        StrokeKind::Inside,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +483,7 @@ pub fn button(ui: &mut Ui, kind: ButtonKind, icon: Option<char>, label: &str) ->
     };
     let w = (lead + icon_w + galley.size().x + trail).max(size::TOUCH);
     let (rect, resp) = ui.allocate_exact_size(vec2(w, size::BUTTON_H), Sense::click());
+    focusable(ui, &resp, false);
     mark_visual(ui, rect, rect.y_range());
     if ui.is_rect_visible(rect) {
         let (mut container, mut content, mut outline) = match kind {
@@ -363,6 +527,7 @@ pub fn button(ui: &mut Ui, kind: ButtonKind, icon: Option<char>, label: &str) ->
             x += icon_w;
         }
         galley_on(p, x, Align::Min, cy, galley, content);
+        focus_ring(ui, &resp, rect, CornerRadius::same(shape::FULL));
     }
     resp
 }
@@ -371,6 +536,7 @@ pub fn button(ui: &mut Ui, kind: ButtonKind, icon: Option<char>, label: &str) ->
 pub fn icon_button(ui: &mut Ui, icon: char, selected: bool) -> Response {
     let s = scheme(ui);
     let (rect, resp) = ui.allocate_exact_size(vec2(size::TOUCH, size::TOUCH), Sense::click());
+    focusable(ui, &resp, false);
     mark_visual(ui, rect, icon_ink(rect.center().y, size::ICON));
     if ui.is_rect_visible(rect) {
         let content = if selected {
@@ -390,6 +556,7 @@ pub fn icon_button(ui: &mut Ui, icon: char, selected: bool) -> Response {
             icon_font(size::ICON, selected),
             content,
         );
+        focus_ring_circle(ui, &resp, rect.center(), 20.0);
     }
     resp
 }
@@ -459,6 +626,7 @@ pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
         rect,
         Rangef::point(rect.center().y).expand(SWITCH.y / 2.0),
     );
+    focusable(ui, &resp, true);
     if resp.clicked() {
         *on = !*on;
         resp.mark_changed();
@@ -468,6 +636,8 @@ pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
         .animate_bool_with_time(resp.id, *on, theme::motion::SHORT);
     if ui.is_rect_visible(rect) {
         paint_switch(ui, rect, t, &resp);
+        let track = Rect::from_center_size(rect.center(), SWITCH);
+        focus_ring(ui, &resp, track, CornerRadius::same(shape::FULL));
     }
     resp
 }
@@ -495,6 +665,7 @@ pub fn checkbox(ui: &mut Ui, checked: &mut bool, label: &str) -> Response {
     mark_visual(ui, rect, Rangef::point(rect.center().y).expand(BOX / 2.0));
     let target = rect.with_min_x(rect.left() - inset);
     let mut resp = ui.interact(target, alloc.id.with("target"), Sense::click());
+    focusable(ui, &resp, true);
     if resp.clicked() {
         *checked = !*checked;
         resp.mark_changed();
@@ -524,6 +695,7 @@ pub fn checkbox(ui: &mut Ui, checked: &mut bool, label: &str) -> Response {
             s.on_surface,
         );
     }
+    focus_ring_circle(ui, &resp, c, 20.0);
     resp
 }
 
@@ -603,6 +775,27 @@ pub fn slider(
         },
     );
     let mut resp = ui.interact(rect, alloc.id.with("band"), Sense::click_and_drag());
+    focusable(ui, &resp, true);
+    // While it has the focus, ← and → change the value rather than move
+    // the focus (UX.md, Keys). In a dialog, `focusable` has locked both.
+    if resp.has_focus() {
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(own_arrows_id(), resp.id));
+        if ui
+            .ctx()
+            .data(|d| d.get_temp::<Vec<Id>>(dialog_order_id()).is_none())
+        {
+            ui.memory_mut(|m| {
+                m.set_focus_lock_filter(
+                    resp.id,
+                    egui::EventFilter {
+                        horizontal_arrows: true,
+                        ..Default::default()
+                    },
+                )
+            });
+        }
+    }
     // The handle's centre travels between these: inset by half the track,
     // so the end values sit on the dots in the pills' rounded ends.
     let x0 = rect.left() + TRACK / 2.0;
@@ -617,9 +810,18 @@ pub fn slider(
         *value = snap(lo + t * (hi - lo));
     }
     if resp.has_focus() {
-        let d = ui.input(|i| {
-            i.num_presses(Key::ArrowRight) as f32 - i.num_presses(Key::ArrowLeft) as f32
+        let (r, l) = ui.input(|i| {
+            (
+                i.num_presses(Key::ArrowRight),
+                i.num_presses(Key::ArrowLeft),
+            )
         });
+        if r + l > 0 {
+            // Its own, not a focus step too (the lock holds only from its
+            // second pass with the focus).
+            ui.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+        }
+        let d = r as f32 - l as f32;
         if d != 0.0 {
             *value = snap(*value + d * step.unwrap_or((hi - lo) / 100.0));
         }
@@ -719,11 +921,9 @@ pub fn slider(
     }
     // The handle narrows while held, as in M3.
     let hw = if held { 2.0 } else { HANDLE.x };
-    p.rect_filled(
-        Rect::from_center_size(pos2(hx, cy), vec2(hw, HANDLE.y)),
-        CornerRadius::same(2),
-        s.primary,
-    );
+    let handle = Rect::from_center_size(pos2(hx, cy), vec2(hw, HANDLE.y));
+    p.rect_filled(handle, CornerRadius::same(2), s.primary);
+    focus_ring(ui, &resp, handle, CornerRadius::same(2));
     if held {
         // Above everything, so neither the card nor a scroll area clips it.
         let fg = ui
@@ -1085,6 +1285,7 @@ pub fn list_item(ui: &mut Ui, mut item: ListItem<'_>) -> Response {
         Sense::hover()
     };
     let (rect, mut resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), sense);
+    focusable(ui, &resp, true);
     let switch_t = if let Trailing::Switch(on) = &mut item.trailing {
         if resp.clicked() {
             **on = !**on;
@@ -1211,6 +1412,7 @@ pub fn list_item(ui: &mut Ui, mut item: ListItem<'_>) -> Response {
                 pos2(right + space::M, cy + size::TOUCH / 2.0),
             );
             let b = ui.interact(r, resp.id.with("button"), Sense::click());
+            focusable(ui, &b, true);
             if b.clicked() {
                 resp.mark_changed();
             }
@@ -1220,6 +1422,7 @@ pub fn list_item(ui: &mut Ui, mut item: ListItem<'_>) -> Response {
                 with_state(Color32::TRANSPARENT, content, &b),
             );
             galley_on(&p, r.left() + space::M, Align::Min, cy, g, content);
+            focus_ring(ui, &b, r, CornerRadius::same(shape::FULL));
             right = r.left() + space::M - space::L;
         }
     }
@@ -1241,6 +1444,9 @@ pub fn list_item(ui: &mut Ui, mut item: ListItem<'_>) -> Response {
             let sup = one_line(ui, t, Type::BodyMedium, colour, wrap);
             galley_on(&p, x, Align::Min, block_top + hb + sb / 2.0, sup, colour);
         }
+    }
+    if row_target {
+        focus_ring_inside(ui, &resp, rect, CornerRadius::same(shape::M));
     }
     resp
 }
@@ -1364,6 +1570,7 @@ pub fn nav_item(ui: &mut Ui, icon: char, label: &str, selected: bool) -> Respons
     let s = scheme(ui);
     let (rect, resp) =
         ui.allocate_exact_size(vec2(ui.available_width(), size::LIST_ROW), Sense::click());
+    focusable(ui, &resp, selected);
     if ui.is_rect_visible(rect) {
         let (bg, content) = if selected {
             (s.secondary_container, s.on_secondary_container)
@@ -1395,6 +1602,7 @@ pub fn nav_item(ui: &mut Ui, icon: char, label: &str, selected: bool) -> Respons
             Type::LabelLarge,
             content,
         );
+        focus_ring(ui, &resp, rect, CornerRadius::same(shape::FULL));
     }
     resp
 }
@@ -1415,24 +1623,31 @@ pub fn segmented(ui: &mut Ui, selected: &mut usize, options: &[&str], seg_w: f32
     let mut changed = false;
     let p = ui.painter().clone();
     let cy = rect.center().y;
+    let full = shape::FULL;
+    let corner_of = |i: usize| CornerRadius {
+        nw: if i == 0 { full } else { 0 },
+        sw: if i == 0 { full } else { 0 },
+        ne: if i + 1 == n { full } else { 0 },
+        se: if i + 1 == n { full } else { 0 },
+    };
+    // Its ring goes on after the outline and the dividers, over them.
+    let mut focused = None;
     for (i, label) in options.iter().enumerate() {
         let r = Rect::from_min_size(
             pos2(rect.left() + seg_w * i as f32, rect.top()),
             vec2(seg_w, size::TOUCH),
         );
         let resp = ui.interact(r, whole.id.with(i), Sense::click());
+        focusable(ui, &resp, *selected == i);
+        if resp.has_focus() {
+            focused = Some((r, corner_of(i), resp.clone()));
+        }
         if resp.clicked() && *selected != i {
             *selected = i;
             changed = true;
         }
         let on = *selected == i;
-        let full = shape::FULL;
-        let corner = CornerRadius {
-            nw: if i == 0 { full } else { 0 },
-            sw: if i == 0 { full } else { 0 },
-            ne: if i + 1 == n { full } else { 0 },
-            se: if i + 1 == n { full } else { 0 },
-        };
+        let corner = corner_of(i);
         let (bg, content) = if on {
             (s.secondary_container, s.on_secondary_container)
         } else {
@@ -1471,6 +1686,9 @@ pub fn segmented(ui: &mut Ui, selected: &mut usize, options: &[&str], seg_w: f32
             s.outline,
         );
     }
+    if let Some((r, corner, resp)) = focused {
+        focus_ring(ui, &resp, r, corner);
+    }
     changed
 }
 
@@ -1485,6 +1703,7 @@ pub fn chip(ui: &mut Ui, label: &str, selected: bool) -> Response {
     let icon_w = if selected { 18.0 + space::S } else { 0.0 };
     let w = space::L + icon_w + g.size().x + space::L;
     let (rect, resp) = ui.allocate_exact_size(vec2(w, size::TOUCH), Sense::click());
+    focusable(ui, &resp, true);
     let chip = Rect::from_center_size(rect.center(), vec2(w, 32.0));
     mark_visual(ui, rect, chip.y_range());
     if ui.is_rect_visible(rect) {
@@ -1523,6 +1742,7 @@ pub fn chip(ui: &mut Ui, label: &str, selected: bool) -> Response {
             x += icon_w;
         }
         galley_on(p, x, Align::Min, cy, g, content);
+        focus_ring(ui, &resp, chip, CornerRadius::same(shape::S));
     }
     resp
 }
@@ -1631,6 +1851,7 @@ pub fn top_bar_nav(ui: &mut Ui, nav: char, title: &str, actions: impl FnOnce(&mu
         vec2(size::TOUCH, size::TOUCH),
     );
     let resp = ui.interact(target, ui.id().with("kit.top_bar_nav"), Sense::click());
+    focusable(ui, &resp, false);
     let p = ui.painter();
     p.circle_filled(
         target.center(),
@@ -1655,6 +1876,7 @@ pub fn top_bar_nav(ui: &mut Ui, nav: char, title: &str, actions: impl FnOnce(&mu
         Type::TitleLarge,
         s.on_surface,
     );
+    focus_ring_circle(ui, &resp, target.center(), 20.0);
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.add_space(space::S);
         actions(ui);
@@ -1781,6 +2003,7 @@ pub fn floating_toolbar(
                 Sense::hover()
             };
             let resp = ui.interact(r, Id::new(id).with(("item", i)), sense);
+            focusable(ui, &resp, true);
             if it.enabled && resp.clicked() {
                 hit = Some(i);
             }
@@ -1817,6 +2040,7 @@ pub fn floating_toolbar(
                 Type::LabelMedium,
                 content,
             );
+            focus_ring(ui, &resp, r, inner);
         }
     });
     hit
@@ -1834,6 +2058,7 @@ pub const TOOLBAR_ALPHA: f32 = 0.9;
 pub fn tonal_icon_button(ui: &mut Ui, icon: char) -> Response {
     let s = scheme(ui);
     let (rect, resp) = ui.allocate_exact_size(vec2(size::TOUCH, size::TOUCH), Sense::click());
+    focusable(ui, &resp, false);
     mark_visual(ui, rect, Rangef::point(rect.center().y).expand(20.0));
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
@@ -1860,6 +2085,7 @@ pub fn tonal_icon_button(ui: &mut Ui, icon: char) -> Response {
             icon_font(size::ICON, false),
             fg,
         );
+        focus_ring_circle(ui, &resp, rect.center(), 20.0);
     }
     resp
 }
@@ -1873,12 +2099,15 @@ pub enum DialogResult<T> {
 }
 
 /// A dialog's actions: text buttons, right-aligned, in reading order (the
-/// confirming one last, on the right). Returns the index tapped.
+/// confirming one last, on the right). Returns the index tapped. The first
+/// (Cancel) takes a claim, never the action it cancels (UX.md, Keys).
 pub fn dialog_actions(ui: &mut Ui, labels: &[&str]) -> Option<usize> {
     let mut hit = None;
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         for (i, l) in labels.iter().enumerate().rev() {
-            if button(ui, ButtonKind::Text, None, l).clicked() {
+            let resp = button(ui, ButtonKind::Text, None, l);
+            focusable(ui, &resp, i == 0);
+            if resp.clicked() {
                 hit = Some(i);
             }
         }
@@ -1894,13 +2123,16 @@ fn radio_row(ui: &mut Ui, label: &str, selected: bool) -> Response {
     let s = scheme(ui);
     let (rect, resp) =
         ui.allocate_exact_size(vec2(ui.available_width(), size::LIST_ROW), Sense::click());
+    focusable(ui, &resp, selected);
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
+        let layer = rect.expand2(vec2(space::XL, 0.0));
         p.rect_filled(
-            rect.expand2(vec2(space::XL, 0.0)),
+            layer,
             CornerRadius::ZERO,
             with_state(Color32::TRANSPARENT, s.on_surface, &resp),
         );
+        focus_ring_inside(ui, &resp, layer, CornerRadius::ZERO);
         let c = pos2(rect.left() + 10.0, rect.center().y);
         let ring = if selected {
             s.primary
@@ -2039,6 +2271,10 @@ pub fn dialog(
 ) -> bool {
     let mut keep = true;
     let s = scheme_of(ctx);
+    ctx.data_mut(|d| {
+        d.insert_temp(dialog_order_id(), Vec::<Id>::new());
+        d.remove::<Id>(own_arrows_id());
+    });
     let resp = egui::Modal::new(egui::Id::new(id))
         .backdrop_color(Color32::from_black_alpha(82))
         .frame(
@@ -2058,5 +2294,50 @@ pub fn dialog(
     if resp.should_close() {
         keep = false;
     }
+    let (order, own_arrows) = ctx.data_mut(|d| {
+        let order = d.get_temp::<Vec<Id>>(dialog_order_id()).unwrap_or_default();
+        d.remove::<Vec<Id>>(dialog_order_id());
+        (order, d.get_temp::<Id>(own_arrows_id()))
+    });
+    step_focus(ctx, &order, own_arrows);
     keep
+}
+
+/// The arrows in a dialog step the focus through its controls in the order
+/// they're drawn, stopping at the ends: ↓ and → on, ↑ and ← back. A slider
+/// keeps ← and → for its value.
+fn step_focus(ctx: &egui::Context, order: &[Id], own_arrows: Option<Id>) {
+    let Some(focused) = ctx.memory(|m| m.focused()) else {
+        return;
+    };
+    let Some(i) = order.iter().position(|&id| id == focused) else {
+        return;
+    };
+    let (step, any) = ctx.input(|inp| {
+        let n = |k| inp.num_presses(k) as i32;
+        let horizontal = if own_arrows == Some(focused) {
+            0
+        } else {
+            n(Key::ArrowRight) - n(Key::ArrowLeft)
+        };
+        let any = [
+            Key::ArrowUp,
+            Key::ArrowDown,
+            Key::ArrowLeft,
+            Key::ArrowRight,
+        ]
+        .iter()
+        .any(|k| n(*k) > 0);
+        (n(Key::ArrowDown) - n(Key::ArrowUp) + horizontal, any)
+    });
+    if !any {
+        return;
+    }
+    // The arrow lock only holds from a control's second pass with the
+    // focus: egui mustn't take a step of its own as well.
+    ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+    let j = (i as i32 + step).clamp(0, order.len() as i32 - 1) as usize;
+    if j != i {
+        ctx.memory_mut(|m| m.request_focus(order[j]));
+    }
 }

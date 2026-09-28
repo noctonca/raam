@@ -46,6 +46,9 @@ pub struct Keyboard {
     /// LOCAL ADDITION: Done was tapped this frame, so the focus must not be
     /// handed back to the field.
     done: bool,
+    /// LOCAL ADDITION: a physical keyboard is in use, so this one stays
+    /// away even while a field has the focus.
+    away: bool,
 }
 
 /// LOCAL ADDITION: the keycaps' colours and corner.
@@ -122,6 +125,13 @@ impl Keyboard {
     pub fn layout(mut self, layout: KeyboardLayout) -> Self {
         self.keyboard_layout = layout;
         self
+    }
+
+    /// LOCAL ADDITION: keep the keyboard away (a physical keyboard is being
+    /// typed on) or let it show again when a field has the focus. Set it
+    /// before `show`, each frame.
+    pub fn set_away(&mut self, away: bool) {
+        self.away = away;
     }
 
     /// LOCAL ADDITION: the exact rect the keyboard last rendered at, for
@@ -227,8 +237,11 @@ impl Keyboard {
     }
 
     /// Remember which widget had focus before the keyboard was shown.
+    /// LOCAL CHANGE: a text edit's focus, not any widget's (upstream's
+    /// `egui_wants_keyboard_input`): with a physical keyboard, a button can
+    /// have the focus too.
     fn remember_input_widget(&mut self, ctx: &Context) {
-        if ctx.egui_wants_keyboard_input() {
+        if ctx.text_edit_focused() {
             self.input_widget = ctx.memory(|memory| memory.focused());
         }
     }
@@ -296,7 +309,9 @@ impl Keyboard {
             for (i, (x0, x1, cap)) in cells.into_iter().enumerate() {
                 let (x0, x1) = (area.left() + x0, area.left() + x1);
                 let hit = Rect::from_min_max(pos2(x0, hit_top), pos2(x1, hit_bottom));
-                let resp = ui.interact(hit, ui.id().with(("key", r, i)), Sense::click());
+                // LOCAL CHANGE: clickable but not focusable, so Tab from a
+                // physical keyboard never lands on a keycap.
+                let resp = ui.interact(hit, ui.id().with(("key", r, i)), Sense::CLICK);
                 let keycap =
                     Rect::from_min_max(pos2(x0, top), pos2(x1, top + ROW_H)).shrink(KEY_GAP / 2.0);
                 let function = matches!(cap, Cap::Upper | Cap::Backspace | Cap::Done);
@@ -391,7 +406,11 @@ impl Keyboard {
     /// genuinely needs to force a wakeup each frame so the counter advances
     /// instead of stalling until unrelated input arrives.
     fn keyboard_input_needed(&mut self, ctx: &Context) -> bool {
-        if ctx.egui_wants_keyboard_input() {
+        if self.away {
+            // LOCAL ADDITION: gone at once, with no hysteresis to run out.
+            self.needed = 0;
+            false
+        } else if ctx.text_edit_focused() {
             self.needed = 20;
             true
         } else {

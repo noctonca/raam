@@ -84,7 +84,7 @@ forever.
   backoff and the wedged-decoder watch — plus the OES program that
   draws a decoded frame.
 - **The App controller** — the product's behaviour, shared by every
-  host: input routing (tap-slop, menu
+  host: input routing (tap-slop, a physical keyboard's keys, menu
   open/close, auto-dismiss, undo-hide), the sleep/wake state machine,
   settings dirty/debounce, and the computation of the next wake
   deadline.
@@ -126,8 +126,8 @@ condvars/channels, not sleep-polling.
 | Host | Keeps |
 |---|---|
 | `hosts/android` (the product) | NativeActivity, EGL, input events, the decoders behind `VideoPlayer` (MediaCodec onto a SurfaceTexture, OpenSL audio and its A/V alignment, the process-wide decoder count, the reaper thread), power (wake alarm, wake lock, screen off), root helpers, storage paths |
-| `raam` at the root (desktop/Linux) | winit/glutin window, or the whole monitor with `--fullscreen` (a Linux frame); the mouse and a touchscreen's first finger as a finger; the engine's paths (the app-data dir, a photos folder), `NoVideo` and a probe that says so, env-var debug switches (`RAAM_DEBUG_VIDEO_FAIL=rt`); `--page` is the preset host with the screenshot tooling (`--exact` goldens). Runs under X11 and Wayland. The window asks for desktop GL 3.2; built with the `gles` feature, it asks for GLES 2.0 over EGL and links libGLESv2, for a GPU with no core profile (a Raspberry Pi's). That way it runs on a first-generation Raspberry Pi under a Wayland kiosk compositor (cage); a Pi 4 or 5 is untested. A bare KMS/DRM host is a possible later addition, not v1 |
-| `hosts/web` (the demo) | canvas + rAF loop, its own synchronous `TileSource` over bundled sample photos (the browser decodes them; faces come from a checked-in `faces.json`), `NoVideo`, URL-query debug switches; later, "try with Immich" against demo.immich.app (CORS-open) |
+| `raam` at the root (desktop/Linux) | winit/glutin window, or the whole monitor with `--fullscreen` (a Linux frame); the mouse and a touchscreen's first finger as a finger, and a keyboard's keys (egui-winit translates them); the engine's paths (the app-data dir, a photos folder), `NoVideo` and a probe that says so, env-var debug switches (`RAAM_DEBUG_VIDEO_FAIL=rt`); `--page` is the preset host with the screenshot tooling (`--exact` goldens). Runs under X11 and Wayland. The window asks for desktop GL 3.2; built with the `gles` feature, it asks for GLES 2.0 over EGL and links libGLESv2, for a GPU with no core profile (a Raspberry Pi's). That way it runs on a first-generation Raspberry Pi under a Wayland kiosk compositor (cage); a Pi 4 or 5 is untested. A bare KMS/DRM host is a possible later addition, not v1 |
+| `hosts/web` (the demo) | canvas + rAF loop, pointer events as a finger and key events while the canvas has the focus, its own synchronous `TileSource` over bundled sample photos (the browser decodes them; faces come from a checked-in `faces.json`), `NoVideo`, URL-query debug switches; later, "try with Immich" against demo.immich.app (CORS-open) |
 
 ## The seams
 
@@ -335,7 +335,7 @@ heavier crate, the replacement is a decision:
 | `android-activity`, `ndk`, `ndk-sys`, `jni` 0.21, `android_logger` (no defaults), `libc` | android | The platform glue; no regex logger filter. jni stays on 0.21 until its 0.22 API redesign is ported deliberately (it duplicates android-activity's 0.22, ~56 KB) |
 | `libc` | engine; raam (desktop) | `statvfs` (free space for the cache cap) and `mktime` (EXIF local times); the engine is native-only by design. The desktop's `localtime_r`, the Clock seam's local time, as the Android host does it |
 | OpenSL bindings, checked in | android | Pre-generated and pruned; no bindgen, no libclang at build time |
-| `winit`, `glutin`, `glutin-winit`, `egui-winit` (no `links`), `png` | raam (desktop) | The window host and the screenshot tool |
+| `winit`, `glutin`, `glutin-winit`, `egui-winit` (no `links`), `png` | raam (desktop) | The window host, its keys in egui's terms, and the screenshot tool |
 | `wasm-bindgen`, `js-sys`, `web-sys` | web; core on wasm32 only (the WebGL1 module) | Unavoidable wasm glue, and egui already brings all three on wasm32. The web host logs and reports panics to the console itself (about 20 lines), so no `console_log` or `console_error_panic_hook` |
 | Baked colour table (generator in `tools/`) | core | Replaces `material-colors` at runtime (−20 crates, −getrandom); a test asserts the table matches the derivation |
 

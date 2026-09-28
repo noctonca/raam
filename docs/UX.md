@@ -15,8 +15,10 @@ turned into rules for this device, not restated.
 
 - SNUG frame, 1280×800 at 160 dpi, so **1 px = 1 dp**. Every number here
   is in device pixels. The desktop host's `--exact` shows the same pixels.
-- Touch only: **no hover, no cursor, no keyboard** (egui_keyboard for text).
-  A hover state must never be the only sign of anything.
+- Touch first: **no hover, no cursor** (egui_keyboard for text). A hover
+  state must never be the only sign of anything. A Linux frame may have a
+  mouse, which is a finger, or a keyboard, which works as
+  [Keys](#keys) says.
 - Two viewing distances: the slideshow is glanced at from across a room.
   Settings are used at arm's length, standing up, usually rarely.
 - Mali-400: every covered pixel is still paid for. Opaque
@@ -219,7 +221,7 @@ there stops being read.
   It's placed at an explicit, measured position (`fixed_pos`). An
   anchored Area centres by last frame's size, and on the frame it stayed
   off centre after the items changed.
-- **Keyboard:**
+- **On-screen keyboard:**
   - visible keycaps with a 6 px gap between them;
   - letter keys in one tone, function keys (shift, backspace, Done) in a
     tinted one;
@@ -230,6 +232,40 @@ there stops being read.
   Each key's target covers its share of the gaps, and sits 8 px higher
   than its keycap. On this panel fingers land 15 to 25 px above the glyph
   aimed at (taps on backspace hit the row above).
+
+  It goes away once a physical key is pressed, and comes back with the
+  next touch.
+
+## Keys
+
+A physical keyboard does what a finger does, with the keys people know
+from photo viewers and dialogs (Jakob's Law).
+
+- **The slideshow** (the menu closed): ← and → go to the previous and
+  next photo at once. Any other key opens the menu, as a tap does, with
+  the first photo of a collage picked for Hide and Fill/Fit. Escape does
+  nothing there, so pressing it to get away never brings the menu back.
+- **The menu and settings:** the arrows and Tab (Shift-Tab back) move
+  the focus; Enter or Space acts on the focused control, as a tap does.
+  On a slider, ← and → change the value instead.
+- **Escape steps back one level:** out of a text field, then out of a
+  dialog (as Cancel), then out of a sub page, then from settings to the
+  menu, and last the menu closes.
+- **Where the focus goes:** opening the menu by key focuses its first
+  item that can act; settings, the selected section; a sub page, its
+  first control; a picker, the chosen option; a number dialog, its
+  slider; a confirmation, Cancel, never the action it confirms. Stepping
+  back returns the focus to the control that opened the level. A key
+  pressed while nothing has the focus (the menu was opened by a tap)
+  only brings the focus in.
+- **The focus ring** is M3's: 3 px of secondary, 2 px outside the
+  control's shape, over the 10% focus state layer. A control that spans
+  its pane (a list row, a picker's option) takes it just inside, where
+  the pane can't clip it. A text field shows focus with its own
+  indicator line instead. Only keys give focus: a tap never does, except
+  on a text field.
+- A key counts as a touch for the menu's auto-dismiss and for the sleep
+  schedule's idle time.
 
 ## Colour and text
 
@@ -254,6 +290,8 @@ both themes. Then on the frame for the items marked *frame*.
 6. No truncated labels; no text touching a container edge.
 7. Contrast per role, in both themes; disabled states distinguishable.
 8. Empty values show "—", never a blank or a fake zero.
-9. *frame*: colours and contrast on the real panel, in daylight.
-10. *frame*: text weight at 11 to 14 px with the shader boost.
-11. *frame*: targets hit by finger; press state appears on touch.
+9. With keys (`--key NAME`, repeatable): every control is reached by the
+   arrows and Tab, shows its focus ring whole, and scrolls into view.
+10. *frame*: colours and contrast on the real panel, in daylight.
+11. *frame*: text weight at 11 to 14 px with the shader boost.
+12. *frame*: targets hit by finger; press state appears on touch.

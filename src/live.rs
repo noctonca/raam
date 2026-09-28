@@ -142,6 +142,8 @@ pub struct Live {
     frames: u32,
     passes: u32,
     last_log: Duration,
+    /// The window or its GL couldn't start: the process exits non-zero.
+    failed: bool,
 }
 
 impl Live {
@@ -234,6 +236,7 @@ impl Live {
             frames: 0,
             passes: 0,
             last_log: now,
+            failed: false,
         })
     }
 
@@ -419,6 +422,11 @@ impl Live {
             force: 0.5,
         }));
         self.next_run = Some(Instant::now());
+    }
+
+    /// The start failed (no monitor, no GL context): `main` exits 1.
+    pub fn failed(&self) -> bool {
+        self.failed
     }
 
     /// Taps, switches or a screenshot were scripted.
@@ -691,6 +699,7 @@ impl ApplicationHandler<Wake> for Live {
             && let Err(e) = self.open(el)
         {
             log::error!("{e}");
+            self.failed = true;
             el.exit();
         }
     }
@@ -751,6 +760,7 @@ impl ApplicationHandler<Wake> for Live {
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         if let Err(e) = self.settle() {
             log::error!("{e}");
+            self.failed = true;
             el.exit();
             return;
         }

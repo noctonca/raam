@@ -116,6 +116,9 @@ pub const SYNC_EVERY: Duration = Duration::from_secs(1800);
 /// Sync retry cadence while offline — also how the queue comes back
 /// online. Chosen.
 pub const SYNC_RETRY: Duration = Duration::from_secs(60);
+/// Wi-Fi networks are scanned for again this often while their list is
+/// open. A scan takes about 11 s on a USB adapter (both bands). Chosen.
+pub const WIFI_RESCAN: Duration = Duration::from_secs(30);
 /// Local previews: the short side at least this, like Immich's 1440
 /// preview.
 pub const PREVIEW_SHORT_SIDE: u32 = 1440;

@@ -149,6 +149,8 @@ Every build needs Rust 1.95 or newer;
   build with `--features gles` (OpenGL ES 2.0 in place of OpenGL 3.2);
   that way it runs on a first-generation Pi, under a Wayland kiosk
   compositor ([docs/BUILDING.md](docs/BUILDING.md#a-raspberry-pi)).
+  On Linux, Settings → Connectivity sets up Wi-Fi through
+  wpa_supplicant ([docs/BUILDING.md](docs/BUILDING.md#wi-fi)).
 - **Web:** the [hosted demo](https://noctonca.github.io/raam/) is
   built from main. To build it yourself, run `hosts/web/build.sh`, then
   serve `hosts/web/www` (e.g.

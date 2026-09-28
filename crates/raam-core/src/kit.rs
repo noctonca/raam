@@ -963,6 +963,7 @@ pub struct TextField<'a> {
     icon: Option<char>,
     error: bool,
     password: bool,
+    reveal: Option<&'a mut bool>,
     width: Option<f32>,
 }
 
@@ -976,6 +977,7 @@ impl<'a> TextField<'a> {
             icon: None,
             error: false,
             password: false,
+            reveal: None,
             width: None,
         }
     }
@@ -1003,6 +1005,13 @@ impl<'a> TextField<'a> {
     }
     pub fn width(mut self, w: f32) -> Self {
         self.width = Some(w);
+        self
+    }
+    /// A password field's trailing eye: `shown` is whether the password
+    /// reads in the clear. The error icon gives way to it (the colour and
+    /// the supporting line still say error).
+    pub fn reveal(mut self, shown: &'a mut bool) -> Self {
+        self.reveal = Some(shown);
         self
     }
 
@@ -1039,7 +1048,7 @@ impl<'a> TextField<'a> {
         let had_focus = ui.memory(|m| m.has_focus(id));
 
         let left = space::L + self.icon.map_or(0.0, |_| size::ICON + space::M - space::XS);
-        let right = if self.error {
+        let right = if self.error || self.reveal.is_some() {
             space::M + size::ICON + space::L
         } else {
             space::L
@@ -1073,11 +1082,33 @@ impl<'a> TextField<'a> {
                 .font(Type::BodyLarge.font())
                 .text_color(s.on_surface)
                 .hint_text(theme::text(hint, Type::BodyLarge).color(s.on_surface_variant))
-                .password(self.password)
+                .password(self.password && !self.reveal.as_deref().is_some_and(|r| *r))
                 .desired_width(w)
                 .min_size(vec2(w, H))
                 .vertical_align(Align::Center),
         );
+        // A sub page's first control can be its field (the Join page's).
+        focusable(ui, &resp, true);
+        // Over the TextEdit, so it takes the tap. The field keeps the
+        // focus (and the on-screen keyboard stays) when it had it.
+        let eye = self.reveal.map(|shown| {
+            let r = Rect::from_center_size(
+                pos2(
+                    field.right() - space::M - size::ICON / 2.0,
+                    field.center().y,
+                ),
+                vec2(size::TOUCH, size::TOUCH),
+            );
+            let hit = ui.interact(r, id.with("reveal"), Sense::click());
+            focusable(ui, &hit, false);
+            if hit.clicked() {
+                *shown = !*shown;
+                if had_focus {
+                    ui.memory_mut(|m| m.request_focus(id));
+                }
+            }
+            (*shown, hit)
+        });
         let focused = resp.has_focus();
         if !ui.is_rect_visible(whole) {
             return resp;
@@ -1122,7 +1153,33 @@ impl<'a> TextField<'a> {
                 s.on_surface_variant,
             );
         }
-        if self.error {
+        if let Some((shown, hit)) = &eye {
+            // An icon button: the eye says what a tap does, show the
+            // password or hide it.
+            let centre = pos2(
+                field.right() - space::M - size::ICON / 2.0,
+                field.center().y,
+            );
+            p.circle_filled(
+                centre,
+                20.0,
+                with_state(Color32::TRANSPARENT, s.on_surface_variant, hit),
+            );
+            icon_on(
+                p,
+                centre.x,
+                Align::Center,
+                centre.y,
+                if *shown {
+                    icons::VISIBILITY_OFF
+                } else {
+                    icons::VISIBILITY
+                },
+                icon_font(size::ICON, false),
+                s.on_surface_variant,
+            );
+            focus_ring_circle(ui, hit, centre, 20.0);
+        } else if self.error {
             icon_on(
                 p,
                 field.right() - space::M,
@@ -1467,6 +1524,79 @@ pub fn page_title(ui: &mut Ui, title: &str, sub: &str) {
         Rangef::new(shown.min, ui.cursor().top()),
     );
     mark_visual(ui, block, shown);
+}
+
+/// A sub page's title: `page_title`'s text behind a back arrow, which goes
+/// up to the page that opened it (UX.md, Settings). The arrow is a list
+/// icon, on the content edge; the title and subtitle move to the text edge
+/// after it, so the page keeps the grid's columns. Its caps centre on the
+/// title's first line. The lines are laid out as `page_title`'s, so what
+/// follows sits where it would on a top-level page. The arrow never takes
+/// the page's first focus (its first control does, and Escape steps back
+/// by key). Returns the arrow's response.
+pub fn page_title_back(ui: &mut Ui, title: &str, sub: &str) -> Response {
+    // From the container edge: the content edge, then icon 24 + gap 16.
+    const ICON_AT: f32 = space::L;
+    const TEXT_AT: f32 = space::L + size::ICON + space::L;
+    let s = scheme(ui);
+    // One line of the page's text, `TEXT_AT` in: its rows, and its first
+    // and last baselines.
+    let line = |ui: &mut Ui, text: &str, ty: Type, colour: Color32| {
+        let galley = egui::WidgetText::from(theme::text(text, ty).color(colour)).into_galley(
+            ui,
+            Some(egui::TextWrapMode::Wrap),
+            ui.available_width() - TEXT_AT,
+            egui::TextStyle::Body,
+        );
+        let base = |r: &egui::epaint::text::PlacedRow| r.glyphs.first().map(|g| r.pos.y + g.pos.y);
+        let first = galley.rows.first().and_then(base);
+        let last = galley.rows.last().and_then(base);
+        let (rect, _) =
+            ui.allocate_exact_size(vec2(ui.available_width(), galley.size().y), Sense::hover());
+        ui.painter()
+            .galley(pos2(rect.left() + TEXT_AT, rect.top()), galley, colour);
+        (rect, first, last)
+    };
+    let (head, first, _) = line(ui, title, Type::HeadlineMedium, s.on_surface);
+    let (rect, sf, sl) = line(ui, sub, Type::BodyMedium, s.on_surface_variant);
+    let shown = match (sf, sl) {
+        (Some(f), Some(l)) => Rangef::new(
+            rect.top() + f - (Type::BodyMedium.spec().1 * ROBOTO_CAP).round(),
+            rect.top() + l,
+        ),
+        _ => rect.y_range(),
+    };
+    mark_visual(ui, rect, shown);
+    ui.add_space(space::L - ui.spacing().item_spacing.y);
+    let block = Rect::from_x_y_ranges(
+        ui.max_rect().x_range(),
+        Rangef::new(shown.min, ui.cursor().top()),
+    );
+    mark_visual(ui, block, shown);
+
+    let size = Type::HeadlineMedium.font().size;
+    let cy = head.top() + first.unwrap_or(size) - size * ROBOTO_CAP / 2.0;
+    let centre = pos2(head.left() + ICON_AT + size::ICON / 2.0, cy);
+    let target = Rect::from_center_size(centre, vec2(size::TOUCH, size::TOUCH));
+    let resp = ui.interact(target, ui.id().with("kit.page_back"), Sense::click());
+    focusable(ui, &resp, false);
+    let p = ui.painter();
+    p.circle_filled(
+        centre,
+        20.0,
+        with_state(Color32::TRANSPARENT, s.on_surface, &resp),
+    );
+    icon_on(
+        p,
+        centre.x,
+        Align::Center,
+        cy,
+        icons::ARROW_BACK,
+        icon_font(size::ICON, false),
+        s.on_surface,
+    );
+    focus_ring_circle(ui, &resp, centre, 20.0);
+    resp
 }
 
 /// Wrapped text as an egui label, marked from its first line's cap top to

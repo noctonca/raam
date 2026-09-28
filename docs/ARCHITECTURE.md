@@ -126,7 +126,7 @@ condvars/channels, not sleep-polling.
 | Host | Keeps |
 |---|---|
 | `hosts/android` (the product) | NativeActivity, EGL, input events, the decoders behind `VideoPlayer` (MediaCodec onto a SurfaceTexture, OpenSL audio and its A/V alignment, the process-wide decoder count, the reaper thread), power (wake alarm, wake lock, screen off), root helpers, storage paths |
-| `raam` at the root (desktop/Linux) | winit/glutin window, or the whole monitor with `--fullscreen` (a Linux frame); the mouse and a touchscreen's first finger as a finger, and a keyboard's keys (egui-winit translates them); the engine's paths (the app-data dir, a photos folder), `NoVideo` and a probe that says so, env-var debug switches (`RAAM_DEBUG_VIDEO_FAIL=rt`); `--page` is the preset host with the screenshot tooling (`--exact` goldens). Runs under X11 and Wayland. The window asks for desktop GL 3.2; built with the `gles` feature, it asks for GLES 2.0 over EGL and links libGLESv2, for a GPU with no core profile (a Raspberry Pi's). That way it runs on a first-generation Raspberry Pi under a Wayland kiosk compositor (cage); a Pi 4 or 5 is untested. A bare KMS/DRM host is a possible later addition, not v1 |
+| `raam` at the root (desktop/Linux) | winit/glutin window, or the whole monitor with `--fullscreen` (a Linux frame); the mouse and a touchscreen's first finger as a finger, and a keyboard's keys (egui-winit translates them); the engine's paths (the app-data dir, a photos folder), `NoVideo` and a probe that says so, env-var debug switches (`RAAM_DEBUG_VIDEO_FAIL=rt`), Wi-Fi on Linux through wpa_supplicant's control socket (no root); `--page` is the preset host with the screenshot tooling (`--exact` goldens). Runs under X11 and Wayland. The window asks for desktop GL 3.2; built with the `gles` feature, it asks for GLES 2.0 over EGL and links libGLESv2, for a GPU with no core profile (a Raspberry Pi's). That way it runs on a first-generation Raspberry Pi under a Wayland kiosk compositor (cage); a Pi 4 or 5 is untested. A bare KMS/DRM host is a possible later addition, not v1 |
 | `hosts/web` (the demo) | canvas + rAF loop, pointer events as a finger and key events while the canvas has the focus, its own synchronous `TileSource` over bundled sample photos (the browser decodes them; faces come from a checked-in `faces.json`), `NoVideo`, URL-query debug switches; later, "try with Immich" against demo.immich.app (CORS-open) |
 
 ## The seams
@@ -143,6 +143,7 @@ complete list of how the outside reaches the core.
 | `Waker` | `wake(&self)`, `Send + Sync` | host; handed to the engine's threads |
 | `Store` | settings load/save rows | engine (SQLite); localStorage or nothing on web |
 | `DebugSwitches` | snapshotted **once per loop pass** | Android props / desktop env vars / web URL query |
+| `Network` | a snapshot of the links and Wi-Fi (`version`, `snapshot`), and commands a worker runs (`send`: scan, join, connect, forget, on/off) | desktop host on Linux (wpa_supplicant's control socket, src/wifi.rs); none on Android yet or on the web, where Settings → Connectivity says so |
 
 Randomness is seeded from the injected clock plus a counter — no
 `getrandom`, no wall-clock nanoseconds in core logic.

@@ -11,7 +11,8 @@
 //! swap. The outside world enters through the deps traits and leaves as
 //! `Effect`s the host maps onto its engine and power plumbing.
 
-use crate::frame_ui::{self, AppState, Status};
+use crate::frame_ui::{self, AppState, Section, Status, Sub};
+use crate::network::{NetCommand, Network};
 use crate::overlay;
 use crate::schedule::{self, Schedule};
 use crate::seams::Power;
@@ -20,6 +21,7 @@ use crate::source::TileSource;
 use crate::{clock, store, theme, weather_icons};
 use raam_model::limits::{
     AUTO_DISMISS, DEFAULT_MANUAL_IDLE, MAX_EGUI_WAIT, SAVE_DEBOUNCE, TAP_SLOP_PX, UNDO_HIDE,
+    WIFI_RESCAN,
 };
 use raam_model::{ClockStyle, Corner, ScaleMode, SourceKind, Stats};
 use std::collections::VecDeque;
@@ -143,6 +145,9 @@ pub struct Stage<'a> {
     /// No weather worker (the web demo): the overlay shows the time and
     /// date, and the status line says nothing about weather.
     pub weather: Option<&'a dyn WeatherInfo>,
+    /// No network worker (the web demo, Android for now): Settings →
+    /// Connectivity says Wi-Fi can't be set up here.
+    pub network: Option<&'a dyn Network>,
 }
 
 pub struct Deps<'a> {
@@ -244,6 +249,9 @@ pub struct App {
     last_touch: Duration,
     undo: Option<(String, Duration)>,
     stats_version: u64,
+    net_version: u64,
+    /// When the open network list last asked for a scan.
+    scan_sent: Option<Duration>,
     // Frame-reuse state: egui only runs when it has input, asked for a
     // repaint that is now due, or the status line changed.
     egui_due: Duration,
@@ -322,6 +330,8 @@ impl App {
             last_touch: now,
             undo: None,
             stats_version: 0,
+            net_version: 0,
+            scan_sent: None,
             egui_due: now,
             egui_uploaded: false,
             last_status: String::new(),
@@ -727,6 +737,33 @@ impl App {
             let (version, lib_stats) = stage.library.stats();
             let layout = stage.slideshow.shown_layout();
             self.state.has_weather = stage.weather.is_some();
+            // A join under way, or the network list filling in, is being
+            // watched: the menu stays up until the usual while after.
+            let listing = self.state.screen == frame_ui::Screen::Settings
+                && self.state.section == Section::Connectivity
+                && matches!(self.state.sub, Sub::Networks | Sub::Join);
+            if self
+                .state
+                .network
+                .as_ref()
+                .and_then(|n| n.wifi.as_ref().ok())
+                .is_some_and(|w| w.joining() || (listing && w.scanning))
+            {
+                self.last_input = clock::now();
+            }
+            // The network snapshot, copied only when it moved.
+            let mut net_moved = false;
+            match stage.network {
+                None => self.state.network = None,
+                Some(n) => {
+                    let v = n.version();
+                    if v != self.net_version || self.state.network.is_none() {
+                        self.net_version = v;
+                        self.state.network = Some(n.snapshot());
+                        net_moved = true;
+                    }
+                }
+            }
             self.state.status = Status {
                 layout: (layout != "-").then_some(layout),
                 weather: self.weather_status.clone(),
@@ -764,7 +801,8 @@ impl App {
                 || self.state.focus_pending()
                 || clock::now() >= self.egui_due
                 || status != self.last_status
-                || version != self.stats_version;
+                || version != self.stats_version
+                || net_moved;
             if need_run {
                 self.stats_version = version;
                 self.state.library = lib_stats;
@@ -831,6 +869,12 @@ impl App {
                 for (album, on) in actions.select_album.drain(..) {
                     out.effects.push(Effect::SelectAlbum(album, on));
                 }
+                if let Some(n) = stage.network {
+                    for cmd in actions.net.drain(..) {
+                        log::info!("network: {cmd:?}");
+                        n.send(cmd);
+                    }
+                }
                 if self.state.settings.immich_enabled != self.sent_enabled.0 {
                     self.sent_enabled.0 = self.state.settings.immich_enabled;
                     out.effects.push(Effect::SetSourceEnabled(
@@ -886,6 +930,33 @@ impl App {
                 });
             }
             egui_delay = self.egui_due.saturating_sub(clock::now());
+
+            // The network list, while it's open, keeps itself current.
+            let wifi = self
+                .state
+                .network
+                .as_ref()
+                .and_then(|n| n.wifi.as_ref().ok());
+            if listing
+                && let Some(n) = stage.network
+                && let Some(w) = wifi
+                && w.enabled
+            {
+                let due = self
+                    .scan_sent
+                    .is_none_or(|t| clock::elapsed(t) >= WIFI_RESCAN);
+                if due && !w.scanning && !w.joining() {
+                    log::info!("network: {:?}", NetCommand::Scan);
+                    n.send(NetCommand::Scan);
+                    self.scan_sent = Some(clock::now());
+                }
+                if let Some(t) = self.scan_sent {
+                    egui_delay = egui_delay.min(WIFI_RESCAN.saturating_sub(clock::elapsed(t)));
+                }
+            } else if !listing {
+                // Opening the list again scans at once.
+                self.scan_sent = None;
+            }
 
             // A text field, not any focus: keys focus buttons too.
             let typing = self.ctx.text_edit_focused();
@@ -1257,6 +1328,40 @@ mod tests {
         }
     }
 
+    /// A network worker that records what it's sent and serves a fixed
+    /// snapshot.
+    struct FakeNet {
+        version: std::cell::Cell<u64>,
+        snap: std::cell::RefCell<crate::network::NetSnapshot>,
+        sent: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl FakeNet {
+        fn new() -> Self {
+            FakeNet {
+                version: std::cell::Cell::new(1),
+                snap: std::cell::RefCell::new(crate::network::sample()),
+                sent: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+        fn update(&self, f: impl FnOnce(&mut crate::network::NetSnapshot)) {
+            f(&mut self.snap.borrow_mut());
+            self.version.set(self.version.get() + 1);
+        }
+    }
+
+    impl Network for FakeNet {
+        fn version(&self) -> u64 {
+            self.version.get()
+        }
+        fn snapshot(&self) -> crate::network::NetSnapshot {
+            self.snap.borrow().clone()
+        }
+        fn send(&self, cmd: NetCommand) {
+            self.sent.borrow_mut().push(format!("{cmd:?}"));
+        }
+    }
+
     #[derive(Default)]
     struct FakePower {
         alarms: Vec<i64>,
@@ -1293,6 +1398,8 @@ mod tests {
         /// `None`: a host without a weather worker (the web demo).
         weather: Option<FakeWeather>,
         power: Option<FakePower>,
+        /// `None`: a host without a network worker.
+        net: Option<FakeNet>,
         ov: Overrides,
     }
 
@@ -1322,6 +1429,7 @@ mod tests {
                 lib: FakeLib,
                 weather: Some(FakeWeather),
                 power,
+                net: None,
                 ov: Overrides::default(),
             }
         }
@@ -1341,6 +1449,7 @@ mod tests {
                         source: &self.source,
                         library: &self.lib,
                         weather: self.weather.as_ref().map(|w| w as &dyn WeatherInfo),
+                        network: self.net.as_ref().map(|n| n as &dyn Network),
                     }),
                     power: self.power.as_mut().map(|p| p as &mut dyn Power),
                 },
@@ -1746,9 +1855,9 @@ mod tests {
     fn a_dialog_closed_by_escape_hands_the_focus_back_to_its_row() {
         let mut rig = Rig::new(None);
         settings_by_key(&mut rig, frame_ui::Section::Slideshow);
-        // Past Videos, Display, Sleep and Server to the page's first row,
-        // Photo interval, which opens its dialog.
-        for _ in 0..5 {
+        // Past Videos, Display, Sleep, Connectivity and Server to the
+        // page's first row, Photo interval, which opens its dialog.
+        for _ in 0..6 {
             rig.key(egui::Key::Tab);
         }
         let row = rig.focused();
@@ -2013,5 +2122,251 @@ mod tests {
         rig.frame(&[]);
         assert_eq!(rig.app.state.settings.sleep_min, 23 * 60);
         assert_eq!(rig.app.state.settings.wake_min, 5 * 60);
+    }
+
+    /// Settings → Connectivity → Wi-Fi networks, on a rig with a network
+    /// worker.
+    fn networks_open(rig: &mut Rig) {
+        rig.net = Some(FakeNet::new());
+        rig.tap(100.0, 100.0);
+        rig.app.state.screen = frame_ui::Screen::Settings;
+        rig.app.state.section = frame_ui::Section::Connectivity;
+        rig.app.state.sub = frame_ui::Sub::Networks;
+        rig.redraw();
+    }
+
+    fn sent(rig: &Rig) -> Vec<String> {
+        rig.net.as_ref().unwrap().sent.borrow().clone()
+    }
+
+    fn scans(rig: &Rig) -> usize {
+        sent(rig).iter().filter(|s| *s == "Scan").count()
+    }
+
+    #[test]
+    fn connectivity_sits_between_sleep_and_server() {
+        let all = frame_ui::Section::ALL;
+        let at = |s| all.iter().position(|x| *x == s).unwrap();
+        assert_eq!(
+            at(frame_ui::Section::Connectivity),
+            at(frame_ui::Section::Sleep) + 1
+        );
+        assert_eq!(all.last(), Some(&frame_ui::Section::Server));
+    }
+
+    #[test]
+    fn the_network_list_scans_when_it_opens_then_every_so_often() {
+        let mut rig = Rig::new(None);
+        networks_open(&mut rig);
+        assert_eq!(scans(&rig), 1, "a scan as the list opens");
+        // Kept open by a touch now and then.
+        advance(WIFI_RESCAN - Duration::from_secs(1));
+        rig.app.last_input = clock::now();
+        rig.frame(&[]);
+        assert_eq!(scans(&rig), 1);
+        advance(Duration::from_secs(1));
+        let out = rig.frame(&[]);
+        assert_eq!(scans(&rig), 2, "and again once it's due");
+        assert!(out.wait.unwrap() <= WIFI_RESCAN);
+        // Not while one is running.
+        rig.net.as_ref().unwrap().update(|n| {
+            n.wifi.as_mut().unwrap().scanning = true;
+        });
+        advance(WIFI_RESCAN);
+        rig.app.last_input = clock::now();
+        rig.frame(&[]);
+        assert_eq!(scans(&rig), 2);
+    }
+
+    #[test]
+    fn leaving_the_list_and_coming_back_scans_at_once() {
+        let mut rig = Rig::new(None);
+        networks_open(&mut rig);
+        rig.app.state.sub = frame_ui::Sub::None;
+        rig.redraw();
+        rig.app.state.sub = frame_ui::Sub::Networks;
+        rig.redraw();
+        assert_eq!(scans(&rig), 2);
+    }
+
+    #[test]
+    fn the_pages_commands_reach_the_network_worker() {
+        let mut rig = Rig::new(None);
+        networks_open(&mut rig);
+        rig.app
+            .state
+            .actions
+            .net
+            .push(NetCommand::Forget(crate::network::Ssid::new("Home")));
+        rig.redraw();
+        assert!(
+            sent(&rig).contains(&"Forget(\"Home\")".to_string()),
+            "{:?}",
+            sent(&rig)
+        );
+    }
+
+    #[test]
+    fn the_snapshot_follows_the_workers_version() {
+        let mut rig = Rig::new(None);
+        networks_open(&mut rig);
+        let enabled = |rig: &Rig| {
+            rig.app
+                .state
+                .network
+                .as_ref()
+                .unwrap()
+                .wifi
+                .as_ref()
+                .unwrap()
+                .enabled
+        };
+        assert!(enabled(&rig));
+        rig.net.as_ref().unwrap().update(|n| {
+            n.wifi.as_mut().unwrap().enabled = false;
+        });
+        rig.frame(&[]);
+        assert!(!enabled(&rig));
+    }
+
+    #[test]
+    fn a_host_without_a_network_worker_has_no_snapshot() {
+        let mut rig = Rig::new(None);
+        rig.tap(100.0, 100.0);
+        assert!(rig.app.overlay_open());
+        assert!(rig.app.state.network.is_none());
+    }
+
+    #[test]
+    fn a_join_under_way_keeps_the_menu_open() {
+        let mut rig = Rig::new(None);
+        networks_open(&mut rig);
+        let join = |stage| {
+            move |n: &mut crate::network::NetSnapshot| {
+                n.wifi.as_mut().unwrap().join = Some(crate::network::Join {
+                    ssid: crate::network::Ssid::new("Home IoT"),
+                    stage,
+                });
+            }
+        };
+        rig.net
+            .as_ref()
+            .unwrap()
+            .update(join(crate::network::JoinStage::Connecting));
+        rig.frame(&[]);
+        advance(AUTO_DISMISS + Duration::from_secs(1));
+        rig.frame(&[]);
+        assert!(rig.app.overlay_open(), "open while the join runs");
+        rig.net
+            .as_ref()
+            .unwrap()
+            .update(join(crate::network::JoinStage::Joined { remembered: true }));
+        rig.frame(&[]);
+        advance(AUTO_DISMISS + Duration::from_secs(1));
+        rig.frame(&[]);
+        assert!(!rig.app.overlay_open(), "the usual timeout after it");
+    }
+
+    #[test]
+    fn a_scan_filling_the_open_list_keeps_the_menu_open() {
+        let mut rig = Rig::new(None);
+        networks_open(&mut rig);
+        rig.net.as_ref().unwrap().update(|n| {
+            n.wifi.as_mut().unwrap().scanning = true;
+        });
+        rig.frame(&[]);
+        advance(AUTO_DISMISS + Duration::from_secs(1));
+        rig.frame(&[]);
+        assert!(rig.app.overlay_open(), "open while the list fills in");
+        rig.net.as_ref().unwrap().update(|n| {
+            n.wifi.as_mut().unwrap().scanning = false;
+        });
+        rig.frame(&[]);
+        advance(AUTO_DISMISS + Duration::from_secs(1));
+        rig.frame(&[]);
+        assert!(!rig.app.overlay_open(), "the usual timeout after it");
+    }
+
+    #[test]
+    fn escape_from_a_join_steps_back_to_the_list() {
+        let mut rig = Rig::new(None);
+        networks_open(&mut rig);
+        rig.app.state.sub = frame_ui::Sub::Join;
+        rig.redraw();
+        rig.key(egui::Key::Escape);
+        assert_eq!(rig.app.state.sub, frame_ui::Sub::Networks);
+        rig.key(egui::Key::Escape);
+        assert_eq!(rig.app.state.sub, frame_ui::Sub::None);
+        assert_eq!(rig.app.state.screen, frame_ui::Screen::Settings);
+    }
+
+    /// A key, then the passes a host runs at once after it.
+    fn key_settled(rig: &mut Rig, key: egui::Key) {
+        let mut out = rig.key(key);
+        let mut passes = 0;
+        while out.wait == Some(Duration::ZERO) && passes < 5 {
+            out = rig.frame(&[]);
+            passes += 1;
+        }
+    }
+
+    #[test]
+    fn a_network_joined_by_key_focuses_its_password_field() {
+        let mut rig = Rig::new(None);
+        networks_open(&mut rig);
+        // In on the connected network's Forget, down to Home IoT (WPA2).
+        key_settled(&mut rig, egui::Key::Tab);
+        key_settled(&mut rig, egui::Key::ArrowDown);
+        key_settled(&mut rig, egui::Key::Enter);
+        assert_eq!(rig.app.state.sub, frame_ui::Sub::Join);
+        assert!(
+            rig.app.ctx.text_edit_focused(),
+            "the password has the focus"
+        );
+        rig.frame(&[Event::Text("correct horse".into())]);
+        assert_eq!(rig.app.state.join.key, "correct horse");
+        key_settled(&mut rig, egui::Key::Enter);
+        assert!(
+            sent(&rig)
+                .iter()
+                .any(|s| s.starts_with("Join(\"Home IoT\"")),
+            "Enter in the field joins: {:?}",
+            sent(&rig)
+        );
+    }
+
+    #[test]
+    fn a_hidden_network_opened_by_key_focuses_its_name_field() {
+        let mut rig = Rig::new(None);
+        networks_open(&mut rig);
+        key_settled(&mut rig, egui::Key::Tab);
+        // Down to the list's last row, Add a hidden network.
+        for _ in 0..20 {
+            let was = rig.focused();
+            key_settled(&mut rig, egui::Key::ArrowDown);
+            if rig.focused() == was {
+                break;
+            }
+        }
+        key_settled(&mut rig, egui::Key::Enter);
+        assert_eq!(rig.app.state.sub, frame_ui::Sub::Join);
+        assert!(rig.app.ctx.text_edit_focused(), "the name has the focus");
+        rig.frame(&[Event::Text("Attic".into())]);
+        assert_eq!(rig.app.state.join.name, "Attic");
+    }
+
+    #[test]
+    fn a_sub_pages_arrow_goes_up_one_and_the_top_bars_leaves_settings() {
+        let mut rig = Rig::new(None);
+        networks_open(&mut rig);
+        // The arrow before the page title, on the list icons' column.
+        rig.tap(412.0, 104.0);
+        assert_eq!(rig.app.state.sub, frame_ui::Sub::None);
+        assert_eq!(rig.app.state.screen, frame_ui::Screen::Settings);
+        rig.app.state.sub = frame_ui::Sub::Networks;
+        rig.redraw();
+        // The top bar's "Settings" arrow, from a sub page too.
+        rig.tap(40.0, 32.0);
+        assert_eq!(rig.app.state.screen, frame_ui::Screen::Menu);
     }
 }

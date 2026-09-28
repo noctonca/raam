@@ -22,6 +22,7 @@ use glutin::surface::GlSurface;
 use raam_core::app::{App, Deps, Event, Inputs, KeyEvent as FrameKey, Overrides, Stage, Touch};
 use raam_core::frame_ui::AppState;
 use raam_core::gl::glDisableVertexAttribArray;
+use raam_core::network::Network;
 use raam_core::overlay::ClockOverlay;
 use raam_core::painter::Painter;
 use raam_core::seams::{DebugSwitches, MediaProbe};
@@ -114,6 +115,8 @@ pub struct Live {
     switches: Arc<EnvSwitches>,
     host: raam_engine::Host,
     lib: Arc<library::Library>,
+    /// Wi-Fi through wpa_supplicant; none off Linux (src/wifi.rs).
+    network: Option<crate::wifi::Net>,
     /// The settings rows the DB had, so a saved collage max beats the
     /// screen's default.
     saved_keys: Vec<String>,
@@ -201,6 +204,7 @@ impl Live {
             clock::elapsed(t)
         );
         let lib = library::spawn(database, paths, state.settings.cache_cap_mb, host.clone());
+        let network = crate::wifi::spawn(host.waker.clone());
         state.settings.immich_enabled = lib.enabled(SourceKind::Immich);
         state.settings.local_enabled = lib.enabled(SourceKind::Local);
         // No power here, so no schedule runs: the menu mustn't say the
@@ -216,6 +220,7 @@ impl Live {
             switches,
             host,
             lib,
+            network,
             saved_keys,
             overrides: Some(overrides),
             controller,
@@ -531,6 +536,7 @@ impl Live {
                     source: run.fetch.as_ref(),
                     library: self.lib.as_ref(),
                     weather: Some(run.weather.as_ref()),
+                    network: self.network.as_ref().map(|n| n as &dyn Network),
                 }),
                 // No power: no sleep schedule.
                 power: None,

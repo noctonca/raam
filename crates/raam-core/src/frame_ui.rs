@@ -1344,14 +1344,11 @@ fn draw_settings(ui: &mut Ui, st: &mut AppState) {
                     });
             });
     });
+    // Leaves Settings from any page: a sub page's own arrow goes up one.
     if back {
-        if st.sub != Sub::None {
-            st.sub = st.sub.parent();
-        } else {
-            st.screen = Screen::Menu;
-            // The keyboard's hysteresis would flash it over the menu.
-            st.keyboard = keyboard();
-        }
+        st.screen = Screen::Menu;
+        // The keyboard's hysteresis would flash it over the menu.
+        st.keyboard = keyboard();
     }
     let claimed = claim(ui.ctx(), st, Region::Dialog);
     dialogs(ui.ctx(), st);
@@ -1600,11 +1597,15 @@ fn photos_page(ui: &mut Ui, st: &mut AppState) {
 }
 
 fn albums_page(ui: &mut Ui, st: &mut AppState) {
-    kit::page_title(
+    if kit::page_title_back(
         ui,
         "Immich albums",
         "Photos from every album you pick play as one shuffle.",
-    );
+    )
+    .clicked()
+    {
+        st.sub = st.sub.parent();
+    }
     ui.spacing_mut().item_spacing.y = 0.0;
     let lib = st.library.clone();
     // Picks the list now agrees with are no longer pending.
@@ -1692,11 +1693,15 @@ fn albums_page(ui: &mut Ui, st: &mut AppState) {
 }
 
 fn hidden_page(ui: &mut Ui, st: &mut AppState) {
-    kit::page_title(
+    if kit::page_title_back(
         ui,
         "Hidden photos",
         "They never play. Unhide one to put it back in the slideshow.",
-    );
+    )
+    .clicked()
+    {
+        st.sub = st.sub.parent();
+    }
     ui.spacing_mut().item_spacing.y = 0.0;
     let lib = st.library.clone();
     if lib.hidden.is_empty() {
@@ -2377,11 +2382,15 @@ fn nearby_line(saved: bool, security: Security) -> String {
 }
 
 fn networks_page(ui: &mut Ui, st: &mut AppState) {
-    kit::page_title(
+    if kit::page_title_back(
         ui,
         "Wi-Fi networks",
         "The frame remembers a network it joins, and joins it again after a restart.",
-    );
+    )
+    .clicked()
+    {
+        st.sub = st.sub.parent();
+    }
     ui.spacing_mut().item_spacing.y = 0.0;
     let Some(Ok(w)) = st.network.as_ref().map(|n| n.wifi.clone()) else {
         st.sub = Sub::None;
@@ -2614,7 +2623,7 @@ fn join_page(ui: &mut Ui, st: &mut AppState) {
     } else {
         format!("Join {}", d.ssid.show())
     };
-    kit::page_title(
+    if kit::page_title_back(
         ui,
         &title,
         if d.hidden {
@@ -2622,7 +2631,11 @@ fn join_page(ui: &mut Ui, st: &mut AppState) {
         } else {
             "The frame remembers it, and joins it again after a restart."
         },
-    );
+    )
+    .clicked()
+    {
+        st.sub = st.sub.parent();
+    }
     ui.spacing_mut().item_spacing.y = 0.0;
     kit::section_header(ui, if d.hidden { "Network" } else { "Password" });
     let clip = ui.clip_rect();

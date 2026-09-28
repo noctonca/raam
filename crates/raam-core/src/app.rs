@@ -2354,4 +2354,19 @@ mod tests {
         rig.frame(&[Event::Text("Attic".into())]);
         assert_eq!(rig.app.state.join.name, "Attic");
     }
+
+    #[test]
+    fn a_sub_pages_arrow_goes_up_one_and_the_top_bars_leaves_settings() {
+        let mut rig = Rig::new(None);
+        networks_open(&mut rig);
+        // The arrow before the page title, on the list icons' column.
+        rig.tap(412.0, 104.0);
+        assert_eq!(rig.app.state.sub, frame_ui::Sub::None);
+        assert_eq!(rig.app.state.screen, frame_ui::Screen::Settings);
+        rig.app.state.sub = frame_ui::Sub::Networks;
+        rig.redraw();
+        // The top bar's "Settings" arrow, from a sub page too.
+        rig.tap(40.0, 32.0);
+        assert_eq!(rig.app.state.screen, frame_ui::Screen::Menu);
+    }
 }

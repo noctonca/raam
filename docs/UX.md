@@ -30,9 +30,9 @@ Measured in the detail pane (1280 wide, list pane 360, pane inset 24):
 
 | Edge | x | What sits on it |
 |---|---|---|
-| Container edge | 384 | page title and subtitle, the outer edge of filled containers (notes, cards) |
+| Container edge | 384 | a top-level page's title and subtitle, the outer edge of filled containers (notes, cards) |
 | Content edge | 400 | section headers, list icons, component rows, the icon inside a note or card |
-| Text edge | 440 | list headlines and supporting text (icon 24 + gap 16) |
+| Text edge | 440 | list headlines and supporting text (icon 24 + gap 16); a sub page's title and subtitle, after its back arrow on 400 |
 | Trailing edge | 1240 | chevrons, switches, trailing controls |
 
 - Two left edges only: **384 for containers and titles, 400 for content**.
@@ -194,6 +194,14 @@ there stops being read.
 - **Settings are opaque and full-screen**, in the list/detail shell. The
   sections are Photos, Slideshow, Videos, Display, Sleep, Connectivity
   and Server. The slideshow isn't drawn under them.
+- **A sub page has its own back arrow**, before its title, and it goes up
+  one level, to the page that opened it (Albums and Hidden to Photos,
+  Wi-Fi networks to Connectivity, Join to Wi-Fi networks). The arrow is
+  a list icon, on the content edge (400); the title and subtitle move
+  to the text edge (440). The top bar's "← Settings" always leaves
+  Settings, as its label says, from a sub page too. Android's two-pane
+  Settings and M3's list-detail work this way (Jakob's Law): the way
+  back is where the eye already is, not across the screen.
 - **Connectivity** says first what carries the traffic (Ethernet or
   Wi-Fi) and its address; with a cable in, Wi-Fi reads as a backup.
   - The Wi-Fi networks are a sub-page, strongest first, with the joined

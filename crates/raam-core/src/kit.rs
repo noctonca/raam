@@ -1087,6 +1087,8 @@ impl<'a> TextField<'a> {
                 .min_size(vec2(w, H))
                 .vertical_align(Align::Center),
         );
+        // A sub page's first control can be its field (the Join page's).
+        focusable(ui, &resp, true);
         // Over the TextEdit, so it takes the tap. The field keeps the
         // focus (and the on-screen keyboard stays) when it had it.
         let eye = self.reveal.map(|shown| {

@@ -2299,4 +2299,59 @@ mod tests {
         assert_eq!(rig.app.state.sub, frame_ui::Sub::None);
         assert_eq!(rig.app.state.screen, frame_ui::Screen::Settings);
     }
+
+    /// A key, then the passes a host runs at once after it.
+    fn key_settled(rig: &mut Rig, key: egui::Key) {
+        let mut out = rig.key(key);
+        let mut passes = 0;
+        while out.wait == Some(Duration::ZERO) && passes < 5 {
+            out = rig.frame(&[]);
+            passes += 1;
+        }
+    }
+
+    #[test]
+    fn a_network_joined_by_key_focuses_its_password_field() {
+        let mut rig = Rig::new(None);
+        networks_open(&mut rig);
+        // In on the connected network's Forget, down to Home IoT (WPA2).
+        key_settled(&mut rig, egui::Key::Tab);
+        key_settled(&mut rig, egui::Key::ArrowDown);
+        key_settled(&mut rig, egui::Key::Enter);
+        assert_eq!(rig.app.state.sub, frame_ui::Sub::Join);
+        assert!(
+            rig.app.ctx.text_edit_focused(),
+            "the password has the focus"
+        );
+        rig.frame(&[Event::Text("correct horse".into())]);
+        assert_eq!(rig.app.state.join.key, "correct horse");
+        key_settled(&mut rig, egui::Key::Enter);
+        assert!(
+            sent(&rig)
+                .iter()
+                .any(|s| s.starts_with("Join(\"Home IoT\"")),
+            "Enter in the field joins: {:?}",
+            sent(&rig)
+        );
+    }
+
+    #[test]
+    fn a_hidden_network_opened_by_key_focuses_its_name_field() {
+        let mut rig = Rig::new(None);
+        networks_open(&mut rig);
+        key_settled(&mut rig, egui::Key::Tab);
+        // Down to the list's last row, Add a hidden network.
+        for _ in 0..20 {
+            let was = rig.focused();
+            key_settled(&mut rig, egui::Key::ArrowDown);
+            if rig.focused() == was {
+                break;
+            }
+        }
+        key_settled(&mut rig, egui::Key::Enter);
+        assert_eq!(rig.app.state.sub, frame_ui::Sub::Join);
+        assert!(rig.app.ctx.text_edit_focused(), "the name has the focus");
+        rig.frame(&[Event::Text("Attic".into())]);
+        assert_eq!(rig.app.state.join.name, "Attic");
+    }
 }

@@ -1,6 +1,7 @@
 //! The `raam` binary: the desktop/Linux host (docs/ARCHITECTURE.md
 //! "Hosts"), drawing with the core's own GLES2 renderer (gl.rs bridges
-//! the shaders to the 4.1 core context). Two modes:
+//! the shaders to the 4.1 core context, or with the `gles` feature runs
+//! them in a GLES 2.0 one). Two modes:
 //!
 //! - **The slideshow** (no `--page`; live.rs): the product as the frame
 //!   runs it, on the engine, with no video player. The mouse is a finger,
@@ -407,7 +408,15 @@ fn create_gl(
         }
     }
     let template = ConfigTemplateBuilder::new();
-    let (window, config) = DisplayBuilder::new()
+    let builder = DisplayBuilder::new();
+    // GLES2-capable configs, over EGL (GLX makes GLES contexts only by an
+    // extension).
+    #[cfg(feature = "gles")]
+    let (template, builder) = (
+        template.with_api(glutin::config::Api::GLES2),
+        builder.with_preference(glutin_winit::ApiPreference::PreferEgl),
+    );
+    let (window, config) = builder
         .with_window_attributes(Some(attrs))
         // No MSAA: egui feathers its own edges, and the frame has none.
         .build(el, template, |configs| {
@@ -429,9 +438,13 @@ fn create_gl(
     let display = config.display();
     let raw = window.window_handle().ok().map(|h| h.as_raw());
     // glutin makes a 4.1 core context on macOS whatever is asked; gl.rs
-    // bridges the gap to GLES2.
+    // bridges the gap to GLES2. With `gles`, GLES2 itself.
+    #[cfg(not(feature = "gles"))]
+    let api = ContextApi::OpenGl(Some(Version::new(3, 2)));
+    #[cfg(feature = "gles")]
+    let api = ContextApi::Gles(Some(Version::new(2, 0)));
     let ctx_attrs = ContextAttributesBuilder::new()
-        .with_context_api(ContextApi::OpenGl(Some(Version::new(3, 2))))
+        .with_context_api(api)
         .build(raw);
     let not_current = unsafe { display.create_context(&config, &ctx_attrs) }
         .map_err(|e| format!("create_context: {e}"))?;

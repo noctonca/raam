@@ -163,6 +163,7 @@ pub enum Effect {
     SetHidden(String, bool),
     SetSourceEnabled(SourceKind, bool),
     /// The server and key apply when the menu closes, not per keystroke.
+    /// An empty `url` removes the server.
     SetServer {
         url: String,
         key: String,
@@ -917,8 +918,16 @@ impl App {
                 force_redraw = true;
                 // The server and key apply (and save) when the menu
                 // closes, not per keystroke. The URL goes out as the
-                // settings page said it would ("Will use http://…").
-                if let Some(url) = frame_ui::normalise_url(&self.state.settings.server_url) {
+                // settings page said it would ("Will use http://…"). An
+                // emptied field removes the server; one that can't be a
+                // web address keeps the old server until it's fixed.
+                let raw = self.state.settings.server_url.trim();
+                let url = if raw.is_empty() {
+                    Some(String::new())
+                } else {
+                    frame_ui::normalise_url(raw)
+                };
+                if let Some(url) = url {
                     let server = (url, self.state.settings.api_key.trim().to_string());
                     if server != self.saved_server {
                         self.saved_server = server.clone();
@@ -1802,6 +1811,47 @@ mod tests {
         advance(Duration::from_secs(1));
         rig.frame(&[]);
         assert!(!rig.app.overlay_open());
+    }
+
+    /// Opens the menu, types the server and key into settings, and lets
+    /// the menu time out: the `SetServer` effects its closing sent.
+    fn close_with_server(rig: &mut Rig, url: &str, key: &str) -> Vec<(String, String)> {
+        rig.tap(100.0, 100.0);
+        assert!(rig.app.overlay_open());
+        rig.app.state.settings.server_url = url.into();
+        rig.app.state.settings.api_key = key.into();
+        advance(AUTO_DISMISS + Duration::from_secs(1));
+        let out = rig.frame(&[]);
+        assert!(!rig.app.overlay_open());
+        out.effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::SetServer { url, key } => Some((url.clone(), key.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_emptied_server_url_removes_the_server_when_the_menu_closes() {
+        let mut rig = Rig::new(None);
+        let sent = |url: &str, key: &str| vec![(url.to_string(), key.to_string())];
+        assert_eq!(
+            close_with_server(&mut rig, "immich.lan", "key"),
+            sent("http://immich.lan", "key")
+        );
+        // Unchanged: nothing is sent.
+        assert_eq!(close_with_server(&mut rig, "immich.lan", "key"), []);
+        // Not a web address: the old server stays until it's fixed.
+        assert_eq!(close_with_server(&mut rig, "immich lan", "key"), []);
+        // Emptied (spaces alone count as empty): the server goes.
+        assert_eq!(close_with_server(&mut rig, " ", "key"), sent("", "key"));
+        assert_eq!(close_with_server(&mut rig, "", "key"), []);
+        // And a server typed again comes back.
+        assert_eq!(
+            close_with_server(&mut rig, "immich.lan", "key"),
+            sent("http://immich.lan", "key")
+        );
     }
 
     #[test]

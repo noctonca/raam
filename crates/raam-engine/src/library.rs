@@ -146,6 +146,11 @@ impl Library {
         self.config.lock().unwrap().clone()
     }
 
+    /// A server is set: none on a fresh install, or once it's removed.
+    pub fn has_server(&self) -> bool {
+        !self.config.lock().unwrap().url.trim().is_empty()
+    }
+
     pub fn send(&self, cmd: Cmd) {
         let to_writer = matches!(
             cmd,
@@ -321,11 +326,17 @@ fn writer_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
                     log::error!("db: saving the server failed: {e}");
                 }
                 // Never log the key.
-                log::info!(
-                    "library: Immich server changed to {}, resyncing",
-                    config.url
-                );
+                if config.url.is_empty() {
+                    log::info!("library: Immich server removed, its photos wait for one");
+                } else {
+                    log::info!(
+                        "library: Immich server changed to {}, resyncing",
+                        config.url
+                    );
+                }
                 *lib.config.lock().unwrap() = config;
+                // With a server gone or back, other photos may play.
+                lib.bump();
                 let _ = lib.library_tx.lock().unwrap().send(Cmd::ServerChanged);
             }
             Cmd::ExportCuration => curation_changed = true,
@@ -494,7 +505,7 @@ fn library_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
         if clock::now() >= st.next_sync {
             // A fresh install has no server yet: nothing to sync (or spam
             // the log with) until settings provide one.
-            if lib.enabled(SourceKind::Immich) && lib.config().url.trim().is_empty() {
+            if lib.enabled(SourceKind::Immich) && !lib.has_server() {
                 st.immich_note = "no server configured".into();
                 st.albums_note = "no server configured".into();
             } else if lib.enabled(SourceKind::Immich) {
@@ -818,7 +829,7 @@ fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, S
 /// was work to do.
 fn materialise_one(lib: &Library, st: &mut Loop) -> bool {
     let local_on = lib.enabled(SourceKind::Local);
-    let immich_on = lib.enabled(SourceKind::Immich) && lib.online();
+    let immich_on = lib.enabled(SourceKind::Immich) && lib.has_server() && lib.online();
     let next: Option<(i64, SourceKind, String, Option<String>, bool, bool)> = {
         let conn = lib.db.lock().unwrap();
         // An Immich clip's "preview" is its playback transcode; a local

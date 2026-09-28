@@ -287,6 +287,8 @@ pub struct AppState {
     delay_draft: f32,
     /// Focus the server URL field on the next pass (a preset, for QA).
     focus_url: bool,
+    /// The API key reads in the clear (the field's eye).
+    key_shown: bool,
     /// The last input was a physical key, not a touch: the focus follows
     /// the levels, and the on-screen keyboard stays away (UX.md, Keys).
     /// Set by the controller when a key or a tap opens the menu, and from
@@ -401,6 +403,7 @@ impl AppState {
             interval_draft: 10.0,
             delay_draft: 0.0,
             focus_url: false,
+            key_shown: false,
             keys: false,
             typing: false,
             seen: None,
@@ -417,8 +420,9 @@ impl AppState {
         self.screen = Screen::Menu;
         self.sub = Sub::None;
         self.dialog = Dialog::None;
-        // A typed password goes with the menu.
+        // A typed password goes with the menu, and a shown key is hidden.
         self.join = JoinDraft::default();
+        self.key_shown = false;
         self.keyboard = keyboard();
         self.typing = false;
         self.seen = None;
@@ -1299,6 +1303,8 @@ fn draw_settings(ui: &mut Ui, st: &mut AppState) {
                     .inner_margin(egui::Margin::symmetric(space::M as i8, 0)),
             )
             .show(ui, |ui| {
+                // Each item leaves 12 under it (`kit::nav_item`), whatever
+                // the on-screen keyboard covers: the list never moves.
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let claimed = claim(ui.ctx(), st, Region::Nav);
                 for sec in Section::ALL {
@@ -2136,7 +2142,7 @@ fn server_page(ui: &mut Ui, st: &mut AppState) {
         ui.add_space(space::S);
         let r = kit::TextField::new(&mut s.api_key, "API key")
             .icon(icons::KEY)
-            .password(true)
+            .secret(&mut st.key_shown)
             .supporting("Server and key apply when the menu closes")
             .width(FIELD_W)
             .show(ui);
@@ -2443,7 +2449,7 @@ fn networks_page(ui: &mut Ui, st: &mut AppState) {
             ListItem::new(&c.ssid.show())
                 .icon(icon)
                 .supporting(&sup.join(" · "))
-                .trailing(Trailing::Button("Forget")),
+                .trailing(Trailing::Destructive("Forget")),
         )
         .changed()
         {
@@ -2550,7 +2556,7 @@ fn networks_page(ui: &mut Ui, st: &mut AppState) {
                 ListItem::new(&ssid.show())
                     .icon(icons::WIFI)
                     .supporting(if near { "Nearby" } else { "Not nearby" })
-                    .trailing(Trailing::Button("Forget")),
+                    .trailing(Trailing::Destructive("Forget")),
             )
             .changed()
             {
@@ -2646,6 +2652,9 @@ fn join_page(ui: &mut Ui, st: &mut AppState) {
         }
     };
     let mut submit = false;
+    // The field Enter was pressed in, so the focus can stay there when
+    // there's nothing to join yet.
+    let mut entered = None;
     ui.add_enabled_ui(!busy, |ui| {
         if d.hidden {
             on_content_edge(ui, |ui| {
@@ -2697,8 +2706,7 @@ fn join_page(ui: &mut Ui, st: &mut AppState) {
             on_content_edge(ui, |ui| {
                 let r = kit::TextField::new(&mut d.key, "Password")
                     .icon(icons::KEY)
-                    .password(true)
-                    .reveal(&mut d.reveal)
+                    .secret(&mut d.reveal)
                     .error(wrong)
                     .supporting(help)
                     .width(FIELD_W)
@@ -2713,6 +2721,7 @@ fn join_page(ui: &mut Ui, st: &mut AppState) {
                 }
                 if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     submit = true;
+                    entered = Some(r.id);
                 }
             });
         }
@@ -2753,6 +2762,11 @@ fn join_page(ui: &mut Ui, st: &mut AppState) {
             }
         });
     });
+    // egui lets go of a field on Enter; with nothing to join, the next key
+    // would find no focus, so keep it in the field.
+    if let Some(id) = entered.filter(|_| !ready) {
+        ui.memory_mut(|m| m.request_focus(id));
+    }
     if submit && ready {
         st.actions.net.push(NetCommand::Join {
             ssid: target,

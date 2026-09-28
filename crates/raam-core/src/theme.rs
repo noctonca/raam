@@ -425,7 +425,9 @@ pub fn style(s: &Scheme, opts: Options, theme: Theme) -> Style {
     .collect();
 
     let sp = &mut style.spacing;
-    sp.item_spacing = vec2(space::S, space::S);
+    // 12 between controls in a row, so a focus ring (5 px outside its
+    // control) keeps 4 px of air to the next one (UX.md, Fitts's Law).
+    sp.item_spacing = vec2(space::M, space::S);
     sp.window_margin = Margin::same(space::XL as i8);
     sp.menu_margin = Margin::same(space::S as i8);
     sp.button_padding = vec2(space::XL, space::M);

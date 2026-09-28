@@ -43,6 +43,65 @@ aimed at ARMv6 (for ring and SQLite). Debian's armhf cross toolchain
 builds for ARMv7, which these can't run; clang and lld with a copy of
 the Pi's own libraries and headers as the sysroot work.
 
+### Wi-Fi
+
+On Linux, Settings → Connectivity shows how the device is connected
+and sets up Wi-Fi: it lists the networks nearby, joins one with its
+password (or a hidden one by name), forgets one, and turns Wi-Fi off
+and on. It talks to wpa_supplicant's control socket, so it needs no
+root, but the device has to be set up for it. When something is
+missing, the page says what.
+
+- **wpa_supplicant runs for the adapter with a control socket, and may
+  save what it's given.** Debian's `wpa_supplicant@wlan0` service (and
+  Raspberry Pi OS before Bookworm) works this way. Its config,
+  `/etc/wpa_supplicant/wpa_supplicant-wlan0.conf`, starts with:
+
+  ```
+  ctrl_interface=DIR=/run/wpa_supplicant GROUP=netdev
+  update_config=1
+  country=GB
+  ```
+
+  `country` is your two-letter country code; without it, 5 GHz
+  channels stay off. Without `update_config=1`, a network joined from
+  Raam is forgotten at the next restart, and the page says so.
+- **Raam's user is in the socket's group:** `sudo usermod -aG netdev
+  $USER`, then log in again.
+- **The radio isn't blocked.** Raspberry Pi OS blocks every radio at
+  boot until it's unblocked once (setting the Wi-Fi country in
+  raspi-config does that), and a USB adapter plugged in later starts
+  blocked again: `sudo rfkill unblock wifi`, once. Raam can see a
+  block but not lift it.
+- **Recommended:** wpa_supplicant writes its config with the
+  service's umask, which leaves the saved Wi-Fi keys readable by every
+  user. A drop-in keeps them private:
+
+  ```sh
+  sudo mkdir -p /etc/systemd/system/wpa_supplicant@.service.d
+  printf '[Service]\nUMask=0077\n' | \
+    sudo tee /etc/systemd/system/wpa_supplicant@.service.d/umask.conf
+  sudo chmod 600 /etc/wpa_supplicant/wpa_supplicant-wlan0.conf
+  sudo systemctl daemon-reload
+  sudo systemctl restart wpa_supplicant@wlan0
+  ```
+
+What it doesn't do:
+
+- NetworkManager, iwd or connman: where one of them runs Wi-Fi
+  (Raspberry Pi OS from Bookworm on, most desktops), set Wi-Fi up with
+  its own tools. The page says so.
+- Enterprise (802.1X) and WEP networks: listed, but not joined.
+- Turning the adapter off: Wi-Fi off stops wpa_supplicant using any
+  network, and the adapter stays powered, since only root can switch
+  the radio.
+- Android and the web demo: not yet on Android; the demo has none.
+
+On a first-generation Pi with a USB adapter, a scan of both bands
+takes about 11 s, and a join about 6 s plus about 6 s for an address.
+A wrong password shows after about 10 s, a network that isn't there
+after about 25 s.
+
 ## Checks
 
 The same six CI runs on every push and PR:

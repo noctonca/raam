@@ -23,7 +23,8 @@ this directory when work on it starts.
 
 ## Before v1
 
-- WiFi setup and brightness in the settings.
+- Brightness in the settings, and Wi-Fi setup on Android (the Linux
+  host has it).
 - The release signing key, then the first public APK.
 
 ## The web demo, later

@@ -192,8 +192,21 @@ there stops being read.
 ## Settings, menu and keyboard
 
 - **Settings are opaque and full-screen**, in the list/detail shell. The
-  sections are Photos, Slideshow, Display, Sleep and Server. The
-  slideshow isn't drawn under them.
+  sections are Photos, Slideshow, Videos, Display, Sleep, Connectivity
+  and Server. The slideshow isn't drawn under them.
+- **Connectivity** says first what carries the traffic (Ethernet or
+  Wi-Fi) and its address; with a cable in, Wi-Fi reads as a backup.
+  - The Wi-Fi networks are a sub-page, strongest first, with the joined
+    one on top and its Forget beside it. A saved network joins on a
+    tap; an open one asks first.
+  - A password is typed on a page of its own, not in a dialog: the
+    on-screen keyboard would cover a dialog.
+  - Progress is words that change ("Joining…", "Joined: getting an
+    address…", "Looking for networks…"), not an animation, which
+    would keep egui drawing.
+  - A join or a scan of the open list keeps the menu up; the idle
+    timeout starts once it ends.
+  - Where Wi-Fi can't be set up, the page says why and how to fix it.
 - **Values that need more than a tap** use a `Value` row that opens a
   dialog, never an inline slider in a list: photo interval, sleep and
   wake times (`kit::number_picker`, `kit::time_picker`: the value large,

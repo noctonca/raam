@@ -2314,9 +2314,8 @@ mod tests {
     fn a_network_joined_by_key_focuses_its_password_field() {
         let mut rig = Rig::new(None);
         networks_open(&mut rig);
-        // In on the connected network's Forget, down to Home IoT (WPA2).
+        // In on the first nearby row, Home IoT (WPA2).
         key_settled(&mut rig, egui::Key::Tab);
-        key_settled(&mut rig, egui::Key::ArrowDown);
         key_settled(&mut rig, egui::Key::Enter);
         assert_eq!(rig.app.state.sub, frame_ui::Sub::Join);
         assert!(
@@ -2333,6 +2332,37 @@ mod tests {
             "Enter in the field joins: {:?}",
             sent(&rig)
         );
+    }
+
+    #[test]
+    fn enter_in_a_password_too_short_to_join_keeps_the_focus() {
+        let mut rig = Rig::new(None);
+        networks_open(&mut rig);
+        key_settled(&mut rig, egui::Key::Tab);
+        key_settled(&mut rig, egui::Key::Enter);
+        assert_eq!(rig.app.state.sub, frame_ui::Sub::Join);
+        rig.frame(&[Event::Text("short".into())]);
+        key_settled(&mut rig, egui::Key::Enter);
+        assert!(sent(&rig).iter().all(|s| !s.starts_with("Join(")));
+        assert!(
+            rig.app.ctx.text_edit_focused(),
+            "the password keeps the focus"
+        );
+        rig.frame(&[Event::Text("-and-more".into())]);
+        assert_eq!(rig.app.state.join.key, "short-and-more");
+    }
+
+    #[test]
+    fn a_networks_page_opened_by_key_never_focuses_forget_first() {
+        let mut rig = Rig::new(None);
+        networks_open(&mut rig);
+        // The connected network's Forget is drawn first, but a destructive
+        // button never takes the first focus: the first nearby row does.
+        key_settled(&mut rig, egui::Key::Tab);
+        key_settled(&mut rig, egui::Key::Enter);
+        assert_ne!(rig.app.state.dialog, frame_ui::Dialog::Forget);
+        assert_eq!(rig.app.state.sub, frame_ui::Sub::Join);
+        assert_eq!(rig.app.state.join.ssid.show(), "Home IoT");
     }
 
     #[test]

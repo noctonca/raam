@@ -121,6 +121,7 @@ pub struct Gallery {
     field_url: String,
     field_empty: String,
     field_key: String,
+    key_shown: bool,
     field_bad: String,
     kit_slider: f32,
     kit_steps: f32,
@@ -154,6 +155,7 @@ impl Default for Gallery {
             field_url: "http://immich.local:2283".into(),
             field_empty: String::new(),
             field_key: "secret-api-key".into(),
+            key_shown: false,
             field_bad: "immich local".into(),
             kit_slider: 30.0,
             kit_steps: 60.0,
@@ -496,7 +498,7 @@ fn components(ui: &mut Ui, g: &mut Gallery) {
             ui.spacing_mut().item_spacing.x = space::L;
             kit::TextField::new(&mut g.field_key, "API key")
                 .icon(icons::KEY)
-                .password(true)
+                .secret(&mut g.key_shown)
                 .width(FIELD_W)
                 .show(ui);
             // Postel's Law: a missing scheme is added, not an error. Only

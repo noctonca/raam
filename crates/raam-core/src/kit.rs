@@ -11,8 +11,8 @@ use crate::icons;
 use crate::theme::{self, Scheme, Type, layer, scheme, shape, size, space, state};
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{
-    Align, Color32, CornerRadius, FontId, Frame, Galley, Id, Key, Margin, Painter, Rangef, Rect,
-    Response, Sense, Shape, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, pos2, vec2,
+    Align, Color32, CornerRadius, FontId, Frame, Galley, Id, Key, LayerId, Margin, Painter, Rangef,
+    Rect, Response, Sense, Shape, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, Vec2, pos2, vec2,
 };
 use std::ops::RangeInclusive;
 use std::sync::Arc;
@@ -149,9 +149,103 @@ fn focusable(ui: &Ui, resp: &Response, first: bool) {
     }
 }
 
-/// The focus ring round `shape`, 2 px outside it, while the control has the
-/// focus; a control that gains it scrolls into view.
-fn focus_ring(ui: &Ui, resp: &Response, shape: Rect, corner: CornerRadius) {
+/// Where a control's focus ring goes (UX.md, Keys): 2 px outside it, with
+/// 4 px of air round it that the layout makes (12 between controls in a
+/// row, between nav items, round the menu's items). Where it can't, the
+/// ring goes just inside.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Room {
+    /// Outside, unless something shows within 4 px of it last pass (a
+    /// layout the kit doesn't space, like two rows of buttons 8 apart):
+    /// then inside, a circle's inside its state layer.
+    Measure,
+    /// Inside: it shares its outline with the next (a segment: Uniform
+    /// Connectedness) or sits in another control (the eye in its field).
+    Inside,
+    /// Outside, always: no ring fits inside (a slider's handle, a switch,
+    /// whose handle comes to 4 px of its track's edge). The slider's handle
+    /// makes its own room.
+    Outside,
+}
+
+/// The air an outside ring keeps round it.
+const RING_AIR: f32 = 4.0;
+
+/// What showed last pass and this, for `crowded`: every kit control's
+/// visible shape (a filled or outlined container, not a text button's
+/// clear one), and every line of text and icon the kit drew, with its
+/// layer. A rect pushed per shape and line, and the previous pass's list
+/// kept: a few hundred rects, pushed under egui's data lock.
+#[derive(Clone, Default)]
+struct Shown {
+    pass: u64,
+    now: Vec<(LayerId, Rect)>,
+    last: Vec<(LayerId, Rect)>,
+}
+
+impl Shown {
+    fn roll(&mut self, pass: u64) {
+        if self.pass != pass {
+            self.last = std::mem::take(&mut self.now);
+            self.pass = pass;
+        }
+    }
+}
+
+fn shown_id() -> Id {
+    Id::new("kit.shown")
+}
+
+/// Notes that something shows at `rect` on `p`'s layer, for the rings of
+/// the next pass.
+fn shows(p: &Painter, rect: Rect) {
+    if !rect.is_positive() {
+        return;
+    }
+    let ctx = p.ctx();
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| {
+        let s = d.get_temp_mut_or_default::<Shown>(shown_id());
+        s.roll(pass);
+        s.now.push((p.layer_id(), rect));
+    });
+}
+
+/// Whether a ring reaching out to `outer` round the shape `own` comes
+/// within `RING_AIR` of anything else in `shown` on its `layer`. What's
+/// inside the shape (its label) or holds it (a card round a button) isn't
+/// a neighbour. By rects, so a rounded neighbour on the diagonal counts
+/// as a little closer than it is.
+fn crowded(shown: &[(LayerId, Rect)], layer: LayerId, own: Rect, outer: Rect) -> bool {
+    let zone = outer.expand(RING_AIR - 0.5);
+    shown.iter().any(|&(l, r)| {
+        l == layer
+            && zone.intersects(r)
+            && !own.expand(0.5).contains_rect(r)
+            && !r.expand(0.5).contains_rect(own)
+    })
+}
+
+/// Whether the ring round `own`, reaching out to `outer`, goes outside it.
+fn ring_outside(ui: &Ui, room: Room, own: Rect, outer: Rect) -> bool {
+    match room {
+        Room::Outside => true,
+        Room::Inside => false,
+        Room::Measure => {
+            let pass = ui.ctx().cumulative_pass_nr();
+            let layer = ui.layer_id();
+            !ui.ctx().data_mut(|d| {
+                let s = d.get_temp_mut_or_default::<Shown>(shown_id());
+                s.roll(pass);
+                crowded(&s.last, layer, own, outer)
+            })
+        }
+    }
+}
+
+/// The focus ring round `shape` while the control has the focus: 2 px
+/// outside it, or just inside it where its `room` says. A control that gains it scrolls into view.
+fn focus_ring(ui: &Ui, resp: &Response, shape: Rect, corner: CornerRadius, room: Room) {
     if !resp.has_focus() {
         return;
     }
@@ -159,6 +253,15 @@ fn focus_ring(ui: &Ui, resp: &Response, shape: Rect, corner: CornerRadius) {
         resp.scroll_to_me(None);
     }
     let s = scheme(ui);
+    if !ring_outside(ui, room, shape, shape.expand(RING_GAP + RING)) {
+        ui.painter().rect_stroke(
+            shape,
+            corner,
+            Stroke::new(RING, s.secondary),
+            StrokeKind::Inside,
+        );
+        return;
+    }
     let grow = |r: u8| r.saturating_add(RING_GAP as u8);
     let corner = CornerRadius {
         nw: grow(corner.nw),
@@ -183,8 +286,10 @@ fn ring_painter(ui: &Ui) -> Painter {
     p
 }
 
-/// The focus ring round a circle of `radius`.
-fn focus_ring_circle(ui: &Ui, resp: &Response, centre: egui::Pos2, radius: f32) {
+/// The focus ring round a circle of `radius` (an icon button's state
+/// layer), as `focus_ring`: inside, it's inside the circle.
+fn focus_ring_circle(ui: &Ui, resp: &Response, centre: egui::Pos2, radius: f32, room: Room) {
+    let own = Rect::from_center_size(centre, Vec2::splat(radius * 2.0));
     if !resp.has_focus() {
         return;
     }
@@ -192,6 +297,11 @@ fn focus_ring_circle(ui: &Ui, resp: &Response, centre: egui::Pos2, radius: f32) 
         resp.scroll_to_me(None);
     }
     let s = scheme(ui);
+    if !ring_outside(ui, room, own, own.expand(RING_GAP + RING)) {
+        ui.painter()
+            .circle_stroke(centre, radius - RING / 2.0, Stroke::new(RING, s.secondary));
+        return;
+    }
     ring_painter(ui).circle_stroke(
         centre,
         radius + RING_GAP + RING / 2.0,
@@ -252,6 +362,7 @@ pub(crate) fn galley_on_baseline(
         ),
         galley.size(),
     );
+    shows(p, galley.mesh_bounds.translate(rect.min.to_vec2()));
     p.galley(rect.min, galley, colour);
     rect
 }
@@ -513,6 +624,9 @@ pub fn button(ui: &mut Ui, kind: ButtonKind, icon: Option<char>, label: &str) ->
             content = s.on_surface;
         }
         let p = ui.painter();
+        if kind != ButtonKind::Text {
+            shows(p, rect);
+        }
         p.rect(
             rect,
             CornerRadius::same(shape::FULL),
@@ -527,7 +641,13 @@ pub fn button(ui: &mut Ui, kind: ButtonKind, icon: Option<char>, label: &str) ->
             x += icon_w;
         }
         galley_on(p, x, Align::Min, cy, galley, content);
-        focus_ring(ui, &resp, rect, CornerRadius::same(shape::FULL));
+        focus_ring(
+            ui,
+            &resp,
+            rect,
+            CornerRadius::same(shape::FULL),
+            Room::Measure,
+        );
     }
     resp
 }
@@ -556,7 +676,7 @@ pub fn icon_button(ui: &mut Ui, icon: char, selected: bool) -> Response {
             icon_font(size::ICON, selected),
             content,
         );
-        focus_ring_circle(ui, &resp, rect.center(), 20.0);
+        focus_ring_circle(ui, &resp, rect.center(), 20.0, Room::Measure);
     }
     resp
 }
@@ -574,6 +694,7 @@ fn paint_switch(ui: &Ui, rect: Rect, t: f32, resp: &Response) {
     let track = Rect::from_center_size(rect.center(), SWITCH);
     let on = t > 0.5;
     let p = ui.painter();
+    shows(p, track);
     let fill = if on {
         s.primary
     } else {
@@ -637,7 +758,15 @@ pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
     if ui.is_rect_visible(rect) {
         paint_switch(ui, rect, t, &resp);
         let track = Rect::from_center_size(rect.center(), SWITCH);
-        focus_ring(ui, &resp, track, CornerRadius::same(shape::FULL));
+        // Inside, the ring would come 1 px from the handle, and the handle's
+        // focus layer spills out of the track anyway.
+        focus_ring(
+            ui,
+            &resp,
+            track,
+            CornerRadius::same(shape::FULL),
+            Room::Outside,
+        );
     }
     resp
 }
@@ -695,7 +824,7 @@ pub fn checkbox(ui: &mut Ui, checked: &mut bool, label: &str) -> Response {
             s.on_surface,
         );
     }
-    focus_ring_circle(ui, &resp, c, 20.0);
+    focus_ring_circle(ui, &resp, c, 20.0, Room::Measure);
     resp
 }
 
@@ -704,6 +833,7 @@ pub fn checkbox(ui: &mut Ui, checked: &mut bool, label: &str) -> Response {
 fn paint_checkbox(p: &Painter, s: &Scheme, c: egui::Pos2, checked: bool) {
     const BOX: f32 = 18.0;
     let b = Rect::from_center_size(c, vec2(BOX, BOX));
+    shows(p, b);
     let corner = CornerRadius::same(2);
     if checked {
         p.rect_filled(b, corner, s.primary);
@@ -862,14 +992,25 @@ pub fn slider(
         );
         galley_on(p, whole.left(), Align::Min, ty, t, s.on_surface);
     }
+    // With the focus, the gap widens to take the ring and its air, since
+    // the handle is too thin for one inside.
+    let gap = if resp.has_focus() {
+        RING_GAP + RING + RING_AIR
+    } else {
+        GAP
+    };
+    shows(
+        ui.painter(),
+        Rect::from_x_y_ranges(rect.x_range(), Rangef::point(cy).expand(TRACK / 2.0)),
+    );
     // Outer ends are pills; the ends at the handle are nearly square.
     let (outer, inner) = ((TRACK / 2.0) as u8, 2u8);
     let active = Rect::from_min_max(
         pos2(rect.left(), cy - TRACK / 2.0),
-        pos2(hx - HANDLE.x / 2.0 - GAP, cy + TRACK / 2.0),
+        pos2(hx - HANDLE.x / 2.0 - gap, cy + TRACK / 2.0),
     );
     let inactive = Rect::from_min_max(
-        pos2(hx + HANDLE.x / 2.0 + GAP, cy - TRACK / 2.0),
+        pos2(hx + HANDLE.x / 2.0 + gap, cy - TRACK / 2.0),
         pos2(rect.right(), cy + TRACK / 2.0),
     );
     if active.width() > 0.0 {
@@ -893,7 +1034,7 @@ pub fn slider(
     // Dots sit where the handle's centre would be at that value, and are
     // hidden under the handle's gap.
     let dot = |x: f32| {
-        if (x - hx).abs() > HANDLE.x / 2.0 + GAP + DOT {
+        if (x - hx).abs() > HANDLE.x / 2.0 + gap + DOT {
             let on_active = x < hx;
             p.circle_filled(
                 pos2(x, cy),
@@ -914,7 +1055,7 @@ pub fn slider(
             }
         }
         _ => {
-            if (x1 - hx).abs() > HANDLE.x / 2.0 + GAP + DOT {
+            if (x1 - hx).abs() > HANDLE.x / 2.0 + gap + DOT {
                 p.circle_filled(pos2(x1, cy), DOT, s.primary);
             }
         }
@@ -923,7 +1064,7 @@ pub fn slider(
     let hw = if held { 2.0 } else { HANDLE.x };
     let handle = Rect::from_center_size(pos2(hx, cy), vec2(hw, HANDLE.y));
     p.rect_filled(handle, CornerRadius::same(2), s.primary);
-    focus_ring(ui, &resp, handle, CornerRadius::same(2));
+    focus_ring(ui, &resp, handle, CornerRadius::same(2), Room::Outside);
     if held {
         // Above everything, so neither the card nor a scroll area clips it.
         let fg = ui
@@ -962,8 +1103,7 @@ pub struct TextField<'a> {
     supporting: Option<&'a str>,
     icon: Option<char>,
     error: bool,
-    password: bool,
-    reveal: Option<&'a mut bool>,
+    secret: Option<&'a mut bool>,
     width: Option<f32>,
 }
 
@@ -976,8 +1116,7 @@ impl<'a> TextField<'a> {
             supporting: None,
             icon: None,
             error: false,
-            password: false,
-            reveal: None,
+            secret: None,
             width: None,
         }
     }
@@ -999,19 +1138,16 @@ impl<'a> TextField<'a> {
         self.error = error;
         self
     }
-    pub fn password(mut self, password: bool) -> Self {
-        self.password = password;
-        self
-    }
     pub fn width(mut self, w: f32) -> Self {
         self.width = Some(w);
         self
     }
-    /// A password field's trailing eye: `shown` is whether the password
-    /// reads in the clear. The error icon gives way to it (the colour and
-    /// the supporting line still say error).
-    pub fn reveal(mut self, shown: &'a mut bool) -> Self {
-        self.reveal = Some(shown);
+    /// A secret (a password, an API key): dots, with a trailing eye that
+    /// shows it in the clear; `shown` is whether it does. Every secret
+    /// field is this one (UX.md, Similarity). The error icon gives way to
+    /// the eye (the colour and the supporting line still say error).
+    pub fn secret(mut self, shown: &'a mut bool) -> Self {
+        self.secret = Some(shown);
         self
     }
 
@@ -1042,13 +1178,14 @@ impl<'a> TextField<'a> {
             field.bottom()
         };
         mark_visual(ui, whole, Rangef::new(field.top(), bottom));
+        shows(ui.painter(), field);
         // The TextEdit's id derives from this control's own id, so two
         // fields in one Ui can't share ids (see `segmented`).
         let id = whole_resp.id.with("edit");
         let had_focus = ui.memory(|m| m.has_focus(id));
 
         let left = space::L + self.icon.map_or(0.0, |_| size::ICON + space::M - space::XS);
-        let right = if self.error || self.reveal.is_some() {
+        let right = if self.error || self.secret.is_some() {
             space::M + size::ICON + space::L
         } else {
             space::L
@@ -1082,7 +1219,7 @@ impl<'a> TextField<'a> {
                 .font(Type::BodyLarge.font())
                 .text_color(s.on_surface)
                 .hint_text(theme::text(hint, Type::BodyLarge).color(s.on_surface_variant))
-                .password(self.password && !self.reveal.as_deref().is_some_and(|r| *r))
+                .password(self.secret.as_deref().is_some_and(|shown| !*shown))
                 .desired_width(w)
                 .min_size(vec2(w, H))
                 .vertical_align(Align::Center),
@@ -1091,7 +1228,7 @@ impl<'a> TextField<'a> {
         focusable(ui, &resp, true);
         // Over the TextEdit, so it takes the tap. The field keeps the
         // focus (and the on-screen keyboard stays) when it had it.
-        let eye = self.reveal.map(|shown| {
+        let eye = self.secret.map(|shown| {
             let r = Rect::from_center_size(
                 pos2(
                     field.right() - space::M - size::ICON / 2.0,
@@ -1178,7 +1315,7 @@ impl<'a> TextField<'a> {
                 icon_font(size::ICON, false),
                 s.on_surface_variant,
             );
-            focus_ring_circle(ui, hit, centre, 20.0);
+            focus_ring_circle(ui, hit, centre, 20.0, Room::Inside);
         } else if self.error {
             icon_on(
                 p,
@@ -1264,6 +1401,9 @@ pub enum Trailing<'a> {
     /// button is a target, as with `Segmented`; `changed` when it's tapped.
     /// Its text ends on the trailing edge, its target overhangs.
     Button(&'a str),
+    /// `Button` for an action that removes something (Forget). It never
+    /// takes a screen's first focus (UX.md, Keys).
+    Destructive(&'a str),
 }
 
 /// What sits on the content edge of a list item.
@@ -1334,7 +1474,7 @@ pub fn list_item(ui: &mut Ui, mut item: ListItem<'_>) -> Response {
     };
     let row_target = !matches!(
         item.trailing,
-        Trailing::Segmented { .. } | Trailing::Button(_)
+        Trailing::Segmented { .. } | Trailing::Button(_) | Trailing::Destructive(_)
     );
     let sense = if row_target {
         Sense::click()
@@ -1394,6 +1534,7 @@ pub fn list_item(ui: &mut Ui, mut item: ListItem<'_>) -> Response {
     }
     // Trailing first, so the text knows how much room it has.
     let mut right = rect.right() - space::L;
+    let destructive = matches!(item.trailing, Trailing::Destructive(_));
     match &mut item.trailing {
         Trailing::None => {}
         Trailing::Chevron => {
@@ -1461,7 +1602,7 @@ pub fn list_item(ui: &mut Ui, mut item: ListItem<'_>) -> Response {
             paint_checkbox(&p, &s, c, **on);
             right = c.x - 9.0 - space::L;
         }
-        Trailing::Button(label) => {
+        Trailing::Button(label) | Trailing::Destructive(label) => {
             let content = s.primary;
             let g = p.layout_no_wrap(label.to_string(), Type::LabelLarge.font(), content);
             let r = Rect::from_min_max(
@@ -1469,7 +1610,7 @@ pub fn list_item(ui: &mut Ui, mut item: ListItem<'_>) -> Response {
                 pos2(right + space::M, cy + size::TOUCH / 2.0),
             );
             let b = ui.interact(r, resp.id.with("button"), Sense::click());
-            focusable(ui, &b, true);
+            focusable(ui, &b, !destructive);
             if b.clicked() {
                 resp.mark_changed();
             }
@@ -1479,7 +1620,7 @@ pub fn list_item(ui: &mut Ui, mut item: ListItem<'_>) -> Response {
                 with_state(Color32::TRANSPARENT, content, &b),
             );
             galley_on(&p, r.left() + space::M, Align::Min, cy, g, content);
-            focus_ring(ui, &b, r, CornerRadius::same(shape::FULL));
+            focus_ring(ui, &b, r, CornerRadius::same(shape::FULL), Room::Measure);
             right = r.left() + space::M - space::L;
         }
     }
@@ -1525,6 +1666,11 @@ pub fn page_title(ui: &mut Ui, title: &str, sub: &str) {
     );
     mark_visual(ui, block, shown);
 }
+
+/// The back arrow's state layer: 34 px, not an icon button's 40, so its
+/// ring (22 px from the arrow's centre on 412) keeps 4 px of air to a
+/// title on the text edge (440) that starts with a W or a J.
+const BACK_R: f32 = 17.0;
 
 /// A sub page's title: `page_title`'s text behind a back arrow, which goes
 /// up to the page that opened it (UX.md, Settings). The arrow is a list
@@ -1580,10 +1726,17 @@ pub fn page_title_back(ui: &mut Ui, title: &str, sub: &str) -> Response {
     let target = Rect::from_center_size(centre, vec2(size::TOUCH, size::TOUCH));
     let resp = ui.interact(target, ui.id().with("kit.page_back"), Sense::click());
     focusable(ui, &resp, false);
+    // The circle and its ring reach a few px above the title's line box,
+    // where a sub page's scroll area would clip them: the clip grows by that
+    // overhang, a fixed amount, so a scrolled page still clips the arrow.
+    let mut clip = ui.clip_rect();
+    clip.min.y -= (head.top() - (cy - BACK_R - RING_GAP - RING)).max(0.0) + 1.0;
+    let mut ui = ui.new_child(UiBuilder::new().id_salt("kit.page_back").max_rect(target));
+    ui.set_clip_rect(clip);
     let p = ui.painter();
     p.circle_filled(
         centre,
-        20.0,
+        BACK_R,
         with_state(Color32::TRANSPARENT, s.on_surface, &resp),
     );
     icon_on(
@@ -1595,7 +1748,7 @@ pub fn page_title_back(ui: &mut Ui, title: &str, sub: &str) -> Response {
         icon_font(size::ICON, false),
         s.on_surface,
     );
-    focus_ring_circle(ui, &resp, centre, 20.0);
+    focus_ring_circle(&ui, &resp, centre, BACK_R, Room::Measure);
     resp
 }
 
@@ -1708,6 +1861,9 @@ pub fn nav_item(ui: &mut Ui, icon: char, label: &str, selected: bool) -> Respons
             (Color32::TRANSPARENT, s.on_surface_variant)
         };
         let p = ui.painter();
+        if selected {
+            shows(p, rect);
+        }
         p.rect_filled(
             rect,
             CornerRadius::same(shape::FULL),
@@ -1732,8 +1888,17 @@ pub fn nav_item(ui: &mut Ui, icon: char, label: &str, selected: bool) -> Respons
             Type::LabelLarge,
             content,
         );
-        focus_ring(ui, &resp, rect, CornerRadius::same(shape::FULL));
+        focus_ring(
+            ui,
+            &resp,
+            rect,
+            CornerRadius::same(shape::FULL),
+            Room::Measure,
+        );
     }
+    // M3's items abut; 12 under each keeps two fills (a press layer and
+    // the selected pill) and a ring off each other (UX.md, Keys).
+    ui.add_space(space::M);
     resp
 }
 
@@ -1750,6 +1915,7 @@ pub fn segmented(ui: &mut Ui, selected: &mut usize, options: &[&str], seg_w: f32
     // routes the first control's taps to the second).
     let (rect, whole) = ui.allocate_exact_size(vec2(seg_w * n as f32, size::TOUCH), Sense::hover());
     mark_visual(ui, rect, rect.y_range());
+    shows(ui.painter(), rect);
     let mut changed = false;
     let p = ui.painter().clone();
     let cy = rect.center().y;
@@ -1816,8 +1982,13 @@ pub fn segmented(ui: &mut Ui, selected: &mut usize, options: &[&str], seg_w: f32
             s.outline,
         );
     }
-    if let Some((r, corner, resp)) = focused {
-        focus_ring(ui, &resp, r, corner);
+    if let Some((mut r, corner, resp)) = focused {
+        // Inside, the ring takes in the divider on its right (the one on
+        // its left is already in it), so both its sides at a join are 3.
+        if r.right() < rect.right() - 0.5 {
+            r.max.x += 1.0;
+        }
+        focus_ring(ui, &resp, r, corner, Room::Inside);
     }
     changed
 }
@@ -1851,6 +2022,7 @@ pub fn chip(ui: &mut Ui, label: &str, selected: bool) -> Response {
             )
         };
         let p = ui.painter();
+        shows(p, chip);
         p.rect(
             chip,
             CornerRadius::same(shape::S),
@@ -1872,7 +2044,7 @@ pub fn chip(ui: &mut Ui, label: &str, selected: bool) -> Response {
             x += icon_w;
         }
         galley_on(p, x, Align::Min, cy, g, content);
-        focus_ring(ui, &resp, chip, CornerRadius::same(shape::S));
+        focus_ring(ui, &resp, chip, CornerRadius::same(shape::S), Room::Measure);
     }
     resp
 }
@@ -1968,9 +2140,10 @@ pub fn top_bar(ui: &mut Ui, title: &str, actions: impl FnOnce(&mut Ui)) {
 }
 
 /// A top app bar with a navigation icon (back) before the title. The icon
-/// sits on the nav pane's icon column and the title on its label column
-/// (the pane's 12 inset + a nav item's 16, then 24 + 12), so the bar lines
-/// up with the list under it. Returns the navigation icon's response.
+/// sits on the nav pane's icon column (the pane's 12 inset + a nav item's
+/// 16), so the bar lines up with the list under it; the title is 8 past
+/// the label column (24 + 12 after the icon), clear of the icon's focus
+/// ring. Returns the navigation icon's response.
 pub fn top_bar_nav(ui: &mut Ui, nav: char, title: &str, actions: impl FnOnce(&mut Ui)) -> Response {
     const ICON_X: f32 = space::M + space::L;
     let s = scheme(ui);
@@ -1997,16 +2170,18 @@ pub fn top_bar_nav(ui: &mut Ui, nav: char, title: &str, actions: impl FnOnce(&mu
         icon_font(size::ICON, false),
         s.on_surface,
     );
+    // The title is 8 past the label column, so it's 4 clear of the
+    // arrow's ring (its S has no side bearing).
     text_on(
         p,
-        bar.left() + ICON_X + size::ICON + space::M,
+        bar.left() + ICON_X + size::ICON + space::M + space::S,
         Align::Min,
         cy,
         title,
         Type::TitleLarge,
         s.on_surface,
     );
-    focus_ring_circle(ui, &resp, target.center(), 20.0);
+    focus_ring_circle(ui, &resp, target.center(), 20.0, Room::Measure);
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.add_space(space::S);
         actions(ui);
@@ -2047,7 +2222,10 @@ pub fn floating_toolbar(
     widest: &str,
 ) -> Option<usize> {
     const ITEM_H: f32 = 64.0;
-    const PAD: f32 = space::S;
+    // The padding and the GAP between items leave a focus ring 4 px of
+    // air to the bar's edge and the next item.
+    const PAD: f32 = space::M;
+    const GAP: f32 = space::M;
     let s = scheme_of(ctx);
     let mut hit = None;
     // Measured before the Area, and placed at an explicit position: an
@@ -2069,7 +2247,7 @@ pub fn floating_toolbar(
         .fold(text_w(widest, label_font.clone()), f32::max);
     let item_w = (label_w + 2.0 * space::L).max(80.0).ceil();
     let n = items.len() as f32;
-    let row_w = n * item_w + (n - 1.0).max(0.0) * space::S;
+    let row_w = n * item_w + (n - 1.0).max(0.0) * GAP;
     let line = Type::BodyMedium.spec().2;
     let status_w = status
         .iter()
@@ -2124,7 +2302,7 @@ pub fn floating_toolbar(
         let inner = CornerRadius::same(shape::XL - PAD as u8);
         for (i, it) in items.iter().enumerate() {
             let r = Rect::from_min_size(
-                pos2(x0 + i as f32 * (item_w + space::S), row_top),
+                pos2(x0 + i as f32 * (item_w + GAP), row_top),
                 vec2(item_w, ITEM_H),
             );
             let sense = if it.enabled {
@@ -2170,7 +2348,7 @@ pub fn floating_toolbar(
                 Type::LabelMedium,
                 content,
             );
-            focus_ring(ui, &resp, r, inner);
+            focus_ring(ui, &resp, r, inner, Room::Measure);
         }
     });
     hit
@@ -2206,6 +2384,7 @@ pub fn tonal_icon_button(ui: &mut Ui, icon: char) -> Response {
             )
         };
         p.circle_filled(rect.center(), 20.0, bg);
+        shows(p, Rect::from_center_size(rect.center(), Vec2::splat(40.0)));
         icon_on(
             p,
             rect.center().x,
@@ -2215,7 +2394,7 @@ pub fn tonal_icon_button(ui: &mut Ui, icon: char) -> Response {
             icon_font(size::ICON, false),
             fg,
         );
-        focus_ring_circle(ui, &resp, rect.center(), 20.0);
+        focus_ring_circle(ui, &resp, rect.center(), 20.0, Room::Measure);
     }
     resp
 }
@@ -2469,5 +2648,76 @@ fn step_focus(ctx: &egui::Context, order: &[Id], own_arrows: Option<Id>) {
     let j = (i as i32 + step).clamp(0, order.len() as i32 - 1) as usize;
     if j != i {
         ctx.memory_mut(|m| m.request_focus(order[j]));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 48 px button at `x`, 100 wide, on the content row.
+    fn button_at(x: f32) -> Rect {
+        Rect::from_min_size(pos2(x, 200.0), vec2(100.0, size::BUTTON_H))
+    }
+
+    fn ring_of(r: Rect) -> Rect {
+        r.expand(RING_GAP + RING)
+    }
+
+    #[test]
+    fn a_ring_is_crowded_by_a_neighbour_8_away_and_not_12() {
+        let layer = LayerId::background();
+        let own = button_at(400.0);
+        let at_8 = [(layer, button_at(own.right() + space::S))];
+        let at_12 = [(layer, button_at(own.right() + space::M))];
+        assert!(crowded(&at_8, layer, own, ring_of(own)));
+        assert!(!crowded(&at_12, layer, own, ring_of(own)));
+        // 9 is exactly the ring's reach and its air.
+        let at_9 = [(layer, button_at(own.right() + RING_GAP + RING + RING_AIR))];
+        assert!(!crowded(&at_9, layer, own, ring_of(own)));
+    }
+
+    #[test]
+    fn text_close_under_a_ring_crowds_it() {
+        let layer = LayerId::background();
+        let own = button_at(400.0);
+        let line =
+            |gap: f32| Rect::from_min_size(pos2(420.0, own.bottom() + gap), vec2(60.0, 14.0));
+        assert!(crowded(&[(layer, line(8.0))], layer, own, ring_of(own)));
+        assert!(!crowded(&[(layer, line(9.0))], layer, own, ring_of(own)));
+    }
+
+    #[test]
+    fn its_own_label_and_what_holds_it_are_no_neighbours() {
+        let layer = LayerId::background();
+        let own = button_at(400.0);
+        // Its label, a card round it, and its own shape from last pass.
+        let label = Rect::from_min_size(pos2(424.0, 214.0), vec2(52.0, 20.0));
+        let card = own.expand(space::S);
+        let shown = [(layer, label), (layer, card), (layer, own)];
+        assert!(!crowded(&shown, layer, own, ring_of(own)));
+    }
+
+    #[test]
+    fn a_neighbour_on_another_layer_is_no_neighbour() {
+        // The page under a dialog.
+        let own = button_at(400.0);
+        let page = LayerId::background();
+        let dialog = LayerId::new(egui::Order::Foreground, Id::new("dialog"));
+        let shown = [(page, button_at(own.right() + space::S))];
+        assert!(!crowded(&shown, dialog, own, ring_of(own)));
+    }
+
+    #[test]
+    fn controls_in_a_row_are_12_apart() {
+        // A ring reaches 5 outside its control; 12 leaves it 4 of air to
+        // the next, 8 left it 3.
+        let ctx = egui::Context::default();
+        theme::install(&ctx, theme::Schemes::baked(), theme::Options::default());
+        for t in [egui::Theme::Dark, egui::Theme::Light] {
+            let gap = ctx.style_of(t).spacing.item_spacing.x;
+            assert_eq!(gap, space::M);
+            assert!(gap >= RING_GAP + RING + RING_AIR);
+        }
     }
 }

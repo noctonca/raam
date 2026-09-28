@@ -85,6 +85,9 @@ Measured in the detail pane (1280 wide, list pane 360, pane inset 24):
 **Fitts's Law** (target size and distance).
 - 48×48 minimum touch target, 8 px between targets. The Touch targets page
   measures this on the frame; 32 and 40 exist only as test rows.
+- Controls side by side in a row are 12 apart (the style's
+  `item_spacing.x`), and nav items 12 apart, so a focus ring keeps its
+  4 px of air (see [Keys](#keys)).
 - The whole row is the target for a list item, never just its switch.
 - Destructive actions are never next to the thing tapped most often.
 
@@ -118,6 +121,9 @@ Measured in the detail pane (1280 wide, list pane 360, pane inset 24):
 - Supporting text touches its headline (no gap beyond the line boxes).
 - A field's supporting or error text is 4 below the field, with the
   field's text edge.
+- Two fills never touch: a press layer, a selected pill or a focus ring
+  keeps visible space from its neighbour's (a pressed nav item's layer
+  ran into the selected pill below it when the items abutted).
 
 **Law of Similarity** (things that look alike are taken to work alike).
 - One style per role on every page. Section headers are `titleSmall` in
@@ -126,6 +132,10 @@ Measured in the detail pane (1280 wide, list pane 360, pane inset 24):
   different settings never share an icon (Clock and 24-hour clock did).
 - The same component has the same size everywhere: sliders and text
   fields in one column share a width.
+- Every secret is one component, whatever it guards (a Wi-Fi password,
+  the API key): a filled text field with the key icon, dots, and the
+  trailing eye that shows it in the clear (`kit::TextField::secret`).
+  A shown secret is hidden again when the menu closes.
 
 **Law of Common Region** (a boundary makes a group).
 - A card is visible: its fill differs from what it sits on (`kit::card`
@@ -236,6 +246,8 @@ there stops being read.
   - surface-container at 90% opacity;
   - every item the same width, sized for the longest label it can ever
     show, so Hide turning into "Undo hide" moves nothing;
+  - the items 12 apart and 12 in from the bar's edges, room for a focus
+    ring;
   - one status line in plain words;
   - Pause/Previous/Next disabled while there are no photos.
 
@@ -257,6 +269,12 @@ there stops being read.
   It goes away once a physical key is pressed, and comes back with the
   next touch.
 
+  What's being typed stays in view: the focused field, its supporting
+  line, and the control it leads to (the next field, the button it
+  submits to) sit above the keyboard, and the page scrolls to keep them
+  there. Anything else may go under it, the nav list too, which never
+  moves to make room.
+
 ## Keys
 
 A physical keyboard does what a finger does, with the keys people know
@@ -274,17 +292,27 @@ from photo viewers and dialogs (Jakob's Law).
   menu, and last the menu closes.
 - **Where the focus goes:** opening the menu by key focuses its first
   item that can act; settings, the selected section; a sub page, its
-  first control; a picker, the chosen option; a number dialog, its
-  slider; a confirmation, Cancel, never the action it confirms. Stepping
-  back returns the focus to the control that opened the level. A key
-  pressed while nothing has the focus (the menu was opened by a tap)
-  only brings the focus in.
+  first control that isn't destructive; a picker, the chosen option; a
+  number dialog, its slider; a confirmation, Cancel, never the action it
+  confirms. Stepping back returns the focus to the control that opened
+  the level. A key pressed while nothing has the focus (the menu was
+  opened by a tap) only brings the focus in.
 - **The focus ring** is M3's: 3 px of secondary, 2 px outside the
   control's shape, over the 10% focus state layer. A control that spans
   its pane (a list row, a picker's option) takes it just inside, where
   the pane can't clip it. A text field shows focus with its own
   indicator line instead. Only keys give focus: a tap never does, except
   on a text field.
+- **The ring keeps at least 4 px of air** to anything else: another
+  control, text, an icon, a container's edge. The layout makes that
+  room: 12 between controls in a row and between nav items, 12 round the
+  menu's items, the top bar's title 8 past its label column, a focused
+  slider's gap 9 either side of its handle, and a sub page's back arrow
+  with a 34 px state layer, so its ring is 4 clear of the title on 440.
+  Where controls share an outline (segments) or one sits inside another
+  (the eye in a field), the ring goes just inside. So does any ring the
+  kit finds still within 4 px of something (a layout it doesn't space,
+  like the gallery's rows of buttons 8 apart).
 - A key counts as a touch for the menu's auto-dismiss and for the sleep
   schedule's idle time.
 

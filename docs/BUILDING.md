@@ -17,15 +17,38 @@ cargo run --release -- --photos DIR
 Add `--fullscreen` to fill the monitor, as a Linux frame runs it. The
 flags are listed at the top of [src/main.rs](../src/main.rs).
 
+`--features gles` makes the host ask for an OpenGL ES 2.0 context over
+EGL instead of OpenGL 3.2, and link libGLESv2 instead of libGL
+(`libgles-dev` on Debian and Ubuntu). It's for a GPU with no core
+profile, such as a Raspberry Pi's.
+
+### A Raspberry Pi
+
+The host needs X11 or Wayland: on a Pi with no desktop, a kiosk
+compositor such as cage runs it on its own. Started over SSH, cage
+takes the screen through seatd (Debian's seatd service lets the `video`
+group in):
+
+```sh
+LIBSEAT_BACKEND=seatd cage -- raam --fullscreen --photos DIR
+```
+
+A first-generation Pi or a Pi Zero is ARMv6: Rust's
+`arm-unknown-linux-gnueabihf` target, with a linker and C compiler
+aimed at ARMv6 (for ring and SQLite). Debian's armhf cross toolchain
+builds for ARMv7, which these can't run; clang and lld with a copy of
+the Pi's own libraries and headers as the sysroot work.
+
 ## Checks
 
-The same five CI runs on every push and PR:
+The same six CI runs on every push and PR:
 
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo clippy -p raam-web --target wasm32-unknown-unknown -- -D warnings
+cargo clippy --workspace --all-targets --features gles -- -D warnings
 cargo clippy -p raam-android --target armv7-linux-androideabi -- -D warnings
 ```
 

@@ -42,6 +42,11 @@ jobs:
       # so the native clippy above never sees them.
       - name: web host lints clean for wasm
         run: cargo clippy -p raam-web --target wasm32-unknown-unknown -- -D warnings
+      # The `gles` feature swaps the desktop host's GL linkage (a GPU with
+      # no core profile, as a Raspberry Pi's), so the clippy above never
+      # compiles that path.
+      - name: desktop host lints clean with gles
+        run: cargo clippy --workspace --all-targets --features gles -- -D warnings
 
   # hosts/android is cfg(target_os = "android") throughout, so the native
   # clippy above sees an empty crate. This lints it for the frame's target

@@ -19,6 +19,11 @@ rust-version.workspace = true
 # runs the slideshow on the engine; `--page` is the preset host, the widget
 # gallery and every frame_ui screen by name, for the ux-qa pass.
 
+[features]
+# A GLES 2.0 context in place of desktop GL 3.2, linked to libGLESv2:
+# for a Linux frame whose GPU has no core profile, as a Raspberry Pi's.
+gles = ["raam-core/gles"]
+
 [dependencies]
 raam-core.workspace = true
 raam-model.workspace = true

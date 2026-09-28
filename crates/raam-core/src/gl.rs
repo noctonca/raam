@@ -1,7 +1,9 @@
 //! Raw GLES2 FFI: the painter's and pipeline's whole GL surface, plus
 //! `RenderTarget`. This is the cfg-selected GL layer, one set of entry
-//! points over three linkages: extern GLES2 on Android; the same extern
-//! names on the desktop host (macOS/Linux GL exports them, and a cfg
+//! points over three linkages: extern GLES2 on Android, and on Linux with
+//! the `gles` feature (a GPU with no core profile, as a Raspberry Pi's
+//! VideoCore); the same extern names on the desktop host (macOS/Linux GL
+//! exports them, and a cfg
 //! block below rewrites the GLSL ES 1.00 shaders to 1.50 for the core
 //! contexts glutin makes there); and on wasm32 the WebGL1 shim in
 //! gl/webgl.rs, which implements them over the canvas's context. The
@@ -119,7 +121,7 @@ unsafe extern "C" {
     pub fn glBlendFuncSeparate(src_rgb: GlEnum, dst_rgb: GlEnum, src_a: GlEnum, dst_a: GlEnum);
     pub fn glScissor(x: GlInt, y: GlInt, w: GlSizei, h: GlSizei);
     // The desktop linkage wraps these two (GL_ALPHA).
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", feature = "gles"))]
     pub fn glTexSubImage2D(
         target: GlEnum,
         level: GlInt,
@@ -145,7 +147,7 @@ unsafe extern "C" {
     pub fn glBindTexture(target: GlEnum, texture: GlUint);
     pub fn glActiveTexture(texture: GlEnum);
     // The desktop linkage wraps these two (GL_ALPHA).
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", feature = "gles"))]
     pub fn glTexImage2D(
         target: GlEnum,
         level: GlInt,
@@ -180,7 +182,11 @@ pub const GL_MAX_TEXTURE_SIZE: GlEnum = 0x0D33;
 // GLSL ES 1.00 is rewritten to 1.50 on the way into `link_program`, a
 // core context needs one vertex array object bound before any draw, and
 // GLES2's GL_ALPHA textures become swizzled one-channel ones.
-#[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
+#[cfg(all(
+    not(target_os = "android"),
+    not(feature = "gles"),
+    not(target_arch = "wasm32")
+))]
 mod desktop {
     use super::*;
 
@@ -332,8 +338,40 @@ mod desktop {
     }
 }
 
-#[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
+#[cfg(all(
+    not(target_os = "android"),
+    not(feature = "gles"),
+    not(target_arch = "wasm32")
+))]
 pub use desktop::{bind_vao, glReadPixels, glTexImage2D, glTexSubImage2D};
+
+// The GLES2 linkage on a desktop host: the Android one, plus the two
+// entry points the host takes from the desktop linkage.
+#[cfg(all(feature = "gles", not(target_os = "android")))]
+mod gles {
+    use super::*;
+
+    unsafe extern "C" {
+        pub fn glReadPixels(
+            x: GlInt,
+            y: GlInt,
+            w: GlSizei,
+            h: GlSizei,
+            format: GlEnum,
+            type_: GlEnum,
+            data: *mut c_void,
+        );
+    }
+
+    /// Nothing to bind: GLES2 draws with the default vertex array.
+    ///
+    /// # Safety
+    /// None; unsafe to match the desktop linkage's.
+    pub unsafe fn bind_vao() {}
+}
+
+#[cfg(all(feature = "gles", not(target_os = "android")))]
+pub use gles::{bind_vao, glReadPixels};
 
 ///
 /// # Safety
@@ -359,7 +397,11 @@ pub unsafe fn gl_string(name: GlEnum) -> String {
 /// # Safety
 /// Requires a current GL context.
 pub unsafe fn link_program(label: &str, vs_src: &str, fs_src: &str) -> GlUint {
-    #[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
+    #[cfg(all(
+        not(target_os = "android"),
+        not(feature = "gles"),
+        not(target_arch = "wasm32")
+    ))]
     let (vs_src, fs_src) = (
         &desktop::to_150(vs_src, false),
         &desktop::to_150(fs_src, true),

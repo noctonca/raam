@@ -6,10 +6,14 @@ this directory when work on it starts.
 ## Smaller items
 
 - A Raspberry Pi 4 or 5 as a Linux frame. Mesa's V3D driver offers
-  OpenGL 3.1 at most, and OpenGL ES 3.1; the desktop host asks for
-  OpenGL 3.2, so there it needs a GLES context, as on the frame.
+  OpenGL 3.1 at most, and OpenGL ES 3.1, so it needs the `gles`
+  build, as a first-generation Pi does; untested there.
+- Photos larger than the GPU's `GL_MAX_TEXTURE_SIZE`. A first-generation
+  Pi's is 2048, and Immich's previews (short side 1440) of 3:2 and 16:9
+  photos are 2160 to 2560 px long; nothing decodes them smaller yet.
 - The desktop host has no sleep schedule or screen power yet, and no
-  physical keyboard input.
+  physical keyboard input. `--fullscreen` hides the pointer, so a mouse
+  on a Linux frame has no cursor to aim with.
 - A steady-state memory reading on the frame, stills only, against the
   budget in [ARCHITECTURE.md](../ARCHITECTURE.md#memory-budget).
 
@@ -26,9 +30,7 @@ this directory when work on it starts.
 
 ## Experiments
 
-- A first-generation Raspberry Pi as a stills-only frame. Its
-  VideoCore IV has OpenGL ES 2, like the Mali-400, but the desktop host
-  asks for desktop GL 3.2 under X or Wayland. A bare OS needs a KMS/DRM
-  host with an EGL context for GLES2 and touch input, and Rust's ARMv6
-  target. The question is how the renderer and the JPEG decoding fare
-  on one 700 MHz core.
+- A first-generation Raspberry Pi as a stills-only frame. The `gles`
+  build runs on one under cage. Still open: how the renderer and the
+  JPEG decoding fare on one 700 MHz core, what the compositor costs
+  against a bare KMS/DRM host, and memory on 512 MB.

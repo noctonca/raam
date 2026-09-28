@@ -1,6 +1,7 @@
 //! The small host-implemented seams (docs/ARCHITECTURE.md "The seams").
-//! `Clock` lives in clock.rs, `TileSource` in source.rs and the video seam
-//! in video.rs; here are the ones that are a single trait each.
+//! `Clock` lives in clock.rs, `TileSource` in source.rs, the video seam in
+//! video.rs and `Network` in network.rs; here are the ones that are a
+//! single trait each.
 
 use raam_model::ClipInfo;
 

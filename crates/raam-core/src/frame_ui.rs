@@ -13,7 +13,8 @@
 //! `presets` and the `Stats` fixtures are the QA surface: every screen
 //! reachable by name for the desktop host's `--page` and the ux-qa pass.
 use crate::icons;
-use crate::kit::{self, DialogResult, ListItem, Tone, ToolItem, Trailing};
+use crate::kit::{self, ButtonKind, DialogResult, ListItem, Tone, ToolItem, Trailing};
+use crate::network::{self, JoinStage, LinkKind, NetCommand, NetSnapshot, Security, Ssid, Wifi};
 use crate::theme::{self, Type, scheme, size, space};
 use egui::{Align, CornerRadius, Ui, UiBuilder};
 use raam_model::limits::{
@@ -60,6 +61,8 @@ pub struct Actions {
     pub export: bool,
     /// (Immich album id, picked).
     pub select_album: Vec<(String, bool)>,
+    /// For the host's network worker, in order.
+    pub net: Vec<NetCommand>,
 }
 
 impl Actions {
@@ -76,6 +79,7 @@ impl Actions {
             || self.unhide.is_some()
             || self.export
             || !self.select_album.is_empty()
+            || !self.net.is_empty()
     }
 }
 
@@ -90,7 +94,7 @@ pub enum Screen {
 }
 
 /// The settings' sections, in the nav pane's order: most used first, the
-/// server last (UX.md, Serial Position).
+/// network and the server last (UX.md, Serial Position).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Section {
     Photos,
@@ -98,16 +102,18 @@ pub enum Section {
     Videos,
     Display,
     Sleep,
+    Connectivity,
     Server,
 }
 
 impl Section {
-    pub const ALL: [Section; 6] = [
+    pub const ALL: [Section; 7] = [
         Section::Photos,
         Section::Slideshow,
         Section::Videos,
         Section::Display,
         Section::Sleep,
+        Section::Connectivity,
         Section::Server,
     ];
 
@@ -118,6 +124,7 @@ impl Section {
             Section::Videos => "Videos",
             Section::Display => "Display",
             Section::Sleep => "Sleep",
+            Section::Connectivity => "Connectivity",
             Section::Server => "Server",
         }
     }
@@ -129,6 +136,7 @@ impl Section {
             Section::Videos => icons::MOVIE,
             Section::Display => icons::DISPLAY_SETTINGS,
             Section::Sleep => icons::BEDTIME,
+            Section::Connectivity => icons::WIFI,
             Section::Server => icons::DNS,
         }
     }
@@ -140,6 +148,69 @@ pub enum Sub {
     None,
     Albums,
     Hidden,
+    Networks,
+    /// Under Networks: a network's password, or a hidden network.
+    Join,
+}
+
+impl Sub {
+    /// Where Back goes.
+    fn parent(self) -> Sub {
+        match self {
+            Sub::Join => Sub::Networks,
+            _ => Sub::None,
+        }
+    }
+
+    fn depth(self) -> usize {
+        match self {
+            Sub::None => 0,
+            Sub::Join => 2,
+            _ => 1,
+        }
+    }
+}
+
+/// The Join page's draft: a listed network, or a hidden one typed in.
+#[derive(Default)]
+pub struct JoinDraft {
+    pub ssid: Ssid,
+    pub security: Option<Security>,
+    /// Typed in: its name is `name`, and its security is picked here.
+    pub hidden: bool,
+    pub name: String,
+    pub key: String,
+    /// The password reads in the clear.
+    pub reveal: bool,
+    /// Sent: the page follows the snapshot's join of this network.
+    pub sent: bool,
+}
+
+impl JoinDraft {
+    fn listed(ssid: Ssid, security: Security) -> Self {
+        JoinDraft {
+            ssid,
+            security: Some(security),
+            ..Default::default()
+        }
+    }
+
+    fn hidden() -> Self {
+        JoinDraft {
+            hidden: true,
+            security: Some(Security::Wpa2),
+            ..Default::default()
+        }
+    }
+
+    /// The network's name as it will be sent.
+    fn target(&self) -> Ssid {
+        if self.hidden {
+            Ssid::new(self.name.trim())
+        } else {
+            self.ssid.clone()
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -153,6 +224,12 @@ pub enum Dialog {
     WakeAt,
     CacheSize,
     ClearCache,
+    /// The connection's details.
+    NetInfo,
+    /// Join an open network (`AppState::net_pick`)?
+    JoinOpen,
+    /// Forget a saved network (`AppState::net_pick`)?
+    Forget,
 }
 
 /// What the controller shows in the menu's status line and the UI can't
@@ -192,6 +269,16 @@ pub struct AppState {
     /// The host runs a weather worker (the web demo doesn't), set by the
     /// controller; without one the Weather switch is greyed out.
     pub has_weather: bool,
+    /// The host's network snapshot, copied in by the controller. `None` on
+    /// a host without a network worker: Wi-Fi can't be set up there.
+    pub network: Option<NetSnapshot>,
+    /// The Wi-Fi switch's position until the snapshot agrees.
+    pub wifi_pending: Option<bool>,
+    pub join: JoinDraft,
+    /// The network a Join open or Forget dialog is about.
+    pub net_pick: Ssid,
+    /// Focus the Join page's password field on the next pass (a preset).
+    focus_key: bool,
     /// The time an open Sleep at / Wake at dialog is editing.
     time_draft: u32,
     /// The interval an open Photo interval dialog is editing.
@@ -231,7 +318,7 @@ struct Level {
 impl Level {
     fn depth(self) -> usize {
         usize::from(self.screen == Screen::Settings)
-            + usize::from(self.sub != Sub::None)
+            + self.sub.depth()
             + usize::from(self.dialog != Dialog::None)
     }
 
@@ -305,6 +392,11 @@ impl AppState {
             pending_albums: HashMap::new(),
             status: Status::default(),
             has_weather: true,
+            network: None,
+            wifi_pending: None,
+            join: JoinDraft::default(),
+            net_pick: Ssid::default(),
+            focus_key: false,
             time_draft: 0,
             interval_draft: 10.0,
             delay_draft: 0.0,
@@ -325,6 +417,8 @@ impl AppState {
         self.screen = Screen::Menu;
         self.sub = Sub::None;
         self.dialog = Dialog::None;
+        // A typed password goes with the menu.
+        self.join = JoinDraft::default();
         self.keyboard = keyboard();
         self.typing = false;
         self.seen = None;
@@ -475,6 +569,20 @@ pub const PAGES: &[&str] = &[
     "set-sleep",
     "set-sleep-at",
     "set-sleep-wake",
+    "set-connectivity",
+    "set-connectivity-wifi",
+    "set-connectivity-off",
+    "set-connectivity-unsupported",
+    "set-connectivity-none",
+    "set-connectivity-info",
+    "set-networks",
+    "set-networks-open",
+    "set-networks-forget",
+    "set-join",
+    "set-join-keyboard",
+    "set-join-joining",
+    "set-join-wrong",
+    "set-join-hidden",
     "set-server",
     "set-server-keyboard",
     "set-server-cache",
@@ -530,6 +638,16 @@ pub fn preset(name: &str) -> Option<AppState> {
     };
     st.shown_scale = (!first_run).then_some(ScaleMode::Fill);
     st.library = lib;
+    // A first run hasn't joined a network yet (on the Connectivity pages:
+    // the others show a frame that's on one).
+    let net_page = ["set-connectivity", "set-networks", "set-join"]
+        .iter()
+        .any(|p| base.starts_with(p));
+    st.network = Some(if first_run && net_page {
+        network::sample_unjoined()
+    } else {
+        network::sample()
+    });
     let settings = |st: &mut AppState, section, sub, dialog| {
         st.screen = Screen::Settings;
         st.section = section;
@@ -566,6 +684,80 @@ pub fn preset(name: &str) -> Option<AppState> {
         "set-sleep-wake" => {
             settings(&mut st, Section::Sleep, Sub::None, Dialog::WakeAt);
             st.time_draft = st.settings.wake_min;
+        }
+        "set-connectivity" => settings(&mut st, Section::Connectivity, Sub::None, Dialog::None),
+        "set-connectivity-wifi" => {
+            settings(&mut st, Section::Connectivity, Sub::None, Dialog::None);
+            if !first_run {
+                st.network = Some(network::sample_wifi_only());
+            }
+        }
+        "set-connectivity-off" => {
+            settings(&mut st, Section::Connectivity, Sub::None, Dialog::None);
+            if let Some(n) = &mut st.network {
+                n.links.retain(|l| l.kind == LinkKind::Ethernet);
+                if let Ok(w) = &mut n.wifi {
+                    w.enabled = false;
+                    w.current = None;
+                }
+            }
+        }
+        "set-connectivity-unsupported" => {
+            settings(&mut st, Section::Connectivity, Sub::None, Dialog::None);
+            if let Some(n) = &mut st.network {
+                n.wifi = Err("Wi-Fi on this device is managed by NetworkManager, which Raam can't set up yet. Use nmcli or the desktop's network settings.".into());
+            }
+        }
+        "set-connectivity-none" => {
+            settings(&mut st, Section::Connectivity, Sub::None, Dialog::None);
+            st.network = None;
+        }
+        "set-connectivity-info" => {
+            settings(&mut st, Section::Connectivity, Sub::None, Dialog::NetInfo)
+        }
+        "set-networks" => settings(&mut st, Section::Connectivity, Sub::Networks, Dialog::None),
+        "set-networks-open" => {
+            settings(
+                &mut st,
+                Section::Connectivity,
+                Sub::Networks,
+                Dialog::JoinOpen,
+            );
+            st.net_pick = Ssid::new("Café Lumière");
+        }
+        "set-networks-forget" => {
+            settings(
+                &mut st,
+                Section::Connectivity,
+                Sub::Networks,
+                Dialog::Forget,
+            );
+            st.net_pick = Ssid::new("Home");
+        }
+        "set-join" | "set-join-keyboard" | "set-join-joining" | "set-join-wrong" => {
+            settings(&mut st, Section::Connectivity, Sub::Join, Dialog::None);
+            let ssid = Ssid::new("Neighbour 5G");
+            st.join = JoinDraft::listed(ssid.clone(), Security::Wpa2Wpa3);
+            if base != "set-join" {
+                st.join.key = "correct horse".into();
+            }
+            st.focus_key = base == "set-join-keyboard";
+            let stage = match base {
+                "set-join-joining" => Some(JoinStage::Connecting),
+                "set-join-wrong" => Some(JoinStage::Failed(network::JoinError::WrongKey)),
+                _ => None,
+            };
+            if let Some(stage) = stage
+                && let Some(Ok(w)) = st.network.as_mut().map(|n| n.wifi.as_mut())
+            {
+                st.join.sent = true;
+                w.join = Some(network::Join { ssid, stage });
+            }
+        }
+        "set-join-hidden" => {
+            settings(&mut st, Section::Connectivity, Sub::Join, Dialog::None);
+            st.join = JoinDraft::hidden();
+            st.join.name = "Studio".into();
         }
         "set-server" => settings(&mut st, Section::Server, Sub::None, Dialog::None),
         "set-server-keyboard" => {
@@ -616,9 +808,59 @@ pub fn stand_in(st: &mut AppState) {
             al.selected = on;
         }
     }
+    // Wi-Fi: every command lands at once.
+    if let Some(Ok(w)) = st.network.as_mut().map(|n| n.wifi.as_mut()) {
+        for cmd in a.net {
+            match cmd {
+                NetCommand::Scan => {}
+                NetCommand::SetEnabled(on) => {
+                    w.enabled = on;
+                    if !on {
+                        w.current = None;
+                    }
+                }
+                NetCommand::Join { ssid, security, .. } => {
+                    stand_in_join(w, ssid, security);
+                }
+                NetCommand::Connect(ssid) => {
+                    let security = w
+                        .nearby
+                        .iter()
+                        .find(|n| n.ssid == ssid)
+                        .map_or(Security::Wpa2, |n| n.security);
+                    stand_in_join(w, ssid, security);
+                }
+                NetCommand::Forget(ssid) => {
+                    w.saved.retain(|s| *s != ssid);
+                    if w.current.as_ref().is_some_and(|c| c.ssid == ssid) {
+                        w.current = None;
+                    }
+                }
+            }
+        }
+    }
     if a.close {
         st.reset_on_close();
     }
+}
+
+fn stand_in_join(w: &mut Wifi, ssid: Ssid, security: Security) {
+    let rssi = w.nearby.iter().find(|n| n.ssid == ssid).map(|n| n.rssi);
+    w.current = Some(network::Current {
+        ssid: ssid.clone(),
+        rssi,
+        freq_mhz: 2437,
+        security,
+        address: Some("192.168.1.32".into()),
+        link_mbps: Some(72),
+    });
+    if !w.is_saved(&ssid) {
+        w.saved.push(ssid.clone());
+    }
+    w.join = Some(network::Join {
+        ssid,
+        stage: JoinStage::Joined { remembered: true },
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -809,7 +1051,7 @@ fn keys(ctx: &egui::Context, st: &mut AppState) {
         && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape))
     {
         if st.sub != Sub::None {
-            st.sub = Sub::None;
+            st.sub = st.sub.parent();
         } else if st.screen == Screen::Settings {
             st.screen = Screen::Menu;
             // The keyboard's hysteresis would flash it over the menu.
@@ -918,9 +1160,13 @@ fn status_line(st: &AppState) -> String {
         total += lib.local_ready - if total > 0 { lib.shared } else { 0 };
     }
     let mut parts = Vec::new();
+    // No cable and no Wi-Fi: nothing else can be fixed first.
+    let unplugged = st.network.as_ref().is_some_and(|n| n.route().is_none());
     if total == 0 {
         parts.push("No photos yet".to_string());
-        if s.immich_enabled && no_server(s) {
+        if unplugged {
+            parts.push("connect to a network in Settings".into());
+        } else if s.immich_enabled && no_server(s) {
             parts.push("add a server in Settings".into());
         } else if s.immich_enabled && albums.is_empty() {
             parts.push("pick albums in Settings".into());
@@ -933,7 +1179,11 @@ fn status_line(st: &AppState) -> String {
         });
         parts.push(photos(total));
         if s.immich_enabled && !no_server(s) && !st.status.online {
-            parts.push("offline: saved photos only".into());
+            parts.push(if unplugged {
+                "no network: saved photos only".into()
+            } else {
+                "offline: saved photos only".into()
+            });
         }
     }
     if !st.status.weather.is_empty() {
@@ -1084,6 +1334,9 @@ fn draw_settings(ui: &mut Ui, st: &mut AppState) {
                             (Section::Videos, _) => videos_page(ui, st),
                             (Section::Display, _) => display_page(ui, st),
                             (Section::Sleep, _) => sleep_page(ui, st),
+                            (Section::Connectivity, Sub::Networks) => networks_page(ui, st),
+                            (Section::Connectivity, Sub::Join) => join_page(ui, st),
+                            (Section::Connectivity, _) => connectivity_page(ui, st),
                             (Section::Server, _) => server_page(ui, st),
                         }
                         claimed_by(ui.ctx(), st, claimed);
@@ -1093,7 +1346,7 @@ fn draw_settings(ui: &mut Ui, st: &mut AppState) {
     });
     if back {
         if st.sub != Sub::None {
-            st.sub = Sub::None;
+            st.sub = st.sub.parent();
         } else {
             st.screen = Screen::Menu;
             // The keyboard's hysteresis would flash it over the menu.
@@ -1962,6 +2215,644 @@ fn server_page(ui: &mut Ui, st: &mut AppState) {
     });
 }
 
+/// The connection in one row: what carries the traffic, and its address.
+fn connection_row(net: &NetSnapshot) -> (char, String, String) {
+    let wifi = net.wifi.as_ref().ok();
+    let current = wifi.and_then(|w| w.current.as_ref());
+    match net.route().map(|l| l.kind) {
+        Some(LinkKind::Ethernet) => (
+            icons::LAN,
+            "Ethernet".into(),
+            net.address.clone().unwrap_or_else(|| "Connected".into()),
+        ),
+        Some(LinkKind::Wifi) => {
+            let icon = current.and_then(|c| c.rssi).map_or(icons::WIFI, |r| {
+                network::signal_icon(network::bars(r), false)
+            });
+            let mut sup: Vec<String> = current.map(|c| c.ssid.show()).into_iter().collect();
+            sup.extend(net.address.clone());
+            (icon, "Wi-Fi".into(), sup.join(" · "))
+        }
+        None => (
+            icons::WIFI_OFF,
+            "Not connected".into(),
+            if wifi.is_some() {
+                "Plug in a network cable, or join a Wi-Fi network"
+            } else {
+                "Plug in a network cable"
+            }
+            .into(),
+        ),
+    }
+}
+
+/// The Network row: what Wi-Fi is on, or doing.
+fn network_row(w: &Wifi, on: bool) -> (char, String) {
+    if !on {
+        return (icons::WIFI_OFF, "Wi-Fi is off".into());
+    }
+    if let Some(j) = &w.join
+        && j.stage.busy()
+    {
+        return (icons::WIFI_FIND, format!("Joining {}…", j.ssid.show()));
+    }
+    match &w.current {
+        Some(c) => (
+            c.rssi.map_or(icons::WIFI, |r| {
+                network::signal_icon(network::bars(r), c.security.needs_key())
+            }),
+            format!("{} · Connected", c.ssid.show()),
+        ),
+        None if w.saved.is_empty() => (icons::WIFI_FIND, "None yet: pick one nearby".into()),
+        None => (
+            icons::WIFI_FIND,
+            "Not connected: no saved network is nearby".into(),
+        ),
+    }
+}
+
+fn connectivity_page(ui: &mut Ui, st: &mut AppState) {
+    kit::page_title(ui, "Connectivity", "How the frame reaches your network.");
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let Some(net) = st.network.clone() else {
+        // A host with no network worker (the web demo).
+        kit::section_header(ui, "Wi-Fi");
+        ui.add_enabled_ui(false, |ui| {
+            kit::list_item(
+                ui,
+                ListItem::new("Wi-Fi")
+                    .icon(icons::WIFI)
+                    .supporting("Not available here"),
+            );
+        });
+        return;
+    };
+
+    kit::section_header(ui, "Connection");
+    let (icon, title, sup) = connection_row(&net);
+    // Acts when tapped: the details.
+    if kit::list_item(ui, ListItem::new(&title).icon(icon).supporting(&sup)).clicked() {
+        st.dialog = Dialog::NetInfo;
+    }
+
+    kit::section_header(ui, "Wi-Fi");
+    let w = match &net.wifi {
+        Ok(w) => w,
+        Err(why) => {
+            ui.add_enabled_ui(false, |ui| {
+                kit::list_item(
+                    ui,
+                    ListItem::new("Wi-Fi")
+                        .icon(icons::WIFI)
+                        .supporting("Raam can't set it up on this device"),
+                );
+            });
+            note_under(ui, Tone::Info, icons::INFO, why);
+            return;
+        }
+    };
+    // The switch stays where it was put until the snapshot agrees.
+    if st.wifi_pending == Some(w.enabled) {
+        st.wifi_pending = None;
+    }
+    let mut on = st.wifi_pending.unwrap_or(w.enabled);
+    let was = on;
+    let sup = if !on {
+        "Off: the frame uses no Wi-Fi network"
+    } else if net.ethernet_connected() {
+        "Ethernet is connected, so Wi-Fi is a backup"
+    } else {
+        "The frame joins the networks it remembers"
+    };
+    kit::list_item(
+        ui,
+        ListItem::new("Wi-Fi")
+            .icon(if on { icons::WIFI } else { icons::WIFI_OFF })
+            .supporting(sup)
+            .trailing(Trailing::Switch(&mut on)),
+    );
+    if on != was {
+        st.wifi_pending = Some(on);
+        st.actions.net.push(NetCommand::SetEnabled(on));
+    }
+    let (icon, sup) = network_row(w, on);
+    ui.add_enabled_ui(on, |ui| {
+        if kit::list_item(
+            ui,
+            ListItem::new("Network")
+                .icon(icon)
+                .supporting(&sup)
+                .trailing(Trailing::Chevron),
+        )
+        .clicked()
+        {
+            st.sub = Sub::Networks;
+        }
+    });
+    // An unfinished setup says what's missing (Zeigarnik).
+    if on && net.route().is_none() && !w.joining() {
+        note_under(
+            ui,
+            Tone::Warning,
+            icons::WARNING,
+            "The frame isn't on a network: join a Wi-Fi network, or plug in a cable.",
+        );
+    }
+}
+
+/// What a nearby network's row says under its name.
+fn nearby_line(saved: bool, security: Security) -> String {
+    if !security.supported() {
+        return format!("{}: not supported", security.label());
+    }
+    let sec = match security {
+        Security::Open => "Open, no password",
+        s => s.label(),
+    };
+    if saved {
+        format!("Saved · {sec}")
+    } else {
+        sec.to_string()
+    }
+}
+
+fn networks_page(ui: &mut Ui, st: &mut AppState) {
+    kit::page_title(
+        ui,
+        "Wi-Fi networks",
+        "The frame remembers a network it joins, and joins it again after a restart.",
+    );
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let Some(Ok(w)) = st.network.as_ref().map(|n| n.wifi.clone()) else {
+        st.sub = Sub::None;
+        return;
+    };
+    if !w.enabled {
+        note_under(
+            ui,
+            Tone::Info,
+            icons::INFO,
+            "Wi-Fi is off. Turn it on to see the networks nearby.",
+        );
+        return;
+    }
+    let current = w.current.as_ref().map(|c| c.ssid.clone());
+    // A join started here, and how it went.
+    let mine = w
+        .join
+        .as_ref()
+        .filter(|j| st.join.sent && j.ssid == st.join.target());
+    let joining = w.join.as_ref().filter(|j| j.stage.busy());
+
+    if w.current.is_some() || joining.is_some() || mine.is_some() {
+        kit::section_header(ui, "Connected");
+    }
+    if let Some(j) = joining.filter(|j| Some(&j.ssid) != current.as_ref()) {
+        let sup = if j.stage == JoinStage::Addressing {
+            "Joined: getting an address…"
+        } else {
+            "Joining…"
+        };
+        kit::list_item(
+            ui,
+            ListItem::new(&j.ssid.show())
+                .icon(icons::WIFI_FIND)
+                .supporting(sup),
+        );
+    }
+    if let Some(c) = &w.current {
+        let mut sup = vec![
+            "Connected".to_string(),
+            network::bands(c.freq_mhz < 3000, c.freq_mhz >= 5000).to_string(),
+        ];
+        sup.extend(c.address.clone());
+        let icon = c.rssi.map_or(icons::WIFI, |r| {
+            network::signal_icon(network::bars(r), c.security.needs_key())
+        });
+        if kit::list_item(
+            ui,
+            ListItem::new(&c.ssid.show())
+                .icon(icon)
+                .supporting(&sup.join(" · "))
+                .trailing(Trailing::Button("Forget")),
+        )
+        .changed()
+        {
+            st.net_pick = c.ssid.clone();
+            st.dialog = Dialog::Forget;
+        }
+    }
+    if let Some(j) = mine
+        && let JoinStage::Failed(e) = j.stage
+    {
+        note_under(
+            ui,
+            Tone::Warning,
+            icons::WARNING,
+            &format!(
+                "Couldn't join {}: {}.",
+                j.ssid.show(),
+                e.message().to_lowercase()
+            ),
+        );
+    }
+    if let Some(j) = &w.join
+        && j.stage == (JoinStage::Joined { remembered: false })
+        && Some(&j.ssid) == current.as_ref()
+    {
+        note_under(
+            ui,
+            Tone::Warning,
+            icons::WARNING,
+            "This device can't save Wi-Fi networks, so the frame forgets it after a restart.",
+        );
+    }
+
+    kit::section_header(ui, "Nearby");
+    let others: Vec<&network::Nearby> = w
+        .nearby
+        .iter()
+        .filter(|n| Some(&n.ssid) != current.as_ref())
+        .collect();
+    if others.is_empty() {
+        let text = if w.scanning || w.scanned_at.is_empty() {
+            "Looking for networks…"
+        } else {
+            "No networks found. Move the frame closer to the router, or scan again."
+        };
+        note_under(ui, Tone::Info, icons::INFO, text);
+    }
+    for n in others {
+        let saved = w.is_saved(&n.ssid);
+        let sup = nearby_line(saved, n.security);
+        let icon = network::signal_icon(network::bars(n.rssi), n.security.needs_key());
+        // A saved network whose password was just refused asks for it.
+        let refused = mine.is_some_and(|j| {
+            j.ssid == n.ssid && j.stage == JoinStage::Failed(network::JoinError::WrongKey)
+        });
+        ui.add_enabled_ui(n.security.supported() && joining.is_none(), |ui| {
+            if kit::list_item(
+                ui,
+                ListItem::new(&n.ssid.show()).icon(icon).supporting(&sup),
+            )
+            .clicked()
+            {
+                match n.security {
+                    _ if saved && !refused => {
+                        st.join = JoinDraft::listed(n.ssid.clone(), n.security);
+                        st.join.sent = true;
+                        st.actions.net.push(NetCommand::Connect(n.ssid.clone()));
+                    }
+                    Security::Open => {
+                        st.net_pick = n.ssid.clone();
+                        st.dialog = Dialog::JoinOpen;
+                    }
+                    Security::Owe => {
+                        st.join = JoinDraft::listed(n.ssid.clone(), n.security);
+                        st.join.sent = true;
+                        st.actions.net.push(NetCommand::Join {
+                            ssid: n.ssid.clone(),
+                            security: n.security,
+                            key: String::new(),
+                            hidden: false,
+                        });
+                    }
+                    _ => {
+                        st.join = JoinDraft::listed(n.ssid.clone(), n.security);
+                        st.sub = Sub::Join;
+                    }
+                }
+            }
+        });
+    }
+
+    // Remembered networks not in use, each with its own Forget.
+    let away: Vec<&Ssid> = w
+        .saved
+        .iter()
+        .filter(|s| Some(*s) != current.as_ref())
+        .collect();
+    if !away.is_empty() {
+        kit::section_header(ui, "Saved");
+        for ssid in away {
+            let near = w.nearby.iter().any(|n| &n.ssid == ssid);
+            if kit::list_item(
+                ui,
+                ListItem::new(&ssid.show())
+                    .icon(icons::WIFI)
+                    .supporting(if near { "Nearby" } else { "Not nearby" })
+                    .trailing(Trailing::Button("Forget")),
+            )
+            .changed()
+            {
+                st.net_pick = ssid.clone();
+                st.dialog = Dialog::Forget;
+            }
+        }
+    }
+
+    kit::section_header(ui, "More");
+    let scan_sup = if w.scanning {
+        "Looking for networks…".to_string()
+    } else if w.scanned_at.is_empty() {
+        "Not looked yet".to_string()
+    } else {
+        format!("Updated {}", w.scanned_at)
+    };
+    ui.add_enabled_ui(!w.scanning, |ui| {
+        if kit::list_item(
+            ui,
+            ListItem::new("Scan again")
+                .icon(icons::REFRESH)
+                .supporting(&scan_sup),
+        )
+        .clicked()
+        {
+            st.actions.net.push(NetCommand::Scan);
+        }
+    });
+    ui.add_enabled_ui(joining.is_none(), |ui| {
+        if kit::list_item(
+            ui,
+            ListItem::new("Add a hidden network")
+                .icon(icons::WIFI_ADD)
+                .supporting("One that doesn't show its name")
+                .trailing(Trailing::Chevron),
+        )
+        .clicked()
+        {
+            st.join = JoinDraft::hidden();
+            st.sub = Sub::Join;
+        }
+    });
+}
+
+fn join_page(ui: &mut Ui, st: &mut AppState) {
+    // The fields share one width (UX.md, Similarity), the Server page's.
+    const FIELD_W: f32 = 560.0;
+    let Some(Ok(w)) = st.network.as_ref().map(|n| n.wifi.clone()) else {
+        st.sub = Sub::None;
+        return;
+    };
+    let focus = std::mem::take(&mut st.focus_key);
+    let mut d = std::mem::take(&mut st.join);
+    let target = d.target();
+    // This page's join, as the worker reports it.
+    let stage = w
+        .join
+        .as_ref()
+        .filter(|j| d.sent && j.ssid == target)
+        .map(|j| j.stage);
+    if let Some(JoinStage::Joined { .. }) = stage {
+        // Done: the list shows it connected. The password goes.
+        st.sub = Sub::Networks;
+        return;
+    }
+    let busy = stage.is_some_and(|s| s.busy());
+    let title = if d.hidden {
+        "Hidden network".to_string()
+    } else {
+        format!("Join {}", d.ssid.show())
+    };
+    kit::page_title(
+        ui,
+        &title,
+        if d.hidden {
+            "Type its name exactly as the router shows it."
+        } else {
+            "The frame remembers it, and joins it again after a restart."
+        },
+    );
+    ui.spacing_mut().item_spacing.y = 0.0;
+    kit::section_header(ui, if d.hidden { "Network" } else { "Password" });
+    let clip = ui.clip_rect();
+    // Keep the focused field above the on-screen keyboard.
+    let keep_above = |r: &egui::Response| {
+        if r.has_focus() && !clip.contains_rect(r.rect) {
+            r.scroll_to_me(Some(Align::Center));
+        }
+    };
+    let mut submit = false;
+    ui.add_enabled_ui(!busy, |ui| {
+        if d.hidden {
+            on_content_edge(ui, |ui| {
+                let r = kit::TextField::new(&mut d.name, "Network name")
+                    .icon(icons::WIFI)
+                    .supporting("Upper and lower case count")
+                    .width(FIELD_W)
+                    .show(ui);
+                if focus {
+                    r.request_focus();
+                }
+                keep_above(&r);
+            });
+            ui.add_space(space::S);
+            let options = ["None", "WPA2", "WPA3"];
+            let kinds = [Security::Open, Security::Wpa2, Security::Wpa3];
+            let mut i = kinds
+                .iter()
+                .position(|k| Some(*k) == d.security)
+                .unwrap_or(1);
+            // As wide as the fields, so its choices end where they do.
+            ui.scope(|ui| {
+                ui.set_max_width(FIELD_W + 2.0 * space::L);
+                kit::list_item(
+                    ui,
+                    ListItem::new("Security")
+                        .icon(icons::KEY)
+                        .trailing(Trailing::Segmented {
+                            selected: &mut i,
+                            options: &options,
+                            seg_w: 88.0,
+                        }),
+                );
+            });
+            d.security = Some(kinds[i]);
+        }
+        let sec = d.security.unwrap_or(Security::Wpa2);
+        if sec.needs_key() {
+            let wrong = stage == Some(JoinStage::Failed(network::JoinError::WrongKey));
+            let problem = network::key_problem(&d.key).filter(|_| !d.key.is_empty());
+            let help = if wrong {
+                "Wrong password: check it and try again"
+            } else {
+                problem.unwrap_or("8 to 63 characters")
+            };
+            if d.hidden {
+                ui.add_space(space::S);
+            }
+            on_content_edge(ui, |ui| {
+                let r = kit::TextField::new(&mut d.key, "Password")
+                    .icon(icons::KEY)
+                    .password(true)
+                    .reveal(&mut d.reveal)
+                    .error(wrong)
+                    .supporting(help)
+                    .width(FIELD_W)
+                    .show(ui);
+                if focus && !d.hidden {
+                    r.request_focus();
+                }
+                keep_above(&r);
+                // An edit clears the last attempt's error.
+                if r.changed() {
+                    d.sent = false;
+                }
+                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    submit = true;
+                }
+            });
+        }
+    });
+    match stage {
+        Some(JoinStage::Connecting) => {
+            note_under(ui, Tone::Info, icons::WIFI_FIND, "Joining…");
+        }
+        Some(JoinStage::Addressing) => {
+            note_under(
+                ui,
+                Tone::Info,
+                icons::WIFI_FIND,
+                "Joined: getting an address…",
+            );
+        }
+        Some(JoinStage::Failed(e)) if e != network::JoinError::WrongKey => {
+            note_under(
+                ui,
+                Tone::Warning,
+                icons::WARNING,
+                &format!("{}.", e.message()),
+            );
+        }
+        _ => {}
+    }
+    let sec = d.security.unwrap_or(Security::Wpa2);
+    let ready = !target.0.is_empty()
+        && target.0.len() <= 32
+        && (!sec.needs_key() || network::key_problem(&d.key).is_none())
+        && !busy
+        && !w.joining();
+    ui.add_space(space::L);
+    on_content_edge(ui, |ui| {
+        ui.add_enabled_ui(ready, |ui| {
+            if kit::button(ui, ButtonKind::Filled, None, "Join").clicked() {
+                submit = true;
+            }
+        });
+    });
+    if submit && ready {
+        st.actions.net.push(NetCommand::Join {
+            ssid: target,
+            security: sec,
+            key: if sec.needs_key() {
+                d.key.clone()
+            } else {
+                String::new()
+            },
+            hidden: d.hidden,
+        });
+        d.sent = true;
+    }
+    st.join = d;
+}
+
+/// The Connection dialog's lines: what carries the traffic, then each port.
+fn net_details(net: &NetSnapshot) -> Vec<(&'static str, String)> {
+    let mut v = Vec::new();
+    let port = |l: &network::Link| {
+        let kind = match l.kind {
+            LinkKind::Ethernet => "Ethernet",
+            LinkKind::Wifi => "Wi-Fi",
+        };
+        format!("{kind} ({})", l.name)
+    };
+    match net.route() {
+        Some(l) => v.push(("Connected by", port(l))),
+        None => v.push(("Connected by", "Nothing: not connected".into())),
+    }
+    if let Some(a) = &net.address {
+        v.push(("Address", a.clone()));
+    }
+    for l in net
+        .links
+        .iter()
+        .filter(|l| l.kind == LinkKind::Ethernet && !l.default_route)
+    {
+        v.push((
+            "Ethernet",
+            if l.connected {
+                "Cable in, not in use".into()
+            } else {
+                "No cable".into()
+            },
+        ));
+    }
+    match &net.wifi {
+        Err(_) => v.push(("Wi-Fi", "Can't be set up here".into())),
+        Ok(w) if !w.enabled => v.push(("Wi-Fi", "Off".into())),
+        Ok(w) => match &w.current {
+            None => v.push(("Wi-Fi", "Not joined".into())),
+            Some(c) => {
+                v.push(("Wi-Fi network", c.ssid.show()));
+                if let Some(r) = c.rssi {
+                    v.push(("Signal", format!("{} · {r} dBm", network::signal_words(r))));
+                }
+                v.push((
+                    "Band",
+                    format!(
+                        "{} · {} MHz",
+                        network::bands(c.freq_mhz < 3000, c.freq_mhz >= 5000),
+                        c.freq_mhz
+                    ),
+                ));
+                if let Some(m) = c.link_mbps {
+                    v.push(("Speed", format!("{m} Mb/s")));
+                }
+                v.push(("Security", c.security.label().into()));
+                if let Some(a) = c
+                    .address
+                    .as_ref()
+                    .filter(|a| Some(*a) != net.address.as_ref())
+                {
+                    v.push(("Wi-Fi address", a.clone()));
+                }
+            }
+        },
+    }
+    v
+}
+
+/// One label/value line in a dialog, the values in a column.
+fn detail_line(ui: &mut Ui, label: &str, value: &str) {
+    const LABEL_W: f32 = 136.0;
+    const LINE_H: f32 = 28.0;
+    let s = scheme(ui);
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), LINE_H),
+        egui::Sense::hover(),
+    );
+    let p = ui.painter();
+    let y = rect.center().y;
+    kit::text_on(
+        p,
+        rect.left(),
+        Align::Min,
+        y,
+        label,
+        Type::BodyMedium,
+        s.on_surface_variant,
+    );
+    kit::text_on(
+        p,
+        rect.left() + LABEL_W,
+        Align::Min,
+        y,
+        value,
+        Type::BodyLarge,
+        s.on_surface,
+    );
+}
+
 fn dialogs(ctx: &egui::Context, st: &mut AppState) {
     match st.dialog {
         Dialog::None => {}
@@ -2100,6 +2991,81 @@ fn dialogs(ctx: &egui::Context, st: &mut AppState) {
                 } else {
                     st.settings.wake_min = draft;
                 }
+            }
+            if !open {
+                st.dialog = Dialog::None;
+            }
+        }
+        Dialog::NetInfo => {
+            let lines = st.network.as_ref().map(net_details).unwrap_or_default();
+            let mut done = None;
+            let open = kit::dialog(ctx, "frame.netinfo", "Connection", |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for (k, v) in &lines {
+                    detail_line(ui, k, v);
+                }
+                ui.add_space(space::XL);
+                done = kit::dialog_actions(ui, &["Close"]);
+                done.is_none()
+            });
+            if !open {
+                st.dialog = Dialog::None;
+            }
+        }
+        Dialog::JoinOpen => {
+            let title = format!("Join {}?", st.net_pick.show());
+            let mut done = None;
+            let open = kit::dialog(ctx, "frame.joinopen", &title, |ui| {
+                let s = scheme(ui);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                kit::paragraph(
+                    ui,
+                    "It has no password, so anyone nearby can see what the frame sends and receives.",
+                    Type::BodyMedium,
+                    s.on_surface_variant,
+                );
+                ui.add_space(space::XL);
+                done = kit::dialog_actions(ui, &["Cancel", "Join"]);
+                done.is_none()
+            });
+            if done == Some(1) {
+                st.join = JoinDraft::listed(st.net_pick.clone(), Security::Open);
+                st.join.sent = true;
+                st.actions.net.push(NetCommand::Join {
+                    ssid: st.net_pick.clone(),
+                    security: Security::Open,
+                    key: String::new(),
+                    hidden: false,
+                });
+            }
+            if !open {
+                st.dialog = Dialog::None;
+            }
+        }
+        Dialog::Forget => {
+            let title = format!("Forget {}?", st.net_pick.show());
+            let in_use = st
+                .network
+                .as_ref()
+                .and_then(|n| n.wifi.as_ref().ok())
+                .and_then(|w| w.current.as_ref())
+                .is_some_and(|c| c.ssid == st.net_pick);
+            let body = if in_use {
+                "The frame leaves it now, and won't join it again unless you pick it here."
+            } else {
+                "The frame won't join it again unless you pick it here."
+            };
+            let mut done = None;
+            let open = kit::dialog(ctx, "frame.forget", &title, |ui| {
+                let s = scheme(ui);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                kit::paragraph(ui, body, Type::BodyMedium, s.on_surface_variant);
+                ui.add_space(space::XL);
+                done = kit::dialog_actions(ui, &["Cancel", "Forget"]);
+                done.is_none()
+            });
+            if done == Some(1) {
+                st.actions.net.push(NetCommand::Forget(st.net_pick.clone()));
             }
             if !open {
                 st.dialog = Dialog::None;

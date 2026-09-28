@@ -963,6 +963,7 @@ pub struct TextField<'a> {
     icon: Option<char>,
     error: bool,
     password: bool,
+    reveal: Option<&'a mut bool>,
     width: Option<f32>,
 }
 
@@ -976,6 +977,7 @@ impl<'a> TextField<'a> {
             icon: None,
             error: false,
             password: false,
+            reveal: None,
             width: None,
         }
     }
@@ -1003,6 +1005,13 @@ impl<'a> TextField<'a> {
     }
     pub fn width(mut self, w: f32) -> Self {
         self.width = Some(w);
+        self
+    }
+    /// A password field's trailing eye: `shown` is whether the password
+    /// reads in the clear. The error icon gives way to it (the colour and
+    /// the supporting line still say error).
+    pub fn reveal(mut self, shown: &'a mut bool) -> Self {
+        self.reveal = Some(shown);
         self
     }
 
@@ -1039,7 +1048,7 @@ impl<'a> TextField<'a> {
         let had_focus = ui.memory(|m| m.has_focus(id));
 
         let left = space::L + self.icon.map_or(0.0, |_| size::ICON + space::M - space::XS);
-        let right = if self.error {
+        let right = if self.error || self.reveal.is_some() {
             space::M + size::ICON + space::L
         } else {
             space::L
@@ -1073,11 +1082,31 @@ impl<'a> TextField<'a> {
                 .font(Type::BodyLarge.font())
                 .text_color(s.on_surface)
                 .hint_text(theme::text(hint, Type::BodyLarge).color(s.on_surface_variant))
-                .password(self.password)
+                .password(self.password && !self.reveal.as_deref().is_some_and(|r| *r))
                 .desired_width(w)
                 .min_size(vec2(w, H))
                 .vertical_align(Align::Center),
         );
+        // Over the TextEdit, so it takes the tap. The field keeps the
+        // focus (and the on-screen keyboard stays) when it had it.
+        let eye = self.reveal.map(|shown| {
+            let r = Rect::from_center_size(
+                pos2(
+                    field.right() - space::M - size::ICON / 2.0,
+                    field.center().y,
+                ),
+                vec2(size::TOUCH, size::TOUCH),
+            );
+            let hit = ui.interact(r, id.with("reveal"), Sense::click());
+            focusable(ui, &hit, false);
+            if hit.clicked() {
+                *shown = !*shown;
+                if had_focus {
+                    ui.memory_mut(|m| m.request_focus(id));
+                }
+            }
+            (*shown, hit)
+        });
         let focused = resp.has_focus();
         if !ui.is_rect_visible(whole) {
             return resp;
@@ -1122,7 +1151,33 @@ impl<'a> TextField<'a> {
                 s.on_surface_variant,
             );
         }
-        if self.error {
+        if let Some((shown, hit)) = &eye {
+            // An icon button: the eye says what a tap does, show the
+            // password or hide it.
+            let centre = pos2(
+                field.right() - space::M - size::ICON / 2.0,
+                field.center().y,
+            );
+            p.circle_filled(
+                centre,
+                20.0,
+                with_state(Color32::TRANSPARENT, s.on_surface_variant, hit),
+            );
+            icon_on(
+                p,
+                centre.x,
+                Align::Center,
+                centre.y,
+                if *shown {
+                    icons::VISIBILITY_OFF
+                } else {
+                    icons::VISIBILITY
+                },
+                icon_font(size::ICON, false),
+                s.on_surface_variant,
+            );
+            focus_ring_circle(ui, hit, centre, 20.0);
+        } else if self.error {
             icon_on(
                 p,
                 field.right() - space::M,

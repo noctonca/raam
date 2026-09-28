@@ -74,6 +74,18 @@ pub const SD_CARD: char = '\u{e623}';
 pub const MOVIE: char = '\u{e404}';
 pub const VOLUME_UP: char = '\u{e050}';
 pub const AV_TIMER: char = '\u{e01b}';
+pub const SIGNAL_WIFI_0_BAR: char = '\u{f0b0}';
+pub const NETWORK_WIFI_1_BAR: char = '\u{ebe4}';
+pub const NETWORK_WIFI_2_BAR: char = '\u{ebd6}';
+pub const NETWORK_WIFI_3_BAR: char = '\u{ebe1}';
+pub const SIGNAL_WIFI_4_BAR: char = '\u{f065}';
+pub const NETWORK_WIFI_1_BAR_LOCKED: char = '\u{f58f}';
+pub const NETWORK_WIFI_2_BAR_LOCKED: char = '\u{f58e}';
+pub const NETWORK_WIFI_3_BAR_LOCKED: char = '\u{f58d}';
+pub const SIGNAL_WIFI_4_BAR_LOCK: char = '\u{e1e1}';
+pub const LAN: char = '\u{eb2f}';
+pub const WIFI_FIND: char = '\u{eb31}';
+pub const WIFI_ADD: char = '\u{f7a8}';
 
 /// Every icon above with its name, for the gallery.
 pub const ALL: &[(&str, char)] = &[
@@ -151,4 +163,16 @@ pub const ALL: &[(&str, char)] = &[
     ("movie", MOVIE),
     ("volume_up", VOLUME_UP),
     ("av_timer", AV_TIMER),
+    ("signal_wifi_0_bar", SIGNAL_WIFI_0_BAR),
+    ("network_wifi_1_bar", NETWORK_WIFI_1_BAR),
+    ("network_wifi_2_bar", NETWORK_WIFI_2_BAR),
+    ("network_wifi_3_bar", NETWORK_WIFI_3_BAR),
+    ("signal_wifi_4_bar", SIGNAL_WIFI_4_BAR),
+    ("network_wifi_1_bar_locked", NETWORK_WIFI_1_BAR_LOCKED),
+    ("network_wifi_2_bar_locked", NETWORK_WIFI_2_BAR_LOCKED),
+    ("network_wifi_3_bar_locked", NETWORK_WIFI_3_BAR_LOCKED),
+    ("signal_wifi_4_bar_lock", SIGNAL_WIFI_4_BAR_LOCK),
+    ("lan", LAN),
+    ("wifi_find", WIFI_FIND),
+    ("wifi_add", WIFI_ADD),
 ];

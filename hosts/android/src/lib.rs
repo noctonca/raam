@@ -521,6 +521,8 @@ fn android_main(app: AndroidApp) {
                     source: fetch_ref,
                     library: lib.as_ref(),
                     weather: Some(weather.as_ref().unwrap().as_ref()),
+                    // Wi-Fi setup on Android is still to come.
+                    network: None,
                 }),
                 power: power
                     .as_mut()

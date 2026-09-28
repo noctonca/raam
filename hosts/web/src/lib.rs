@@ -199,6 +199,8 @@ impl Live {
                     // No weather on the web yet: the overlay shows the
                     // time and date.
                     weather: None,
+                    // Nor Wi-Fi: Connectivity says it's not available here.
+                    network: None,
                 }),
                 power: None,
             },

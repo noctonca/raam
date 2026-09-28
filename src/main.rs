@@ -51,7 +51,13 @@
 //!   (`frame_ui::PAGES`):
 //!   - the menu bar over the slideshow: menu | menu-undo | menu-paused
 //!   - settings: set-photos | set-albums | set-hidden | set-slideshow |
-//!     set-videos | set-display | set-sleep | set-server
+//!     set-videos | set-display | set-sleep | set-connectivity |
+//!     set-networks | set-join | set-server
+//!   - Connectivity's states: set-connectivity-wifi (Wi-Fi only),
+//!     -off, -unsupported (NetworkManager), -none (no network worker),
+//!     -info (the details); set-networks-open | set-networks-forget;
+//!     set-join-keyboard | set-join-joining | set-join-wrong |
+//!     set-join-hidden
 //!   - with a dialog open: set-slideshow-interval |
 //!     set-slideshow-transition | set-videos-playback | set-videos-delay |
 //!     set-sleep-at | set-sleep-wake | set-server-cache | set-server-clear;
@@ -103,6 +109,7 @@ mod golden;
 mod live;
 mod platform;
 mod preset;
+mod wifi;
 
 use egui::Theme;
 use glutin::config::{ConfigTemplateBuilder, GlConfig};

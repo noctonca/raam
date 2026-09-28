@@ -12,6 +12,9 @@
 //!   theme, kit and screen changes are iterated and QA'd on the
 //!   desktop before the frame.
 //!
+//! Either mode exits 1 when it can't start (no monitor, no GL context,
+//! the data dir unwritable), so a service manager sees the failure.
+//!
 //! The slideshow's options:
 //! - `--data <dir>`: the DB and caches (default: the app-data dir,
 //!   `~/Library/Application Support/raam` on macOS, else
@@ -562,7 +565,7 @@ fn main() {
     if let Some((a, b)) = &args.diff {
         std::process::exit(golden::run_diff(a, b, args.tolerance, args.out.as_deref()));
     }
-    let result = if args.live {
+    let (result, failed) = if args.live {
         let event_loop = EventLoop::<live::Wake>::with_user_event()
             .build()
             .expect("event loop");
@@ -573,12 +576,20 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        event_loop.run_app(&mut live)
+        let result = event_loop.run_app(&mut live);
+        (result, live.failed())
     } else {
         let event_loop = EventLoop::new().expect("event loop");
-        event_loop.run_app(&mut preset::Preset::new(args))
+        let mut preset = preset::Preset::new(args);
+        let result = event_loop.run_app(&mut preset);
+        (result, preset.failed())
     };
-    if let Err(e) = result {
+    if let Err(e) = &result {
         log::error!("event loop: {e}");
+    }
+    // A service manager (systemd's Restart=on-failure, say) tells a
+    // failed start from a clean exit by the status alone.
+    if failed || result.is_err() {
+        std::process::exit(1);
     }
 }

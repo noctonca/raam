@@ -69,6 +69,8 @@ pub struct Preset {
     key_idx: usize,
     fps_frames: u32,
     fps_start: Instant,
+    /// The window or its GL couldn't start: the process exits non-zero.
+    failed: bool,
 }
 
 impl Preset {
@@ -132,7 +134,13 @@ impl Preset {
             key_idx: 0,
             fps_frames: 0,
             fps_start: Instant::now(),
+            failed: false,
         }
+    }
+
+    /// The start failed (no GL context): `main` exits 1.
+    pub fn failed(&self) -> bool {
+        self.failed
     }
 
     /// egui's zoom for a device pixels_per_point. egui multiplies it by the
@@ -557,6 +565,7 @@ impl ApplicationHandler for Preset {
             && let Err(e) = self.create_window(el)
         {
             log::error!("{e}");
+            self.failed = true;
             el.exit();
         }
     }

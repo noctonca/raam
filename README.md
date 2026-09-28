@@ -144,9 +144,10 @@ Every build needs Rust 1.95 or newer;
   `--page NAME` shows one screen of the UI instead; every flag is listed
   at the top of [src/main.rs](src/main.rs).
   `--fullscreen` fills the screen, as a Linux frame would run it, and a
-  touchscreen works as on the frame. It has run on Linux only with
-  Mesa's software GL so far; a Raspberry Pi 4 or 5 can't run it yet,
-  since its GPU offers OpenGL 3.1 at most and the host asks for 3.2.
+  touchscreen works as on the frame. A Raspberry Pi's GPU needs a
+  build with `--features gles` (OpenGL ES 2.0 in place of OpenGL 3.2);
+  that way it runs on a first-generation Pi, under a Wayland kiosk
+  compositor ([docs/BUILDING.md](docs/BUILDING.md#a-raspberry-pi)).
 - **Web:** the [hosted demo](https://noctonca.github.io/raam/) is
   built from main. To build it yourself, run `hosts/web/build.sh`, then
   serve `hosts/web/www` (e.g.

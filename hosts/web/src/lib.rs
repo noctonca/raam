@@ -10,7 +10,8 @@
 //! requestAnimationFrame and does the Android host's pass (its lib.rs)
 //! only when it has to: an input event, the controller's wait running
 //! out, or something landing from the source. A pointer is a finger, fed
-//! to the controller as the Android host feeds touches.
+//! to the controller as the Android host feeds touches, and the keyboard
+//! is the frame's while the canvas has the focus.
 //!
 //! `?page=<name>` shows a gallery page or a frame_ui preset instead, as
 //! the desktop preset host's `--page` does (preset.rs), for the pixel
@@ -22,7 +23,9 @@ mod preset;
 mod source;
 
 use platform::QuerySwitches;
-use raam_core::app::{App, Deps, Effect, Event, Inputs, LibraryInfo, Overrides, Stage, Touch};
+use raam_core::app::{
+    App, Deps, Effect, Event, Inputs, KeyEvent, LibraryInfo, Overrides, Stage, Touch,
+};
 use raam_core::frame_ui::AppState;
 use raam_core::gl::*;
 use raam_core::overlay::ClockOverlay;
@@ -37,7 +40,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 use wasm_bindgen::prelude::*;
-use web_sys::{HtmlCanvasElement, PointerEvent};
+use web_sys::{HtmlCanvasElement, KeyboardEvent, PointerEvent};
 
 /// The frame's density: pixels_per_point 1, 1 dp = 1 px.
 const DENSITY_DPI: u32 = 160;
@@ -152,6 +155,20 @@ impl Live {
             touch_id: id as u32 as u64,
             force,
         }));
+    }
+
+    fn key(&mut self, key: Option<egui::Key>, k: Keystroke) {
+        if let Some(key) = key {
+            self.events.push(Event::Key(KeyEvent {
+                key,
+                pressed: k.pressed,
+                repeat: k.repeat,
+                modifiers: k.modifiers,
+            }));
+        }
+        if let Some(t) = k.text {
+            self.events.push(Event::Text(t));
+        }
     }
 
     /// One animation frame: the Android host's loop pass, when due.
@@ -316,11 +333,47 @@ enum Host {
     Preset(Box<preset::Preset>),
 }
 
+/// A key as the page saw it, beyond its egui name.
+pub struct Keystroke {
+    pressed: bool,
+    repeat: bool,
+    modifiers: egui::Modifiers,
+    /// What it typed, if it's a character key going down.
+    text: Option<String>,
+}
+
 impl Host {
     fn pointer(&mut self, phase: egui::TouchPhase, pos: egui::Pos2, id: i32, force: f32) {
         match self {
             Host::Live(l) => l.touch(phase, pos, id, force),
             Host::Preset(p) => p.touch(phase, pos, id),
+        }
+    }
+
+    /// Whether the frame takes this key from the page. Tab and Escape stay
+    /// the page's while the menu is closed, so the canvas never traps the
+    /// keyboard; on the design-system page Tab always does.
+    fn takes(&self, key: Option<egui::Key>) -> bool {
+        let open = match self {
+            Host::Live(l) => l.controller.overlay_open(),
+            Host::Preset(_) => false,
+        };
+        open || !matches!(key, Some(egui::Key::Tab | egui::Key::Escape))
+    }
+
+    fn key(&mut self, key: Option<egui::Key>, k: Keystroke) {
+        match self {
+            Host::Live(l) => l.key(key, k),
+            Host::Preset(p) => {
+                let key = key.map(|key| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: k.pressed,
+                    repeat: k.repeat,
+                    modifiers: k.modifiers,
+                });
+                p.input(key.into_iter().chain(k.text.map(egui::Event::Text)));
+            }
         }
     }
 
@@ -441,6 +494,9 @@ pub fn start() -> Result<(), JsValue> {
             match phase {
                 egui::TouchPhase::Start => {
                     let _ = c.set_pointer_capture(id);
+                    // Held off by preventing the default: the keys follow
+                    // a tap or click.
+                    let _ = c.focus();
                     down.set(Some(id));
                 }
                 _ if down.get() != Some(id) => return,
@@ -462,6 +518,38 @@ pub fn start() -> Result<(), JsValue> {
     listen(target, "contextmenu", |e: web_sys::Event| {
         e.prevent_default()
     })?;
+    // Keys while the canvas has the focus. The browser keeps its shortcuts
+    // (Ctrl, Alt, Command held), and a key with no egui name still types
+    // its character.
+    for (name, pressed) in [("keydown", true), ("keyup", false)] {
+        listen(target, name, move |e: KeyboardEvent| {
+            if e.ctrl_key() || e.alt_key() || e.meta_key() {
+                return;
+            }
+            let name = e.key();
+            let key = egui::Key::from_name(&name);
+            let text = (pressed && name.chars().count() == 1).then_some(name);
+            if key.is_none() && text.is_none() {
+                return;
+            }
+            let mut taken = false;
+            with_host(|host| taken = host.takes(key));
+            if !taken {
+                return;
+            }
+            e.prevent_default();
+            let k = Keystroke {
+                pressed,
+                repeat: e.repeat(),
+                modifiers: egui::Modifiers {
+                    shift: e.shift_key(),
+                    ..Default::default()
+                },
+                text,
+            };
+            with_host(|host| host.key(key, k));
+        })?;
+    }
     // The tab going to the background is the activity pausing.
     let d = doc.clone();
     listen(

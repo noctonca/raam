@@ -5,7 +5,8 @@
 //!
 //! - **The slideshow** (no `--page`; live.rs): the product as the frame
 //!   runs it, on the engine, with no video player. The mouse is a finger,
-//!   and so is a touchscreen's first.
+//!   and so is a touchscreen's first; a keyboard works as docs/UX.md's
+//!   Keys says.
 //! - **The preset host** (`--page`; preset.rs): the widget gallery and
 //!   every frame_ui screen by name, over a stand-in for the slideshow, so
 //!   theme, kit and screen changes are iterated and QA'd on the
@@ -29,13 +30,16 @@
 //! - `--set NAME=VALUE`: a scripted step that sets a debug switch, as F5
 //!   does (`--set debug.video.fail=rt`; `NAME=` clears it)
 //! - `--wait S`: a scripted pause of S seconds more before the next step
+//! - `--key NAME`: a scripted key, pressed and let go (egui's names:
+//!   `ArrowRight`, `Enter`, `Escape`, `Tab`, `Space`, `A`)
+//! - `--type TEXT`: scripted typing, as a keyboard types into a field
 //! - `--screenshot <file.png>`: save 1.5 s after the last step (or the
 //!   first collage) and exit
 //! - the frame's `debug.*` props as env vars, upper-cased with dots as
 //!   underscores: `RAAM_DEBUG_VIDEO_FAIL=rt`
 //!
 //! Keys: F5 GPU-failure injection on/off (`debug.video.fail=rt`), F12
-//! screenshot into `shots/`.
+//! screenshot into `shots/`; every other key goes to the frame.
 //!
 //! The preset host's options:
 //! - `--theme dark|light`, `--text egui|off|shader|boost`
@@ -77,6 +81,8 @@
 //!   point after the scroll. Repeatable: taps run in order, each once
 //!   egui is idle, so `--click` a field then keys of the on-screen
 //!   keyboard types into it
+//! - `--key NAME`: a key pressed and let go after the taps, each once egui
+//!   is idle (repeatable), so a shot can show the focus ring
 //! - `--hold X,Y,MS`: a touch held still for MS milliseconds, then
 //!   lifted, fed as the Android host feeds a finger, with frames run as
 //!   egui asks meanwhile, so its press-and-hold timer fires as on the
@@ -127,6 +133,10 @@ enum Step {
     Set(String, String),
     /// --wait: an extra pause before the next step.
     Wait(Duration),
+    /// --key: a key pressed and let go.
+    Key(egui::Key),
+    /// --type: text typed.
+    Text(String),
 }
 
 /// What `--page` named: a gallery page or a frame_ui preset.
@@ -158,6 +168,8 @@ struct Args {
     scroll: f32,
     /// (point, release): --click releases, --press holds. In order.
     taps: Vec<(egui::Pos2, bool)>,
+    /// --key for the preset host, after the taps.
+    keys: Vec<egui::Key>,
     /// The slideshow's taps, --set and --wait, in order.
     script: Vec<Step>,
     /// --hold: the touch's point and how long it stays down.
@@ -196,6 +208,7 @@ fn parse_args() -> Result<Args, String> {
         hash: false,
         scroll: 0.0,
         taps: Vec::new(),
+        keys: Vec::new(),
         script: Vec::new(),
         hold: None,
         diff: None,
@@ -213,7 +226,7 @@ fn parse_args() -> Result<Args, String> {
             "--theme" | "--text" | "--backdrop" | "--ppp" | "--scroll" | "--hold" | "--hash" => {
                 preset_only.get_or_insert(flag.clone());
             }
-            "--data" | "--photos" | "--set" | "--wait" | "--fullscreen" => {
+            "--data" | "--photos" | "--set" | "--wait" | "--fullscreen" | "--type" => {
                 live_only.get_or_insert(flag.clone());
             }
             _ => {}
@@ -325,6 +338,13 @@ fn parse_args() -> Result<Args, String> {
                     .ok_or(format!("--set wants NAME=VALUE, got {v:?}"))?;
                 a.script.push(Step::Set(name.into(), value.into()));
             }
+            "--key" => {
+                let v = val()?;
+                let key = egui::Key::from_name(&v).ok_or(format!("--key: no key {v:?}"))?;
+                a.keys.push(key);
+                a.script.push(Step::Key(key));
+            }
+            "--type" => a.script.push(Step::Text(val()?)),
             "--wait" => {
                 let v = val()?;
                 let secs: f32 = v.parse().map_err(|e| format!("--wait: {e}"))?;

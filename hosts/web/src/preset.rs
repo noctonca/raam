@@ -143,6 +143,11 @@ impl Preset {
         }
     }
 
+    /// Keys and text, already egui's.
+    pub fn input(&mut self, events: impl IntoIterator<Item = egui::Event>) {
+        self.events.extend(events);
+    }
+
     pub fn frame(&mut self) {
         let now = if self.shot {
             SHOT_PASS * self.passes

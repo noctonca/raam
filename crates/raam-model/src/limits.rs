@@ -40,6 +40,11 @@ pub const TAP_SLOP_PX: f32 = 40.0;
 /// The menu closes on its own this long after the last input. Chosen to
 /// match the vendor app's feel.
 pub const AUTO_DISMISS: Duration = Duration::from_secs(15);
+/// A screen opened by key hands its first control the focus within this
+/// many passes, or not at all: egui draws a menu or dialog unseen on its
+/// first pass to size it, and the control takes the focus on the next.
+/// Keys wait meanwhile, so it also bounds how long they can wait.
+pub const FOCUS_CLAIM_PASSES: u32 = 2;
 /// With the menu open, never block in the host loop longer than this, so
 /// egui's cursor and repaint stay live. Chosen.
 pub const MAX_EGUI_WAIT: Duration = Duration::from_secs(1);

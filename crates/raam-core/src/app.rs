@@ -1,6 +1,6 @@
 //! The App controller: the product's behaviour, shared by every host.
-//! Events in, effects out: the host feeds lifecycle and touch events plus
-//! a few per-pass inputs; the controller routes input (tap-slop, menu
+//! Events in, effects out: the host feeds lifecycle, touch and key events
+//! plus a few per-pass inputs; the controller routes input (tap-slop, menu
 //! open/close, auto-dismiss, undo-hide), runs the egui chrome, applies
 //! settings to the slideshow, drives the sleep/wake state machine,
 //! debounces settings saves, and computes the next wake deadline.
@@ -22,6 +22,7 @@ use raam_model::limits::{
     AUTO_DISMISS, DEFAULT_MANUAL_IDLE, MAX_EGUI_WAIT, SAVE_DEBOUNCE, TAP_SLOP_PX, UNDO_HIDE,
 };
 use raam_model::{ClockStyle, Corner, ScaleMode, SourceKind, Stats};
+use std::collections::VecDeque;
 use std::time::Duration;
 
 /// What the host's event loop feeds in each pass.
@@ -33,6 +34,22 @@ pub enum Event {
     /// No longer in front.
     Pause,
     Touch(Touch),
+    /// A physical keyboard's key went down or up (docs/UX.md, Keys).
+    Key(KeyEvent),
+    /// What a physical keyboard typed, for a text field: the character keys
+    /// after the layout and shift, with no control characters.
+    Text(String),
+}
+
+/// One physical key, in egui terms. The host leaves out its own keys (the
+/// desktop's F5 and F12) and a key with no egui name (a lone Shift).
+#[derive(Clone, Copy, Debug)]
+pub struct KeyEvent {
+    pub key: egui::Key,
+    pub pressed: bool,
+    /// Held down and repeating.
+    pub repeat: bool,
+    pub modifiers: egui::Modifiers,
 }
 
 /// One pointer event, already in egui terms.
@@ -42,6 +59,12 @@ pub struct Touch {
     pub device_id: u64,
     pub touch_id: u64,
     pub force: f32,
+}
+
+/// A key or typed text waiting its turn (`App::keys`).
+enum Keyed {
+    Key(KeyEvent),
+    Text(String),
 }
 
 /// TEST-ONLY schedule overrides (`debug.video.*` on Android), parsed by
@@ -210,6 +233,12 @@ pub struct App {
     overlay_open: bool,
     closed_down: Option<egui::Pos2>,
     egui_down: bool,
+    /// The modifiers egui was last told of.
+    modifiers: egui::Modifiers,
+    /// Keys and text in turn: egui moves the focus once a pass, and clicks
+    /// before it moves, so each press gets a pass of its own, and none
+    /// goes in while the focus is on its way to a screen opened by key.
+    keys: VecDeque<Keyed>,
     last_input: Duration,
     last_touch: Duration,
     undo: Option<(String, Duration)>,
@@ -286,6 +315,8 @@ impl App {
             overlay_open: false,
             closed_down: None,
             egui_down: false,
+            modifiers: egui::Modifiers::NONE,
+            keys: VecDeque::new(),
             last_input: now,
             last_touch: now,
             undo: None,
@@ -333,7 +364,8 @@ impl App {
             draw_egui: false,
         };
 
-        let mut touches: Vec<&Touch> = Vec::new();
+        // Touches, keys and text, in the order they came.
+        let mut input: Vec<&Event> = Vec::new();
         for e in events {
             match e {
                 Event::Start => self.check_wake = true,
@@ -342,7 +374,7 @@ impl App {
                     self.check_wake = true;
                 }
                 Event::Pause => self.resumed = false,
-                Event::Touch(t) => touches.push(t),
+                Event::Touch(_) | Event::Key(_) | Event::Text(_) => input.push(e),
             }
         }
 
@@ -437,6 +469,7 @@ impl App {
                     self.ctx.memory_mut(|m| m.stop_text_input());
                 }
                 self.closed_down = None;
+                self.keys.clear();
             }
             self.hidden_wakes += 1;
             // Backstop for the alarm: if the process is alive and the CPU
@@ -451,8 +484,8 @@ impl App {
                     log::error!("wake: wake lock failed: {e}");
                 }
             }
-            // Touches were dropped, not routed, so they don't replay on
-            // return.
+            // Touches and keys were dropped, not routed, so they don't
+            // replay on return.
             out.skip_draw = true;
             out.wait = boundary_wait.map(|w| w + Duration::from_millis(50));
             return out;
@@ -533,10 +566,11 @@ impl App {
 
         let mut egui_events = Vec::new();
         let mut presses = Vec::new();
-        for t in touches {
+        for e in input {
+            // A key counts as a touch for the schedule's idle time.
             self.last_touch = clock::now();
-            if !self.overlay_open {
-                match t.phase {
+            match e {
+                Event::Touch(t) if !self.overlay_open => match t.phase {
                     egui::TouchPhase::Start => self.closed_down = Some(t.pos),
                     egui::TouchPhase::End => {
                         if let Some(d) = self.closed_down.take()
@@ -544,17 +578,59 @@ impl App {
                         {
                             self.overlay_open = true;
                             self.last_input = clock::now();
+                            self.state.keys = false;
                             let tile = stage.slideshow.select_at(t.pos.x, t.pos.y);
                             log::info!("overlay opened by tap at {:?} on tile {tile:?}", t.pos);
                         }
                     }
                     egui::TouchPhase::Cancel => self.closed_down = None,
                     egui::TouchPhase::Move => {}
+                },
+                Event::Touch(t) => {
+                    self.last_input = clock::now();
+                    push_egui_touch(t, &mut self.egui_down, &mut egui_events, &mut presses);
+                }
+                Event::Key(k) => self.keys.push_back(Keyed::Key(*k)),
+                Event::Text(t) => self.keys.push_back(Keyed::Text(t.clone())),
+                Event::Start | Event::Resume | Event::Pause => {}
+            }
+        }
+        let mut fed = false;
+        while let Some(front) = self.keys.front() {
+            if !self.overlay_open {
+                // Nothing on the slideshow takes text. A key that opens
+                // the menu holds the rest back for its focus.
+                if let Some(Keyed::Key(k)) = self.keys.pop_front()
+                    && self.slideshow_key(&k, stage.slideshow, stage.source)
+                {
+                    break;
                 }
                 continue;
             }
+            let press = matches!(front, Keyed::Key(k) if k.pressed);
+            if self.state.focus_pending() || (press && fed) {
+                break;
+            }
+            fed |= press;
             self.last_input = clock::now();
-            push_egui_touch(t, &mut self.egui_down, &mut egui_events, &mut presses);
+            match self.keys.pop_front() {
+                Some(Keyed::Key(k)) => {
+                    // egui keeps the modifiers from these (Shift-Tab).
+                    if k.modifiers != self.modifiers {
+                        self.modifiers = k.modifiers;
+                        egui_events.push(egui::Event::ModifiersChanged(k.modifiers));
+                    }
+                    egui_events.push(egui::Event::Key {
+                        key: k.key,
+                        physical_key: None,
+                        pressed: k.pressed,
+                        repeat: k.repeat,
+                        modifiers: k.modifiers,
+                    });
+                }
+                Some(Keyed::Text(t)) => egui_events.push(egui::Event::Text(t)),
+                None => {}
+            }
         }
 
         self.apply(stage.slideshow, &mut out.effects);
@@ -681,8 +757,10 @@ impl App {
             // it, e.g. Back: Settings -> Menu in the same pass).
             let menu_at_input = self.state.screen == frame_ui::Screen::Menu;
             let mut actions = frame_ui::Actions::default();
+            // Keys waiting for the focus wait on egui's passes.
             let need_run = !self.egui_uploaded
                 || !raw_input.events.is_empty()
+                || self.state.focus_pending()
                 || clock::now() >= self.egui_due
                 || status != self.last_status
                 || version != self.stats_version;
@@ -808,7 +886,8 @@ impl App {
             }
             egui_delay = self.egui_due.saturating_sub(clock::now());
 
-            let typing = self.ctx.egui_wants_keyboard_input();
+            // A text field, not any focus: keys focus buttons too.
+            let typing = self.ctx.text_edit_focused();
             // `run_ui`'s root Ui is itself a full-screen Background-order
             // layer, so on the menu screen "outside the chrome" means a hit
             // on nothing above it (the toolbar is an Area). The settings
@@ -881,6 +960,7 @@ impl App {
 
         // A scaling change lands in `update` next pass, so run one more.
         out.wait = if force_redraw
+            || !self.keys.is_empty()
             || stage.slideshow.is_animating()
             || stage.slideshow.recompose_pending()
         {
@@ -913,7 +993,7 @@ impl App {
                 if self.undo.is_some() {
                     w = min_wait(w, Duration::from_millis(250));
                 }
-                if !self.ctx.egui_wants_keyboard_input() {
+                if !self.ctx.text_edit_focused() {
                     w = min_wait(
                         w,
                         AUTO_DISMISS.saturating_sub(clock::elapsed(self.last_input)),
@@ -923,6 +1003,41 @@ impl App {
             w
         };
         out
+    }
+
+    /// A key while the menu is closed (docs/UX.md, Keys): the arrows go to
+    /// the previous and next photo, Escape does nothing, and any other key
+    /// opens the menu as a tap does. A repeat or a shortcut (Ctrl, Alt,
+    /// Command held) is not a tap. True if it opened the menu.
+    fn slideshow_key(
+        &mut self,
+        k: &KeyEvent,
+        slideshow: &mut dyn Slideshow,
+        source: &dyn TileSource,
+    ) -> bool {
+        let m = k.modifiers;
+        if !k.pressed || k.repeat || m.ctrl || m.alt || m.command || m.mac_cmd {
+            return false;
+        }
+        // Nothing shown yet: nothing to go back or on from (the menu
+        // disables Previous and Next then too).
+        let showing = slideshow.shown_layout() != "-";
+        match k.key {
+            egui::Key::ArrowRight if showing => slideshow.request_next(),
+            egui::Key::ArrowLeft if showing => slideshow.request_prev(source),
+            egui::Key::ArrowRight | egui::Key::ArrowLeft | egui::Key::Escape => {}
+            key => {
+                self.overlay_open = true;
+                self.last_input = clock::now();
+                self.state.keys = true;
+                // A point on no tile picks the first, as Frameo's menu key
+                // picks the first photo of the page.
+                let tile = slideshow.select_at(-1.0, -1.0);
+                log::info!("overlay opened by key {key:?} on tile {tile:?}");
+                return true;
+            }
+        }
+        false
     }
 
     /// The UI's settings, applied to the slideshow (and the fetch side's
@@ -1015,13 +1130,15 @@ fn push_egui_touch(
 mod tests {
     use super::*;
     use crate::clock::fake::{advance, install as install_clock, set_wall_hm};
-    use raam_model::Plan;
+    use raam_model::{Plan, TransitionChoice};
     use std::cell::Cell;
 
     #[derive(Default)]
     struct FakeShow {
         settings: Option<SlideshowSettings>,
         selected: Cell<u32>,
+        nexts: u32,
+        prevs: u32,
     }
 
     impl FakeShow {
@@ -1039,6 +1156,8 @@ mod tests {
                     video_volume: 0.5,
                 }),
                 selected: Cell::new(0),
+                nexts: 0,
+                prevs: 0,
             }
         }
     }
@@ -1056,8 +1175,12 @@ mod tests {
             Some(0)
         }
         fn update(&mut self, _source: &dyn TileSource) {}
-        fn request_next(&mut self) {}
-        fn request_prev(&mut self, _source: &dyn TileSource) {}
+        fn request_next(&mut self) {
+            self.nexts += 1;
+        }
+        fn request_prev(&mut self, _source: &dyn TileSource) {
+            self.prevs += 1;
+        }
         fn toggle_shown_scale(&mut self) -> Option<(String, Option<ScaleMode>)> {
             None
         }
@@ -1238,6 +1361,41 @@ mod tests {
             });
             self.frame(&[down, up])
         }
+
+        /// A key pressed and let go, with these modifiers.
+        fn key_with(&mut self, key: egui::Key, modifiers: egui::Modifiers) -> FrameOut {
+            let k = |pressed| {
+                Event::Key(KeyEvent {
+                    key,
+                    pressed,
+                    repeat: false,
+                    modifiers,
+                })
+            };
+            self.frame(&[k(true), k(false)])
+        }
+
+        fn key(&mut self, key: egui::Key) -> FrameOut {
+            self.key_with(key, egui::Modifiers::NONE)
+        }
+
+        fn focused(&self) -> Option<egui::Id> {
+            self.app.ctx.memory(|m| m.focused())
+        }
+
+        /// A pass that runs egui, as the tap or key that changed the state
+        /// behind a test's back would have.
+        fn redraw(&mut self) -> FrameOut {
+            self.app.egui_uploaded = false;
+            self.frame(&[])
+        }
+
+        /// Opens the menu by key, then runs the pass after its unseen
+        /// sizing pass, which a host runs at once (`wait` is zero).
+        fn open_by_key(&mut self) {
+            self.key(egui::Key::Enter);
+            self.frame(&[]);
+        }
     }
 
     #[test]
@@ -1347,6 +1505,266 @@ mod tests {
         rig.tap(100.0, 100.0);
         assert!(rig.app.overlay_open());
         assert_eq!(rig.show.selected.get(), 1);
+    }
+
+    #[test]
+    fn with_the_menu_closed_arrows_skip_and_other_keys_open_it() {
+        let mut rig = Rig::new(None);
+        rig.key(egui::Key::ArrowRight);
+        rig.key(egui::Key::ArrowRight);
+        rig.key(egui::Key::ArrowLeft);
+        assert_eq!((rig.show.nexts, rig.show.prevs), (2, 1));
+        assert!(!rig.app.overlay_open());
+        // Escape, a shortcut and a repeat aren't taps.
+        rig.key(egui::Key::Escape);
+        rig.key_with(egui::Key::Q, egui::Modifiers::COMMAND);
+        let held = Event::Key(KeyEvent {
+            key: egui::Key::Space,
+            pressed: true,
+            repeat: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        rig.frame(&[held]);
+        assert!(!rig.app.overlay_open());
+        // Any other key opens the menu on the first photo, its first item
+        // focused once the menu's unseen sizing pass is done: the next
+        // pass is due at once.
+        let out = rig.key(egui::Key::Space);
+        assert!(rig.app.overlay_open());
+        assert_eq!(rig.show.selected.get(), 1);
+        assert!(rig.app.state.keys);
+        assert_eq!(out.wait, Some(Duration::ZERO));
+        rig.frame(&[]);
+        assert!(
+            rig.focused().is_some(),
+            "the menu's first item has the focus"
+        );
+    }
+
+    #[test]
+    fn keys_move_through_the_menu_act_and_escape_closes_it() {
+        let mut rig = Rig::new(None);
+        rig.open_by_key();
+        let pause = rig.focused();
+        assert!(pause.is_some());
+        // Pause, Previous: Enter acts on the focused item, as a tap does.
+        rig.key(egui::Key::ArrowRight);
+        assert_ne!(rig.focused(), pause);
+        rig.key(egui::Key::Enter);
+        assert_eq!(rig.show.prevs, 1);
+        assert!(rig.app.overlay_open());
+        rig.key(egui::Key::Escape);
+        assert!(!rig.app.overlay_open());
+    }
+
+    #[test]
+    fn after_a_tap_the_first_key_only_brings_the_focus_in() {
+        let mut rig = Rig::new(None);
+        rig.tap(100.0, 100.0);
+        rig.frame(&[]);
+        assert!(rig.focused().is_none());
+        rig.key(egui::Key::ArrowRight);
+        let first = rig.focused();
+        assert!(first.is_some());
+        // On Pause, not a step on to Previous: Enter pauses.
+        rig.key(egui::Key::Enter);
+        assert!(rig.app.state.paused);
+        assert_eq!(rig.show.prevs, 0);
+    }
+
+    #[test]
+    fn escape_steps_back_a_level_and_the_focus_goes_back_with_it() {
+        let mut rig = Rig::new(None);
+        rig.open_by_key();
+        // Pause, Previous, Next, Settings.
+        for _ in 0..3 {
+            rig.key(egui::Key::ArrowRight);
+        }
+        let settings_item = rig.focused();
+        rig.key(egui::Key::Enter);
+        rig.frame(&[]);
+        assert_eq!(rig.app.state.screen, frame_ui::Screen::Settings);
+        assert!(
+            rig.focused().is_some(),
+            "the selected section has the focus"
+        );
+        assert_ne!(rig.focused(), settings_item);
+        rig.key(egui::Key::Escape);
+        assert_eq!(rig.app.state.screen, frame_ui::Screen::Menu);
+        assert!(rig.app.overlay_open());
+        assert_eq!(rig.focused(), settings_item, "back on the Settings item");
+        rig.key(egui::Key::Escape);
+        assert!(!rig.app.overlay_open());
+    }
+
+    #[test]
+    fn a_physical_keyboard_types_into_a_field_with_the_on_screen_one_away() {
+        let mut rig = Rig::new(None);
+        rig.tap(100.0, 100.0);
+        rig.app.state.screen = frame_ui::Screen::Settings;
+        rig.app.state.section = frame_ui::Section::Server;
+        rig.frame(&[]);
+        assert!(rig.focused().is_none(), "a tap gives nothing the focus");
+        // The first key only brings the focus in: the selected section.
+        rig.key(egui::Key::Tab);
+        assert!(rig.focused().is_some());
+        // Server is the last section; the next control is the URL field.
+        rig.key(egui::Key::Tab);
+        assert!(rig.app.ctx.text_edit_focused());
+        rig.frame(&[Event::Text("immich.lan".into())]);
+        rig.frame(&[]);
+        assert_eq!(rig.app.state.settings.server_url, "immich.lan");
+        assert!(rig.app.state.keyboard.last_rect().is_none());
+        // Escape leaves the field and nothing more.
+        rig.key(egui::Key::Escape);
+        assert!(!rig.app.ctx.text_edit_focused());
+        assert_eq!(rig.app.state.screen, frame_ui::Screen::Settings);
+    }
+
+    /// Settings on `section`, opened by tap, then a key: the section has
+    /// the focus.
+    fn settings_by_key(rig: &mut Rig, section: frame_ui::Section) -> Option<egui::Id> {
+        rig.tap(100.0, 100.0);
+        rig.app.state.screen = frame_ui::Screen::Settings;
+        rig.app.state.section = section;
+        rig.redraw();
+        rig.key(egui::Key::Tab);
+        let nav = rig.focused();
+        assert!(nav.is_some());
+        nav
+    }
+
+    #[test]
+    fn a_confirmation_opened_by_key_focuses_cancel_never_its_action() {
+        let mut rig = Rig::new(None);
+        let nav = settings_by_key(&mut rig, frame_ui::Section::Server);
+        rig.app.state.dialog = frame_ui::Dialog::ClearCache;
+        rig.redraw();
+        rig.redraw();
+        let out = rig.key(egui::Key::Enter);
+        assert!(
+            !out.effects.iter().any(|e| matches!(e, Effect::ClearCache)),
+            "Enter on the first focus must not clear the cache"
+        );
+        assert_eq!(rig.app.state.dialog, frame_ui::Dialog::None);
+        rig.redraw();
+        assert_eq!(rig.focused(), nav, "back on what opened the dialog");
+    }
+
+    #[test]
+    fn a_picker_opened_by_key_starts_on_its_choice_and_escape_keeps_it() {
+        let mut rig = Rig::new(None);
+        settings_by_key(&mut rig, frame_ui::Section::Slideshow);
+        rig.app.state.settings.transition = TransitionChoice::Cube;
+        rig.app.state.dialog = frame_ui::Dialog::Transition;
+        rig.redraw();
+        rig.redraw();
+        // Cube, then down to the next one, and Enter picks it.
+        rig.key(egui::Key::ArrowDown);
+        rig.key(egui::Key::Enter);
+        assert_eq!(
+            rig.app.state.settings.transition,
+            TransitionChoice::Crosswarp
+        );
+        assert_eq!(rig.app.state.dialog, frame_ui::Dialog::None);
+        // Escape leaves a picker as it was.
+        rig.app.state.dialog = frame_ui::Dialog::Transition;
+        rig.redraw();
+        rig.redraw();
+        rig.key(egui::Key::ArrowDown);
+        rig.key(egui::Key::Escape);
+        assert_eq!(rig.app.state.dialog, frame_ui::Dialog::None);
+        assert_eq!(
+            rig.app.state.settings.transition,
+            TransitionChoice::Crosswarp
+        );
+        assert_eq!(rig.app.state.screen, frame_ui::Screen::Settings);
+    }
+
+    #[test]
+    fn a_number_dialog_starts_on_its_slider_whose_arrows_are_its_own() {
+        let mut rig = Rig::new(None);
+        settings_by_key(&mut rig, frame_ui::Section::Slideshow);
+        // A fresh state's draft is 10 s.
+        rig.app.state.dialog = frame_ui::Dialog::Interval;
+        rig.redraw();
+        rig.redraw();
+        rig.key(egui::Key::ArrowRight);
+        rig.key(egui::Key::ArrowRight);
+        // Down from the slider is the next control drawn: OK (the actions
+        // are drawn right to left).
+        rig.key(egui::Key::ArrowDown);
+        rig.key(egui::Key::Enter);
+        assert_eq!(rig.app.state.dialog, frame_ui::Dialog::None);
+        assert_eq!(rig.app.state.settings.interval_secs, 12.0);
+    }
+
+    #[test]
+    fn keys_faster_than_the_passes_each_get_a_pass_of_their_own() {
+        let mut rig = Rig::new(None);
+        let k = |key, pressed| {
+            Event::Key(KeyEvent {
+                key,
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            })
+        };
+        // All in one pass: M opens the menu, then Right, Right and Enter.
+        // Held back until the menu's first item has the focus, then one a
+        // pass: Pause, Previous, Next, and Enter on Next.
+        let mut batch = Vec::new();
+        for key in [
+            egui::Key::M,
+            egui::Key::ArrowRight,
+            egui::Key::ArrowRight,
+            egui::Key::Enter,
+        ] {
+            batch.extend([k(key, true), k(key, false)]);
+        }
+        let mut out = rig.frame(&batch);
+        let mut passes = 1;
+        while out.wait == Some(Duration::ZERO) && passes < 20 {
+            out = rig.frame(&[]);
+            passes += 1;
+        }
+        assert!(rig.app.overlay_open());
+        assert_eq!((rig.show.prevs, rig.show.nexts), (0, 1));
+        assert!(!rig.app.state.paused);
+    }
+
+    #[test]
+    fn a_dialog_closed_by_escape_hands_the_focus_back_to_its_row() {
+        let mut rig = Rig::new(None);
+        settings_by_key(&mut rig, frame_ui::Section::Slideshow);
+        // Past Videos, Display, Sleep and Server to the page's first row,
+        // Photo interval, which opens its dialog.
+        for _ in 0..5 {
+            rig.key(egui::Key::Tab);
+        }
+        let row = rig.focused();
+        rig.key(egui::Key::Enter);
+        rig.redraw();
+        assert_eq!(rig.app.state.dialog, frame_ui::Dialog::Interval);
+        assert_ne!(rig.focused(), row, "the dialog has the focus");
+        rig.key(egui::Key::Escape);
+        assert_eq!(rig.app.state.dialog, frame_ui::Dialog::None);
+        rig.redraw();
+        assert_eq!(rig.focused(), row, "back on Photo interval");
+    }
+
+    #[test]
+    fn a_key_counts_as_a_touch_for_the_menu_timeout() {
+        let mut rig = Rig::new(None);
+        rig.open_by_key();
+        advance(AUTO_DISMISS - Duration::from_secs(1));
+        rig.key(egui::Key::ArrowRight);
+        advance(Duration::from_secs(2));
+        rig.frame(&[]);
+        assert!(rig.app.overlay_open());
+        advance(AUTO_DISMISS);
+        rig.frame(&[]);
+        assert!(!rig.app.overlay_open());
     }
 
     #[test]

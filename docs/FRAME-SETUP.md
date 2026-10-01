@@ -14,7 +14,7 @@ README's checks).
 
 | Change | Command | Why | Undo |
 |---|---|---|---|
-| ADB on | in Frameo: Settings → About → Beta program, then ADB access | the only way in | the same switch |
+| ADB on | in Frameo, turn on Transfer from PC | the only way in. The SNUG's firmware has ADB on (`persist.service.adb.enable=1`, `persist.sys.usb.config=adb` in `/system/build.prop`) but Frameo keeps the USB port off; Transfer from PC opens it in photo mode (`svc usb setFunction ptp`) and ADB comes with it. Frameo's documented route, Settings → About → Beta program → ADB access, is untested here | the same switch |
 | Raam installed | `adb install raam-android.apk` | — | `adb uninstall io.github.noctonca.raam` |
 | Storage permission | `adb shell su -c 'pm grant io.github.noctonca.raam android.permission.READ_EXTERNAL_STORAGE; pm grant io.github.noctonca.raam android.permission.WRITE_EXTERNAL_STORAGE'` | the photos folder and the curation import. Raam grants itself this through `su` at start, but granting before the first launch lets the import land on boot one | `pm revoke` the same two |
 | Frameo disabled | `adb shell su -c 'pm disable-user --user 0 net.frameo.frame'`, wait ten seconds, `adb reboot` | Raam becomes the only home app | `su -c 'pm enable net.frameo.frame'`, wait ten seconds, reboot |

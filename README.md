@@ -100,10 +100,14 @@ must include `armeabi-v7a`, and `adb shell su -c id` must answer
 
 ## Putting it on a frame
 
-1. **Turn on ADB** in Frameo: Settings → About → Beta program, then
-   ADB access ([Frameo's guide](https://support.frameo.com/hc/en-us/articles/6126183308434--How-to-Enable-ADB-on-Your-Frame),
-   which warns you do this at your own risk). This also joins Frameo's
-   beta program. Connect the frame to your computer by USB.
+1. **Turn on ADB.** On the SNUG, turning on Frameo's **Transfer from
+   PC** is enough: the firmware has ADB on already, and that switch
+   opens the USB port. Elsewhere, Frameo's own route is Settings →
+   About → Beta program, then ADB access
+   ([Frameo's guide](https://support.frameo.com/hc/en-us/articles/6126183308434--How-to-Enable-ADB-on-Your-Frame),
+   which warns you do this at your own risk, and joins its beta
+   program; untested here). Connect the frame to your computer by USB
+   with a cable that carries data.
 2. **Set Wi-Fi and brightness in Frameo now.** Raam has no settings for
    them yet; they stay as Frameo leaves them.
 3. **Try it**, with Frameo still in place: build the APK

@@ -66,6 +66,9 @@ wasm-bindgen + wasm-opt). APK releases are manual for now.
   `limits.rs` with its provenance.
 - **Docs** → sentence-case headings; link from `docs/` to source with
   relative paths; a plan for future work goes in `docs/plan/`.
+- **Anything put on a frame** (a property, a file under `/system`, a
+  disabled package, a permission, a boot hook) → record it, why and its
+  undo, in [docs/FRAME-SETUP.md](docs/FRAME-SETUP.md) in the same change.
 
 ## Commit & PR conventions
 

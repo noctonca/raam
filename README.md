@@ -130,6 +130,8 @@ must include `armeabi-v7a`, and `adb shell su -c id` must answer
 `adb uninstall io.github.noctonca.raam`, wait ten seconds, and
 `adb reboot`. Disabling Frameo keeps its photos and settings, and
 nothing here touches the system partition.
+[docs/FRAME-SETUP.md](docs/FRAME-SETUP.md) lists every change a frame
+gets, including the extras for working on Raam, and how to recover one.
 
 ## Running it on a computer
 

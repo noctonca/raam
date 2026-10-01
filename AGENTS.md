@@ -27,6 +27,11 @@ discipline is [TIGERSTYLE.md](TIGERSTYLE.md). Read both before touching
 - Never classify an error by string matching.
 - Never commit secrets, LAN addresses, or device identifiers: this repo
   is public.
+- Never phone home. The frame talks to the person's own Immich server
+  and nothing else unless they turn a feature on: no telemetry,
+  analytics, crash reports or update checks, ever. A feature that has to
+  reach a third party (weather) starts off, and its setting says what it
+  sends and where.
 - Never cite what a reader can't see (private notes, a past working
   session, a numbered experiment) in a comment, doc or commit message;
   state the fact itself.

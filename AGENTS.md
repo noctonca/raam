@@ -14,6 +14,10 @@ discipline is [TIGERSTYLE.md](TIGERSTYLE.md). Read both before touching
   on all three targets; the golden suite and the web diff enforce it
   ([docs/BUILDING.md](docs/BUILDING.md#goldens)). A change that renders
   differently per host is wrong even if it looks fine.
+- **The person stays in control.** Raam does what it says and nothing
+  besides. Good UX and privacy pull against each other at times; the
+  answer is to be open about every trade, not to hide it or forbid the
+  feature.
 - **The design is written down.** If a change contradicts
   ARCHITECTURE.md, the doc changes first (or the change is wrong).
 
@@ -27,11 +31,12 @@ discipline is [TIGERSTYLE.md](TIGERSTYLE.md). Read both before touching
 - Never classify an error by string matching.
 - Never commit secrets, LAN addresses, or device identifiers: this repo
   is public.
-- Never phone home. The frame talks to the person's own Immich server
-  and nothing else unless they turn a feature on: no telemetry,
-  analytics, crash reports or update checks, ever. A feature that has to
-  reach a third party (weather) starts off, and its setting says what it
-  sends and where.
+- Never make a network call the person hasn't been shown and agreed to.
+  Anything beyond their own Immich server (weather, an update check,
+  diagnostics) is asked at onboarding with what it sends and where, stays
+  off until answered, and is listed on the Privacy page, where it can be
+  turned off at any time; off means no call. A change that adds such a
+  call adds its onboarding question and its Privacy entry with it.
 - Never cite what a reader can't see (private notes, a past working
   session, a numbered experiment) in a comment, doc or commit message;
   state the fact itself.

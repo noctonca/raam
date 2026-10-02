@@ -1164,24 +1164,28 @@ pub fn insert_cached_variant(
     )
 }
 
-/// Startup sweep over `dirs`: rows whose file is gone lose the row, files
-/// no row points at are deleted. Returns (rows dropped, files deleted).
+/// Startup sweep over `dirs`: rows whose file is gone, or not the length
+/// the row recorded (cut short by a power cut, raam#17), lose the row;
+/// files no row points at are deleted, those included, so the asset is
+/// fetched or made again. Returns (rows dropped, files deleted).
 pub fn sweep(conn: &Connection, dirs: &[&Path]) -> (usize, usize) {
     let mut known = std::collections::HashSet::new();
     let mut missing = Vec::new();
-    if let Ok(mut stmt) = conn.prepare("SELECT asset_id, path FROM cached_file")
-        && let Ok(iter) = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+    if let Ok(mut stmt) = conn.prepare("SELECT path, bytes FROM cached_file")
+        && let Ok(iter) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
     {
-        for (id, path) in iter.flatten() {
-            if Path::new(&path).is_file() {
+        for (path, bytes) in iter.flatten() {
+            let whole = std::fs::metadata(&path)
+                .is_ok_and(|m| m.is_file() && i64::try_from(m.len()) == Ok(bytes));
+            if whole {
                 known.insert(PathBuf::from(path));
             } else {
-                missing.push(id);
+                missing.push(path);
             }
         }
     }
-    for id in &missing {
-        let _ = conn.execute("DELETE FROM cached_file WHERE asset_id = ?1", [id]);
+    for path in &missing {
+        let _ = conn.execute("DELETE FROM cached_file WHERE path = ?1", [path]);
     }
     let mut orphans = 0;
     for dir in dirs {
@@ -1356,5 +1360,42 @@ mod tests {
             (loaded.sleep_enabled, loaded.sleep_min, loaded.wake_min),
             (false, 60, 420)
         );
+    }
+
+    #[test]
+    fn the_sweep_drops_a_file_a_power_cut_left_short() {
+        install_clock();
+        let dir = std::env::temp_dir().join(format!("raam-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = open(Path::new(":memory:"), "").unwrap();
+        let conn = db.lock().unwrap();
+        set_immich_server(&conn, "http://immich.local:2283", "key").unwrap();
+        let mut ids = Vec::new();
+        for name in ["whole", "empty", "short", "gone"] {
+            asset(&conn, name, "image", None);
+            ids.push(conn.last_insert_rowid());
+        }
+        let file = |name: &str, len: usize| {
+            let p = dir.join(format!("{name}.jpg"));
+            std::fs::write(&p, vec![0xff; len]).unwrap();
+            p
+        };
+        let paths = [file("whole", 100), file("empty", 0), file("short", 40)];
+        for (id, p) in ids.iter().zip(&paths) {
+            insert_cached(&conn, *id, p, 100, 0).unwrap();
+        }
+        insert_cached(&conn, ids[3], &dir.join("gone.jpg"), 100, 0).unwrap();
+        let stray = file("stray.jpg", 10);
+
+        assert_eq!(sweep(&conn, &[&dir]), (3, 3));
+        assert_eq!(cached_paths(&conn, ids[0]), vec![paths[0].clone()]);
+        for id in &ids[1..] {
+            assert!(cached_paths(&conn, *id).is_empty());
+        }
+        assert!(paths[0].is_file());
+        assert!(!paths[1].exists() && !paths[2].exists() && !stray.exists());
+        assert_eq!(sweep(&conn, &[&dir]), (0, 0));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

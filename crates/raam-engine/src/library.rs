@@ -1123,8 +1123,11 @@ pub fn fetch_immich_video(
         return Ok(None);
     }
     let path = lib.cache_dir.join(format!("{asset}.mp4"));
+    // The data is synced already (fetch_video); the rename needs the
+    // directory synced, before the row says the clip is here.
     std::fs::rename(&tmp, &path)
         .map_err(|e| ProviderError::Failed(format!("rename {}: {e}", path.display())))?;
+    sync_parent(&path).map_err(ProviderError::Failed)?;
     let conn = lib.db.lock().unwrap();
     let mut evicted = Vec::new();
     if evict {
@@ -1192,10 +1195,32 @@ fn enforce_cap(lib: &Library) {
     }
 }
 
+/// A power cut leaves either the old file or the whole new one, never an
+/// empty or short one (raam#17). The frame mounts /data `noauto_da_alloc`,
+/// so ext4 won't flush the data before the rename on its own: the temp
+/// file is synced first, and the directory after, so the rename holds too.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))
+    let mut file =
+        std::fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    drop(file);
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))?;
+    sync_parent(path)
+}
+
+/// Syncs `path`'s directory, so a rename into it survives a power cut.
+fn sync_parent(path: &Path) -> Result<(), String> {
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| format!("sync {}: {e}", dir.display()))
 }
 
 /// The controller's read-only view (raam-core app.rs).

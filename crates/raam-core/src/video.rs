@@ -496,8 +496,11 @@ impl<P: VideoPlayer> Video<P> {
                 });
             }
             Err(e) => {
+                // As for a probe that can't open: the backoff keeps a
+                // decoder under pressure from being asked clip after clip.
                 log::error!("clip {asset_id}: can't start playback: {e}");
                 self.done = true;
+                self.record_failure(&format!("clip {asset_id} open: {e}"));
             }
         }
     }
@@ -629,6 +632,8 @@ mod tests {
         /// own at once unless `hold_release` (a slow or wedged teardown).
         decoders: u32,
         hold_release: bool,
+        /// Every `open` is refused (no decoder created).
+        fail_open: bool,
         opens: Vec<(i64, Role)>,
         plays: u32,
         looping: bool,
@@ -652,6 +657,7 @@ mod tests {
                 audio_ready: false,
                 decoders: 0,
                 hold_release: false,
+                fail_open: false,
                 opens: Vec::new(),
                 plays: 0,
                 looping: false,
@@ -667,10 +673,16 @@ mod tests {
         type Clip = FakeClip;
 
         fn open(&self, _: &VideoClip, asset_id: i64, role: Role) -> Result<FakeClip, String> {
-            self.with(|s| {
+            let refused = self.with(|s| {
                 s.opens.push((asset_id, role));
-                s.decoders += 1;
+                if !s.fail_open {
+                    s.decoders += 1;
+                }
+                s.fail_open
             });
+            if refused {
+                return Err("no decoder".into());
+            }
             Ok(FakeClip {
                 role,
                 script: self.0.clone(),
@@ -788,6 +800,21 @@ mod tests {
             vec![(42, Role::Probe), (42, Role::Live { sound: None })]
         );
         assert!(video.decoder_busy() && !video.done());
+    }
+
+    #[test]
+    fn a_live_clip_that_cant_open_holds_the_still_and_backs_off() {
+        let fake = Fake::new();
+        let mut video = Video::new(fake.clone());
+        let clip = clip();
+        fake.with(|s| s.fail_open = true);
+        video.start(&cue(&clip));
+        assert_eq!(fake.with(|s| s.opens.len()), 1);
+        assert!(video.done());
+        assert_eq!(
+            backoff_left(&video),
+            Some(Duration::from_secs(DECODER_BACKOFF_BASE_SECS))
+        );
     }
 
     #[test]

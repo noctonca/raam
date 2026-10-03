@@ -111,6 +111,7 @@ pub trait Slideshow {
     fn shown_is_video(&self) -> bool;
     fn shown_layout(&self) -> Option<String>;
     fn is_animating(&self) -> bool;
+    fn ken_burns_moving(&self) -> bool;
     fn recompose_pending(&self) -> bool;
     fn next_deadline(&self) -> Option<Duration>;
 }
@@ -1082,9 +1083,11 @@ impl App {
         }
 
         // A scaling change lands in `update` next pass, so run one more.
+        // Ken Burns only moves pixels, and none show under opaque settings.
         out.wait = if force_redraw
             || !self.keys.is_empty()
             || stage.slideshow.is_animating()
+            || (stage.slideshow.ken_burns_moving() && !out.chrome_opaque)
             || stage.slideshow.recompose_pending()
         {
             Some(Duration::ZERO)
@@ -1301,6 +1304,7 @@ mod tests {
         selected: Cell<u32>,
         nexts: u32,
         prevs: u32,
+        ken_burns_moving: bool,
     }
 
     impl FakeShow {
@@ -1319,6 +1323,7 @@ mod tests {
                 selected: Cell::new(0),
                 nexts: 0,
                 prevs: 0,
+                ken_burns_moving: false,
             }
         }
     }
@@ -1361,6 +1366,9 @@ mod tests {
         }
         fn is_animating(&self) -> bool {
             false
+        }
+        fn ken_burns_moving(&self) -> bool {
+            self.ken_burns_moving
         }
         fn recompose_pending(&self) -> bool {
             false
@@ -2052,6 +2060,45 @@ mod tests {
         advance(AUTO_DISMISS);
         rig.frame(&[]);
         assert!(!rig.app.overlay_open());
+    }
+
+    #[test]
+    fn ken_burns_redraws_under_the_menu_but_not_under_settings() {
+        // A few passes, so egui's own repaints after a change are done.
+        fn settled(rig: &mut Rig) -> FrameOut {
+            for _ in 0..4 {
+                advance(Duration::from_millis(100));
+                rig.frame(&[]);
+            }
+            advance(Duration::from_millis(100));
+            rig.frame(&[])
+        }
+        let mut rig = Rig::new(None);
+        rig.show.ken_burns_moving = true;
+        rig.tap(100.0, 100.0);
+        assert!(rig.app.overlay_open());
+        let out = settled(&mut rig);
+        assert_eq!(
+            out.wait,
+            Some(Duration::ZERO),
+            "the slide moves under the menu"
+        );
+        rig.app.state.screen = frame_ui::Screen::Settings;
+        let out = settled(&mut rig);
+        assert!(out.chrome_opaque);
+        assert_ne!(
+            out.wait,
+            Some(Duration::ZERO),
+            "nothing of the slide shows under settings"
+        );
+        rig.show.ken_burns_moving = false;
+        rig.app.state.screen = frame_ui::Screen::Menu;
+        let out = settled(&mut rig);
+        assert_ne!(
+            out.wait,
+            Some(Duration::ZERO),
+            "a still slide under the menu"
+        );
     }
 
     #[test]

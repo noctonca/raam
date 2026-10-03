@@ -17,8 +17,11 @@ impl SourceKind {
         }
     }
 
-    /// The `source` table's CHECK holds `kind` to these two names, so
-    /// anything else is a bug, not a row to guess at.
+    /// A stored `kind`.
+    ///
+    /// # Panics
+    /// On any other name: the `source` table's CHECK holds `kind` to
+    /// these two, so anything else is a bug, not a row to guess at.
     pub fn parse(s: &str) -> Self {
         match s {
             "immich" => SourceKind::Immich,

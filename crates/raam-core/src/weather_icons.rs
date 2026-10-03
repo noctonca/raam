@@ -34,6 +34,10 @@ impl Icon {
         Icon::Thunder,
     ];
 
+    /// The icon's private-use codepoint, from its place in `ALL`.
+    ///
+    /// # Panics
+    /// If `ALL` leaves an icon out.
     pub fn ch(self) -> char {
         char::from_u32(0xE000 + Icon::ALL.iter().position(|&i| i == self).unwrap() as u32).unwrap()
     }

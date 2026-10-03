@@ -28,6 +28,9 @@ pub struct Source {
 static SOURCE: OnceLock<Source> = OnceLock::new();
 
 /// Host only, exactly once, before anything reads the clock.
+///
+/// # Panics
+/// If a source is already installed.
 pub fn set_source(source: Source) {
     assert!(SOURCE.set(source).is_ok(), "clock source installed twice");
 }

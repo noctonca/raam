@@ -59,6 +59,11 @@ struct GpuVertex {
     color: [u8; 4],
 }
 
+// `draw` points the attributes at these offsets and this stride.
+const _: () = assert!(std::mem::size_of::<GpuVertex>() == 20);
+const _: () = assert!(std::mem::offset_of!(GpuVertex, uv) == 2 * 4);
+const _: () = assert!(std::mem::offset_of!(GpuVertex, color) == 4 * 4);
+
 struct Program {
     id: GlUint,
     a_pos: GlUint,
@@ -250,10 +255,12 @@ impl Painter {
             glEnableVertexAttribArray(p.a_color);
             let stride = std::mem::size_of::<GpuVertex>() as i32;
             for cmd in &self.cmds {
-                let Some(&tex) = self.textures.get(&cmd.texture) else {
-                    log::warn!("no GL texture for {:?}, skipping mesh", cmd.texture);
-                    continue;
-                };
+                // The host sets a pass's textures before uploading its
+                // meshes (`app::EguiOut`), so every mesh's texture is here.
+                let tex = *self
+                    .textures
+                    .get(&cmd.texture)
+                    .unwrap_or_else(|| panic!("egui mesh on texture {:?}, never set", cmd.texture));
                 let base = cmd.vert_byte_offset;
                 glVertexAttribPointer(p.a_pos, 2, GL_FLOAT, 0, stride, base as *const c_void);
                 glVertexAttribPointer(

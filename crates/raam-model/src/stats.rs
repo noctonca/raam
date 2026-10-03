@@ -21,6 +21,21 @@ pub struct HiddenItem {
     pub label: String,
 }
 
+/// Where the Immich prefetch stands: the engine sets it, the Cache row
+/// words it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Prefetch {
+    /// Not started this run, or no server.
+    #[default]
+    Idle,
+    /// Still downloading previews or clips.
+    Running,
+    /// Every photo has its preview.
+    Complete,
+    /// Stopped at the cache's cap.
+    Full,
+}
+
 /// What the settings panel shows, refreshed after each library step.
 #[derive(Clone, Default, PartialEq)]
 pub struct Stats {
@@ -34,7 +49,7 @@ pub struct Stats {
     pub local_dir: String,
     pub local_note: String,
     pub immich_note: String,
-    pub prefetch_note: String,
+    pub prefetch: Prefetch,
     pub free_bytes: u64,
     pub hidden: Vec<HiddenItem>,
     pub export_note: String,

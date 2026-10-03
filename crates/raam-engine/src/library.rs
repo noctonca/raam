@@ -38,7 +38,7 @@ use raam_model::limits::{
     ALBUM_PICK_DEBOUNCE, CAP_CHOICES_MB, DEFAULT_CAP_MB, LIBRARY_IDLE_WAIT, LRU_BATCH_ENFORCE,
     LRU_BATCH_STORE, PREVIEW_SHORT_SIDE, SCAN_EVERY, SYNC_EVERY, SYNC_RETRY,
 };
-use raam_model::{MediaRef, ProviderError, ScaleMode, SourceKind, Stats};
+use raam_model::{MediaRef, Prefetch, ProviderError, ScaleMode, SourceKind, Stats};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -453,7 +453,7 @@ struct Loop {
     failed: std::collections::HashSet<i64>,
     local_note: String,
     immich_note: String,
-    prefetch_note: String,
+    prefetch: Prefetch,
     albums_note: String,
     test_cap: Option<u32>,
     /// The cap from settings, put back when the debug override is cleared.
@@ -498,7 +498,7 @@ fn library_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
         failed: Default::default(),
         local_note: String::new(),
         immich_note: "not synced yet".into(),
-        prefetch_note: String::new(),
+        prefetch: Prefetch::Idle,
         albums_note: "saved list, not refreshed yet".into(),
         test_cap: None,
         setting_cap: lib.cap_bytes(),
@@ -732,7 +732,7 @@ fn publish_stats(lib: &Library, st: &Loop) {
         local_dir: lib.local_dir.clone(),
         local_note: st.local_note.clone(),
         immich_note: st.immich_note.clone(),
-        prefetch_note: st.prefetch_note.clone(),
+        prefetch: st.prefetch,
         free_bytes: free_bytes(&lib.cache_dir) / FREE_SPACE_STEP * FREE_SPACE_STEP,
         hidden,
         export_note: lib.export_note.lock().unwrap().clone(),
@@ -892,9 +892,9 @@ fn materialise_one(lib: &Library, st: &mut Loop) -> bool {
         is_video,
     }) = next
     else {
-        if immich_on && st.prefetch_note != "complete" {
+        if immich_on && st.prefetch != Prefetch::Complete {
             log::info!("library: every photo has its preview (Immich prefetch complete)");
-            st.prefetch_note = "complete".into();
+            st.prefetch = Prefetch::Complete;
         }
         return false;
     };
@@ -911,7 +911,7 @@ fn materialise_one(lib: &Library, st: &mut Loop) -> bool {
         };
         return match fetch_immich_video(lib, provider, asset, &media, false) {
             Ok(Some(_)) => {
-                st.prefetch_note = "running".into();
+                st.prefetch = Prefetch::Running;
                 log::info!(
                     "library: prefetched clip {asset} in {:?}",
                     clock::elapsed(t)
@@ -919,13 +919,13 @@ fn materialise_one(lib: &Library, st: &mut Loop) -> bool {
                 true
             }
             Ok(None) => {
-                if st.prefetch_note != "stopped at the cap" {
+                if st.prefetch != Prefetch::Full {
                     log::info!(
                         "library: prefetch stopped at the {} MB cap",
                         lib.cap_bytes() / MIB
                     );
                 }
-                st.prefetch_note = "stopped at the cap".into();
+                st.prefetch = Prefetch::Full;
                 false
             }
             Err(e) => {
@@ -992,7 +992,7 @@ fn materialise_one(lib: &Library, st: &mut Loop) -> bool {
         }
         SourceKind::Immich => match store_immich_preview(lib, asset, &bytes, false) {
             Ok(true) => {
-                st.prefetch_note = "running".into();
+                st.prefetch = Prefetch::Running;
                 log::info!(
                     "library: prefetched asset {asset} ({} KB) in {:?}",
                     bytes.len() / 1024,
@@ -1001,13 +1001,13 @@ fn materialise_one(lib: &Library, st: &mut Loop) -> bool {
                 true
             }
             Ok(false) => {
-                if st.prefetch_note != "stopped at the cap" {
+                if st.prefetch != Prefetch::Full {
                     log::info!(
                         "library: prefetch stopped at the {} MB cap",
                         lib.cap_bytes() / MIB
                     );
                 }
-                st.prefetch_note = "stopped at the cap".into();
+                st.prefetch = Prefetch::Full;
                 false
             }
             Err(e) => {

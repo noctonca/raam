@@ -20,8 +20,8 @@ use crate::slideshow::SlideshowSettings;
 use crate::source::TileSource;
 use crate::{clock, store, theme, weather_icons};
 use raam_model::limits::{
-    AUTO_DISMISS, DEFAULT_MANUAL_IDLE, MAX_EGUI_WAIT, SAVE_DEBOUNCE, TAP_SLOP_PX, UNDO_HIDE,
-    WIFI_RESCAN,
+    AUTO_DISMISS, DEFAULT_MANUAL_IDLE, MAX_EGUI_WAIT, MAX_QUEUED_KEYS, SAVE_DEBOUNCE, TAP_SLOP_PX,
+    UNDO_HIDE, WIFI_RESCAN,
 };
 use raam_model::{ClockStyle, Corner, ScaleMode, SourceKind, Stats};
 use std::collections::VecDeque;
@@ -601,8 +601,8 @@ impl App {
                     self.last_input = clock::now();
                     push_egui_touch(t, &mut self.egui_down, &mut egui_events, &mut presses);
                 }
-                Event::Key(k) => self.keys.push_back(Keyed::Key(*k)),
-                Event::Text(t) => self.keys.push_back(Keyed::Text(t.clone())),
+                Event::Key(k) => self.queue_key(Keyed::Key(*k)),
+                Event::Text(t) => self.queue_key(Keyed::Text(t.clone())),
                 Event::Start | Event::Resume | Event::Pause => {}
             }
         }
@@ -1089,6 +1089,29 @@ impl App {
     /// the previous and next photo, Escape does nothing, and any other key
     /// opens the menu as a tap does. A repeat or a shortcut (Ctrl, Alt,
     /// Command held) is not a tap. True if it opened the menu.
+    /// Queues a key or typed text for its turn. The menu takes one press a
+    /// pass, so a held key's repeats (about 30 a second) would outrun a
+    /// slow frame and keep the focus moving long after the key is let go:
+    /// a repeat waits only when no press of its key does. Past
+    /// `MAX_QUEUED_KEYS` the newest is dropped, so what was typed first
+    /// still lands in order.
+    fn queue_key(&mut self, item: Keyed) {
+        if let Keyed::Key(k) = &item
+            && k.repeat
+            && self
+                .keys
+                .iter()
+                .any(|q| matches!(q, Keyed::Key(w) if w.pressed && w.key == k.key))
+        {
+            return;
+        }
+        if self.keys.len() >= MAX_QUEUED_KEYS {
+            log::debug!("key queue full: a key dropped");
+            return;
+        }
+        self.keys.push_back(item);
+    }
+
     fn slideshow_key(
         &mut self,
         k: &KeyEvent,
@@ -1673,6 +1696,45 @@ mod tests {
         assert!(rig.app.overlay_open());
         rig.key(egui::Key::Escape);
         assert!(!rig.app.overlay_open());
+    }
+
+    #[test]
+    fn a_held_key_stops_moving_the_focus_once_let_go() {
+        let mut rig = Rig::new(None);
+        rig.open_by_key();
+        let k = |pressed, repeat| {
+            Event::Key(KeyEvent {
+                key: egui::Key::ArrowRight,
+                pressed,
+                repeat,
+                modifiers: egui::Modifiers::NONE,
+            })
+        };
+        // A slow pass: the press and a hundred repeats, then the release.
+        let mut held = vec![k(true, false)];
+        held.extend((0..100).map(|_| k(true, true)));
+        rig.frame(&held);
+        assert!(rig.app.keys.len() <= MAX_QUEUED_KEYS);
+        rig.frame(&[k(false, false)]);
+        for _ in 0..3 {
+            rig.frame(&[]);
+        }
+        let settled = rig.focused();
+        for _ in 0..10 {
+            rig.frame(&[]);
+        }
+        assert_eq!(rig.focused(), settled, "the focus still moves");
+        assert!(rig.app.keys.is_empty());
+    }
+
+    #[test]
+    fn typing_past_the_queue_keeps_what_came_first() {
+        let mut rig = Rig::new(None);
+        for i in 0..(MAX_QUEUED_KEYS + 10) {
+            rig.app.queue_key(Keyed::Text(i.to_string()));
+        }
+        assert_eq!(rig.app.keys.len(), MAX_QUEUED_KEYS);
+        assert!(matches!(rig.app.keys.front(), Some(Keyed::Text(t)) if t == "0"));
     }
 
     #[test]

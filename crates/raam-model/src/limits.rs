@@ -28,6 +28,8 @@ pub const TRANSITION_SCRATCH_TARGETS: u32 = 2;
 /// Default sleep window, chosen: 23:00-05:00 local.
 pub const DEFAULT_SLEEP_MIN: u32 = 23 * 60;
 pub const DEFAULT_WAKE_MIN: u32 = 5 * 60;
+/// A schedule time is minutes after local midnight, below this.
+pub const MINUTES_PER_DAY: u32 = 24 * 60;
 /// Awake by hand during sleep hours: back to sleep after this long
 /// untouched. Chosen.
 pub const DEFAULT_MANUAL_IDLE: Duration = Duration::from_secs(10 * 60);
@@ -199,3 +201,6 @@ pub const ATLAS_WIDTH: usize = 1024;
 /// measured on the SNUG frame with a filmed flash/beep.
 pub const AUDIO_DELAY_DEFAULT_MS: i32 = 180;
 pub const AUDIO_DELAY_RANGE: (i32, i32) = (-100, 400);
+/// The photo interval's range (s), chosen: below 5 s a photo can't be
+/// taken in, above 2 min the frame looks stuck.
+pub const INTERVAL_RANGE_SECS: (f32, f32) = (5.0, 120.0);

@@ -24,8 +24,11 @@ Two things shape everything below:
 
 ## Find the frame
 
-`scripts/frame` in this skill finds it and runs the common read-only
-checks. Run it from the repo root:
+`scripts/frame` in this skill finds it, runs the common checks, and
+does every procedure below as one command that checks what it needs
+first and proves its result (`$S help` lists them). Use the command,
+not the steps by hand: the steps are here so you know what it does and
+what its FAIL means. Run it from the repo root:
 
 ```sh
 S=.claude/skills/snug-frame/scripts/frame
@@ -95,89 +98,69 @@ Package `io.github.noctonca.raam`; activity
 ### Build, install and prove it's the new build
 
 ```sh
-set -a; . ./.env; set +a          # NDK path and the debug keystore
-scripts/env-check.sh
-(cd hosts/android && cargo apk2 build --release)   # about 2 min
-adb -s $T install -r target/release/apk/raam-android.apk
-adb -s $T shell am start -n io.github.noctonca.raam/android.app.NativeActivity
+$S build                 # env check, then a release APK of this checkout
+$S deploy                # build, install -r, restart, prove the new pid
+$S install [DIR]         # fresh install; DIR restores an app-data backup
+$S backup DIR            # raam.db, photos and export into a new folder
+$S uninstall DIR|--no-backup
 ```
 
-`ANDROID_NDK_ROOT` must be the versioned NDK folder. A release build
-won't sign without both `CARGO_APK_RELEASE_KEYSTORE` variables (`.env`
-has them).
+Each prints `ok` lines for what it proved, the new pid's first log
+lines among them (`db: loaded N saved settings`, the startup sweep,
+`Immich now online`), and stops at the first `FAIL`. `build` needs
+`.env` (the versioned `ANDROID_NDK_ROOT` and both
+`CARGO_APK_RELEASE_KEYSTORE` variables); its log goes to
+`target/frame-build.log`. `deploy` and `install` always build first,
+so an APK left in `target/` from an older checkout never reaches the
+frame.
 
-**The trap:** `install -r` doesn't kill the running process here. The
-old pid can keep running and logging for minutes, and `am start` on the
-old task just says "brought to the front". Logs read then come from the
-old build. So after installing, `force-stop` and start it again, then
-prove the new process before reading anything:
+What the commands take care of, and why:
 
-```sh
-adb -s $T shell am force-stop io.github.noctonca.raam
-adb -s $T shell am start -n io.github.noctonca.raam/android.app.NativeActivity
-$S pid                                   # the new pid and its start time
-adb -s $T logcat -d -v time -s 'raam:*' | tail -40   # lines from that pid only
-```
-
-Quote `'raam:*'`: zsh globs it otherwise. The ring holds only a few
-minutes, so read it soon. When Raam is home (Frameo disabled), the
-system relaunches it within seconds of a force-stop. Expect the pid to
-change, and don't mistake the relaunch for your own start.
-
-A fresh install (not `-r`): grant storage **before** the first launch,
-so the curation import lands on boot one. The import reads `/sdcard`
-and runs only while the curation table is empty:
-
-```sh
-adb -s $T shell su -c 'pm grant io.github.noctonca.raam android.permission.READ_EXTERNAL_STORAGE; pm grant io.github.noctonca.raam android.permission.WRITE_EXTERNAL_STORAGE'
-```
-
-Raam missing from a frame where it used to be usually means a factory
-reset or a restore. The brain's latest hand-off normally says which.
-If the owner wants their old Raam back, the backups folder's newest
-`app-data-*` has the photos, `raam.db` (checkpointed) and the curation
-export. Put them in place **before the first launch**: photos into
-`/sdcard/Pictures/Frame`, and the database through the restore case in
-[references/raam-checks.md](references/raam-checks.md#editing-raamdb).
-Otherwise Raam starts empty, and the owner re-enters the server and
-albums.
+- **`install -r` doesn't kill the running process here.** The old pid
+  can keep logging for minutes, and `am start` only brings the old task
+  to the front. `deploy` force-stops and starts, then waits for a
+  process other than the old one to log `EGL + pipeline + painter
+  ready`. When Raam is home the system relaunches it within seconds of
+  a force-stop, so the pid can change twice; the last one is the one
+  proved. To read the log yourself: `$S pid`, then `$S log`. The ring
+  holds only a few minutes.
+- **A fresh install grants storage before the first launch**, so the
+  curation import (which reads `/sdcard` and runs only while the
+  curation table is empty) lands on boot one.
+- **`install DIR` restores before the first launch.** Raam missing from
+  a frame where it used to be usually means a factory reset or a
+  restore (the brain's latest hand-off normally says which). If the
+  owner wants their old Raam back, pass the backups folder's newest
+  `app-data-*`. The command checks it first (`raam.db` checkpointed and
+  passing `integrity_check`), pushes `Frame/` to `/sdcard/Pictures/Frame`
+  and `frame-curation.json` beside it, installs, grants, copies the
+  database in owned by the app's uid (read from the frame: it changes
+  with every install), launches, and fails unless Raam loaded the
+  restored settings. On the first launch the startup sweep drops every
+  cache row whose file isn't there (all of them, after a restore), and
+  Raam fetches those photos again. Without DIR, Raam starts empty and
+  the owner re-enters the server and albums.
+- **`backup DIR` stops Raam and copies in one root script**, because a
+  home Raam is relaunched about 2 s after a stop. It checkpoints the
+  copy locally, so the folder holds `raam.db` alone (the shape `install
+  DIR` expects), and refuses a folder that exists. Keep backups in the
+  backups folder (local memory has its path), never in the repo.
 
 ### Uninstall
 
-Tier 3: say what you're about to do and why first. An update never
-needs it (`install -r` keeps the data). Uninstalling deletes Raam's
-data folder, `raam.db` with it (settings, server key, albums,
-curation). It keeps `/sdcard/Pictures/Frame` and the curation export
-`/sdcard/Pictures/frame-curation.json`. A plain `adb uninstall` while
-Raam is home also leaves the frame with no home app.
+`$S uninstall DIR` is tier 3: say what you're about to do and why
+first. An update never needs it (`deploy` keeps the data). Uninstalling
+deletes Raam's data folder, `raam.db` with it (settings, server key,
+albums, curation), so the command backs up into DIR first; pass
+`--no-backup` only on the owner's word that the data can go. It then
+clears the props, gives the home back to Frameo if it's disabled (a
+plain uninstall while Raam is home leaves the frame with no home app),
+uninstalls, reboots, and proves Raam is gone and Frameo is in front.
 
-1. **Back up first**, unless the owner says the data can go. Pull the
-   database as in [Editing raam.db](references/raam-checks.md#editing-raamdb)
-   and checkpoint it, then pull the photos folder and the export.
-   Keep them in the backups folder as a new `app-data-<date>`, the
-   shape the restore above expects, never in the repo.
-2. **Clear the props** you set (`$S clear-props`).
-3. **Give the home back to Frameo**, if it's disabled (FRAME-SETUP §1's
-   undo): `pm enable`, check that the change landed, `sync`. Don't
-   reboot yet.
-   ```sh
-   adb -s $T shell su -c 'pm enable net.frameo.frame'
-   adb -s $T shell "su -c 'grep -A1 net.frameo.frame /data/system/users/0/package-restrictions.xml'"   # no enabled="3"
-   adb -s $T shell su -c sync
-   ```
-4. **Uninstall, then reboot:**
-   ```sh
-   adb -s $T uninstall io.github.noctonca.raam
-   adb -s $T reboot
-   ```
-5. **Prove it:** after the boot, `$S status` shows no Raam and Frameo in
-   front, and `adb -s $T shell pm list packages | grep raam` prints
-   nothing.
-
-The development changes in FRAME-SETUP §3 (wireless adb, the disabled
-updaters, the boot hook) stay. Leave them unless asked: they're the
-way back in. Delete the photos folder and the export only on the
-owner's word.
+It keeps `/sdcard/Pictures/Frame`, the curation export and the
+development changes in FRAME-SETUP §3 (wireless adb, the disabled
+updaters, the boot hook): they're the way back in. Delete the photos
+folder and the export only on the owner's word.
 
 ### Seeing and touching it
 
@@ -251,13 +234,18 @@ one's undo. Follow it, rather than a remembered command. The pieces
 that bite:
 
 - **The ten seconds.** After `pm disable-user`/`enable`, package state
-  reaches disk about ten seconds later, and a sooner reboot loses it.
-  Don't just wait blindly. Check that it landed, then `sync`, then
-  reboot:
-  ```sh
-  adb -s $T shell "su -c 'grep -A1 net.frameo.frame /data/system/users/0/package-restrictions.xml'"   # enabled="3" = disabled-user
-  adb -s $T shell su -c sync
-  ```
+  reaches disk about ten seconds later (12 s measured), and a sooner
+  reboot loses it. `$S frameo` waits for it in
+  `/data/system/users/0/package-restrictions.xml` (`enabled="3"` is
+  disabled-user), then syncs, then reboots. Do the same by hand for any
+  other package.
+- **A reboot is proved by a new `boot_id`.** Right after `adb reboot`
+  over Wi-Fi, the old boot can still answer `sys.boot_completed`.
+  `$S reboot` (and every command that reboots) waits for
+  `/proc/sys/kernel/random/boot_id` to change. The first seconds after
+  a boot log DNS failures and a 2021 clock: the frame has no RTC, and
+  Wi-Fi and NTP aren't up yet. Raam's album sync and weather recover on
+  their own within about a minute and a half.
 - **Frameo keeps its own schedule while it's enabled.** It arms a 23:00
   standby alarm (`dumpsys alarm`, `StandbyBroadcastReceiver`). If Raam
   runs over an enabled Frameo, the two schedules fight. Disabling Frameo
@@ -285,15 +273,9 @@ home app. Set Wi-Fi and brightness in Frameo first, because Raam has no
 settings for them on Android yet (FRAME-SETUP §2).
 
 ```sh
-adb -s $T shell su -c 'pm disable-user --user 0 net.frameo.frame'
-adb -s $T shell "su -c 'grep -A1 net.frameo.frame /data/system/users/0/package-restrictions.xml'"   # enabled="3"
-adb -s $T shell su -c sync
-adb -s $T reboot
+$S frameo disable   # refuses without Raam installed; proves Raam home, no Frameo alarms
+$S frameo enable    # the undo
 ```
-
-After the boot, `$S status` should show Raam in front and no 23:00
-standby alarm (`dumpsys alarm | grep -i frameo` prints nothing). The
-undo is in [Uninstall](#uninstall), step 3.
 
 **Frameo is disabled, never uninstalled.** The factory Frameo
 (1.13.4) lives in `/system/priv-app`, so removing it means writing

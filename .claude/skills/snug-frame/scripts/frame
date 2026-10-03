@@ -1,26 +1,54 @@
 #!/usr/bin/env bash
-# Read-only helpers for the SNUG frame (except clear-props, which only
-# clears Raam's test-only debug.video.* props). Run from the raam repo.
+# The SNUG frame's procedures as commands. Run from the raam repo.
+# Each one checks what it needs first, proves its result, and stops
+# with FAIL on the first thing that doesn't hold.
 #
-#   frame target          the adb -s value: USB first, then Wi-Fi
-#   frame status          one screen of state, for the start of a session
-#   frame pid             Raam's pid and start time (prove a new build runs)
-#   frame log [N]         the last N lines of Raam's log (default 60)
-#   frame props           the debug.video.* props that are set
-#   frame clear-props     clear every debug.video.* prop
-#   frame shot FILE.png   a screenshot (4-5 s on this device)
+# Look (tier 1):
+#   frame target              the adb -s value: USB first, then Wi-Fi
+#   frame status              one screen of state, for the start of a session
+#   frame pid                 Raam's pid and how long it has run
+#   frame log [N]             the last N lines of Raam's log (default 60)
+#   frame props               the debug.video.* props that are set
+#   frame shot FILE.png       a screenshot (4-5 s on this device)
+# Raam-level (tier 2):
+#   frame clear-props         clear every debug.video.* prop
+#   frame build               env check and a release APK of this checkout
+#   frame deploy              build, install -r, restart, prove the new pid
+# Persists on the frame (tier 3, say so first):
+#   frame install [DIR]       fresh install; with DIR (an app-data backup)
+#                             the photos, curation export and raam.db go
+#                             in before the first launch
+#   frame backup DIR          raam.db (checkpointed), photos and export
+#                             into the new folder DIR
+#   frame uninstall DIR|--no-backup
+#                             backup, props cleared, Frameo enabled,
+#                             uninstall, reboot, prove
+#   frame frameo disable|enable
+#                             change Frameo, wait for it to reach disk,
+#                             sync, reboot, prove the home app
+#   frame reboot              reboot and wait for a new boot
 #
 # Target: $FRAME if set, else RAAM_FRAME_SERIAL (from .env) when it's
 # connected, else the one connected device whose product is SNFRM*.
 set -uo pipefail
 
 PKG=io.github.noctonca.raam
+ACT=android.app.NativeActivity
+FRAMEO=net.frameo.frame
+D=/data/data/$PKG
+PICS=/sdcard/Pictures
+EXPORT=$PICS/frame-curation.json
+RESTRICTIONS=/data/system/users/0/package-restrictions.xml
 PROPS="fail sleep wake idle mech only_videos only_path hold_first show_still audio_extra_ms cap_mb"
 
 envf="$(git rev-parse --git-common-dir 2>/dev/null)/../.env"
 if [ -z "${RAAM_FRAME_SERIAL:-}" ] && [ -f "$envf" ]; then
     RAAM_FRAME_SERIAL=$(sed -n 's/^RAAM_FRAME_SERIAL=//p' "$envf" | tr -d '"'"'")
 fi
+
+step() { echo "-- $*"; }
+ok() { echo "ok $*"; }
+die() { echo "FAIL $*" >&2; exit 1; }
 
 connected() { adb devices | awk 'NR > 1 && $2 == "device" { print $1 }'; }
 
@@ -41,11 +69,172 @@ target() {
     return 1
 }
 
-T=$(target) || exit 1
-A=(adb -s "$T")
+# build needs no frame.
+if [ "${1:-}" != build ]; then
+    T=$(target) || exit 1
+    A=(adb -s "$T")
+fi
 sh_() { "${A[@]}" shell "$@" | tr -d '\r'; }
 
+# Run stdin as a root script on the frame and print its output. adb on
+# Android 6 drops the exit status, so the script ends by echoing a
+# marker, and a missing marker is a failure. The script travels as a
+# file, so it needs no quoting through adb and su.
+root() {
+    local what=$1 tmp out
+    tmp=$(mktemp)
+    { cat; echo; echo 'echo __ok__'; } > "$tmp"
+    "${A[@]}" push "$tmp" /data/local/tmp/frame-step.sh >/dev/null 2>&1 || { rm -f "$tmp"; die "$what: push"; }
+    rm -f "$tmp"
+    out=$(sh_ "su -c 'sh -e /data/local/tmp/frame-step.sh; rm -f /data/local/tmp/frame-step.sh'")
+    printf '%s\n' "$out" | grep -v '^__ok__$'
+    printf '%s\n' "$out" | grep -qx '__ok__' || die "$what"
+}
+
+installed() { sh_ pm list packages "$PKG" | grep -qx "package:$PKG"; }
 raam_pid() { sh_ ps | awk -v p="$PKG" '$NF == p { print $2 }'; }
+pid_log() { "${A[@]}" logcat -d -v time -s 'raam:*' | tr -d '\r' | grep -E "\( *$1\):"; }
+boot_id() { sh_ cat /proc/sys/kernel/random/boot_id 2>/dev/null; }
+front() { sh_ dumpsys activity activities | sed -n 's/.*mFocusedActivity: //p' | head -1; }
+frameo_disabled() { sh_ pm list packages -d | grep -qx "package:$FRAMEO"; }
+
+# Seconds since the process started: /proc/PID/stat field 22 is its
+# start in clock ticks (100 a second) after boot.
+pid_age() {
+    sh_ "cat /proc/uptime /proc/$1/stat" | awk 'NR == 1 { up = $1 } NR == 2 { printf "%d", up - $22 / 100 }'
+}
+
+# Wait for a Raam process other than $1 whose log says the pipeline is
+# up. When Raam is home the system relaunches it after a stop, so the
+# pid can change more than once; the last one is the one proved.
+await_raam() {
+    local old=$1 pid i
+    for i in $(seq 1 45); do
+        pid=$(raam_pid)
+        if [ -n "$pid" ] && [ "$pid" != "$old" ] && pid_log "$pid" | grep -q 'EGL + pipeline + painter ready'; then
+            sleep 3
+            [ "$(raam_pid)" = "$pid" ] || continue
+            ok "raam running: pid $pid, up $(pid_age "$pid") s"
+            pid_log "$pid" | grep -E 'db: |startup sweep|Immich now|E/raam' | sed 's/^/   /'
+            return 0
+        fi
+        sleep 2
+    done
+    die "no new Raam process got its pipeline up in 90 s (old pid ${old:-none}); see frame log"
+}
+
+restart_raam() {
+    local old
+    old=$(raam_pid)
+    "${A[@]}" shell am force-stop "$PKG"
+    "${A[@]}" shell am start -n "$PKG/$ACT" >/dev/null
+    await_raam "$old"
+}
+
+# A reboot is proved by a new boot_id, not by sys.boot_completed: right
+# after `adb reboot`, the old boot can still answer.
+reboot_wait() {
+    local old id i
+    old=$(boot_id)
+    [ -n "$old" ] || die "can't read boot_id"
+    step "reboot"
+    "${A[@]}" reboot
+    sleep 5
+    for i in $(seq 1 100); do
+        case "$T" in *:*) adb connect "$T" >/dev/null 2>&1 ;; esac
+        id=$(boot_id)
+        if [ -n "$id" ] && [ "$id" != "$old" ] && [ "$(sh_ getprop sys.boot_completed)" = 1 ]; then
+            ok "booted: up $(sh_ cat /proc/uptime | cut -d. -f1) s"
+            echo "   (the first seconds log DNS failures and a 2021 clock until Wi-Fi and NTP are up: no RTC)"
+            return 0
+        fi
+        sleep 3
+    done
+    die "no new boot within 5 min; see references/recovery.md"
+}
+
+# Wait until package $1's state ($2: disabled|enabled) is written to
+# package-restrictions.xml, then sync. A reboot before that loses it.
+await_pkg_state() {
+    local pkg=$1 want=$2 line i landed=
+    for i in $(seq 1 30); do
+        line=$(sh_ "su -c 'grep \"<pkg name=\\\"$pkg\\\"\" $RESTRICTIONS'")
+        case "$want:$line" in
+        disabled:*'enabled="3"'*) landed=1 ;;
+        enabled:*'enabled="2"'* | enabled:*'enabled="3"'* | enabled:*'enabled="4"'*) ;;
+        enabled:?*) landed=1 ;;
+        esac
+        [ -z "$landed" ] || break
+        sleep 2
+    done
+    [ -n "$landed" ] || die "$pkg's $want state didn't reach $RESTRICTIONS in 60 s"
+    root "sync" <<<'sync'
+    ok "$pkg $want, on disk after ~$((i * 2)) s, synced"
+}
+
+build() {
+    local root_dir
+    root_dir=$(git rev-parse --show-toplevel) || die "not in the raam repo"
+    # shellcheck disable=SC1090
+    if [ -f "$envf" ]; then set -a; . "$envf"; set +a; fi
+    "$root_dir/scripts/env-check.sh" >/dev/null || { "$root_dir/scripts/env-check.sh"; die "env-check"; }
+    step "build $(git -C "$root_dir" describe --always --dirty)"
+    mkdir -p "$root_dir/target"
+    local log=$root_dir/target/frame-build.log mark=$root_dir/target/frame-build.mark
+    touch "$mark"
+    (cd "$root_dir/hosts/android" && cargo apk2 build --release) >"$log" 2>&1 ||
+        { tail -20 "$log"; die "build (log: $log)"; }
+    APK=$root_dir/target/release/apk/raam-android.apk
+    [ "$APK" -nt "$mark" ] || die "$APK wasn't written by this build"
+    ok "built $APK"
+}
+
+# An app-data backup: raam.db (checkpointed: no -wal or -shm beside it,
+# integrity ok), and optionally Frame/ and frame-curation.json.
+check_backup() {
+    local dir=$1
+    [ -f "$dir/raam.db" ] || die "$dir has no raam.db"
+    [ ! -e "$dir/raam.db-wal" ] && [ ! -e "$dir/raam.db-shm" ] || die "$dir/raam.db isn't checkpointed (-wal/-shm beside it)"
+    # immutable=1: a plain open of a WAL database leaves -wal and -shm
+    # beside it, and the backup would then fail the check above.
+    local db="file:$dir/raam.db?immutable=1"
+    [ "$(sqlite3 "$db" 'PRAGMA integrity_check')" = ok ] || die "$dir/raam.db fails integrity_check"
+    ok "backup $dir: raam.db ok, schema $(sqlite3 "$db" 'PRAGMA user_version')," \
+        "$(ls "$dir/Frame" 2>/dev/null | wc -l | tr -d ' ') photos, export $([ -f "$dir/frame-curation.json" ] && echo yes || echo no)"
+}
+
+backup() {
+    local dir=$1 tmp
+    [ -n "$dir" ] || die "usage: frame backup DIR"
+    [ ! -e "$dir" ] || die "$dir exists; a backup goes in a new folder"
+    installed || die "Raam isn't installed: nothing to back up"
+    mkdir -p "$dir" || die "mkdir $dir"
+    step "copy raam.db with Raam stopped"
+    # Stop and copy in one root script: when Raam is home the system
+    # relaunches it about 2 s after the stop.
+    root "copy raam.db" <<EOF
+am force-stop $PKG
+mkdir -p /sdcard/frame-backup
+for f in raam.db raam.db-wal raam.db-shm; do
+    if [ -f $D/files/\$f ]; then cp $D/files/\$f /sdcard/frame-backup/\$f; fi
+done
+EOF
+    for f in raam.db raam.db-wal raam.db-shm; do
+        "${A[@]}" pull "/sdcard/frame-backup/$f" "$dir/$f" >/dev/null 2>&1
+    done
+    sh_ rm -rf /sdcard/frame-backup
+    [ -f "$dir/raam.db" ] || die "raam.db didn't come off the frame"
+    sqlite3 "$dir/raam.db" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null || die "checkpoint"
+    rm -f "$dir/raam.db-wal" "$dir/raam.db-shm"
+    step "photos and export"
+    if [ "$(sh_ ls -d $PICS/Frame 2>/dev/null)" = "$PICS/Frame" ]; then
+        "${A[@]}" pull "$PICS/Frame" "$dir/" >/dev/null || die "pull $PICS/Frame"
+    fi
+    if [ "$(sh_ ls $EXPORT 2>/dev/null)" = "$EXPORT" ]; then
+        "${A[@]}" pull "$EXPORT" "$dir/" >/dev/null || die "pull $EXPORT"
+    fi
+    check_backup "$dir"
+}
 
 case "${1:-status}" in
 target)
@@ -61,10 +250,10 @@ status)
     echo "screen     $(sh_ dumpsys power | sed -n 's/.*mWakefulness=//p' | head -1)"
     echo "wifi       on=$(sh_ settings get global wifi_on)  ip=$(sh_ ip -o -4 addr show wlan0 2>/dev/null | awk '{print $4}')"
     echo "tcp adb    persist.adb.tcp.port=$(sh_ getprop persist.adb.tcp.port)"
-    echo "front      $(sh_ dumpsys activity activities | sed -n 's/.*mFocusedActivity: //p' | head -1)"
+    echo "front      $(front)"
     raam=$(sh_ dumpsys package $PKG | sed -n 's/.*versionName=//p' | head -1)
     echo "raam       ${raam:-not installed}  pid=$(raam_pid)"
-    frameo=$(sh_ dumpsys package net.frameo.frame | sed -n 's/.*versionName=//p' | head -1)
+    frameo=$(sh_ dumpsys package $FRAMEO | sed -n 's/.*versionName=//p' | head -1)
     disabled=$(sh_ pm list packages -d | tr -d '\r' | sed 's/^package://' | tr '\n' ' ')
     echo "frameo     ${frameo:-absent}"
     echo "disabled   ${disabled:-none}"
@@ -81,8 +270,7 @@ status)
 pid)
     pid=$(raam_pid)
     if [ -z "$pid" ]; then echo "raam not running"; exit 1; fi
-    sh_ ps -p "$pid" -o pid,stime,etime,args 2>/dev/null || sh_ ps | awk -v p="$PKG" '$NF == p'
-    sh_ ls -ld /proc/"$pid" | awk '{ print "started " $6 " " $7 }'
+    echo "pid $pid, up $(pid_age "$pid") s"
     ;;
 log)
     "${A[@]}" logcat -d -v time -s 'raam:*' | tail -n "${2:-60}"
@@ -105,8 +293,120 @@ shot)
     out=${2:?usage: frame shot FILE.png}
     "${A[@]}" exec-out screencap -p > "$out" && echo "$out"
     ;;
+build)
+    build
+    ;;
+deploy)
+    installed || die "Raam isn't installed; use frame install"
+    build
+    step "install -r"
+    "${A[@]}" install -r "$APK" | tr -d '\r' | grep -qx Success || die "install -r"
+    # install -r doesn't kill the old process here: restart it, or the
+    # log keeps coming from the old build.
+    restart_raam
+    ;;
+install)
+    dir=${2:-}
+    installed && die "Raam is installed; use frame deploy, or frame uninstall first"
+    [ -z "$dir" ] || check_backup "$dir"
+    build
+    if [ -n "$dir" ]; then
+        step "photos and export"
+        if [ -d "$dir/Frame" ]; then
+            sh_ mkdir -p $PICS/Frame
+            "${A[@]}" push "$dir/Frame/." $PICS/Frame/ >/dev/null || die "push photos"
+        fi
+        if [ -f "$dir/frame-curation.json" ]; then
+            "${A[@]}" push "$dir/frame-curation.json" $EXPORT >/dev/null || die "push export"
+        fi
+        ok "$(sh_ ls $PICS/Frame 2>/dev/null | wc -l | tr -d ' ') photos in $PICS/Frame"
+    fi
+    step "install"
+    "${A[@]}" install "$APK" | tr -d '\r' | grep -qx Success || die "install"
+    # Storage before the first launch, so the curation import lands on
+    # boot one.
+    root "grant storage" <<EOF
+pm grant $PKG android.permission.READ_EXTERNAL_STORAGE
+pm grant $PKG android.permission.WRITE_EXTERNAL_STORAGE
+EOF
+    ok "installed, storage granted"
+    if [ -n "$dir" ]; then
+        step "raam.db"
+        "${A[@]}" push "$dir/raam.db" /sdcard/raam.db >/dev/null || die "push raam.db"
+        # The app's uid changes with every install: read it, never guess.
+        root "copy raam.db in" <<EOF
+am force-stop $PKG
+U=\$(stat -c %u $D)
+mkdir -p $D/files
+cp /sdcard/raam.db $D/files/raam.db
+rm -f $D/files/raam.db-wal $D/files/raam.db-shm /sdcard/raam.db
+chown -R \$U:\$U $D/files
+chmod 600 $D/files/raam.db
+EOF
+        ok "raam.db in place, owned by the app"
+    fi
+    step "first launch"
+    "${A[@]}" shell am start -n "$PKG/$ACT" >/dev/null
+    await_raam ""
+    if [ -n "$dir" ]; then
+        pid_log "$(raam_pid)" | grep -qE 'loaded [1-9][0-9]* saved settings' || die "Raam didn't load the restored settings"
+        ok "restored settings loaded"
+    fi
+    ;;
+backup)
+    backup "${2:-}"
+    restart_raam
+    ;;
+uninstall)
+    arg=${2:-}
+    [ -n "$arg" ] || die "usage: frame uninstall DIR|--no-backup"
+    installed || die "Raam isn't installed"
+    [ "$arg" = --no-backup ] || backup "$arg"
+    "$0" clear-props
+    if frameo_disabled; then
+        step "give the home back to Frameo"
+        root "enable Frameo" <<<"pm enable $FRAMEO"
+        await_pkg_state $FRAMEO enabled
+    fi
+    step "uninstall"
+    "${A[@]}" uninstall "$PKG" | tr -d '\r' | grep -qx Success || die "uninstall"
+    reboot_wait
+    ! installed || die "Raam is still installed"
+    sleep 10
+    front | grep -q "$FRAMEO" || die "Frameo isn't in front: $(front)"
+    ok "Raam gone, Frameo in front. Kept: $PICS/Frame, $EXPORT and the FRAME-SETUP §3 dev changes"
+    ;;
+frameo)
+    case "${2:-}" in
+    disable)
+        installed || die "Raam isn't installed: with Frameo disabled the frame would have no home app"
+        frameo_disabled && die "Frameo is already disabled"
+        echo "   (Wi-Fi and brightness come from Frameo's settings: set them there first, FRAME-SETUP §2)"
+        root "disable Frameo" <<<"pm disable-user --user 0 $FRAMEO"
+        await_pkg_state $FRAMEO disabled
+        reboot_wait
+        await_raam ""
+        front | grep -q "$PKG" || die "Raam isn't in front: $(front)"
+        n=$(sh_ dumpsys alarm | grep -ci frameo)
+        [ "$n" = 0 ] || die "Frameo still has $n alarm lines"
+        ok "Raam is home; no Frameo alarms"
+        ;;
+    enable)
+        frameo_disabled || die "Frameo isn't disabled"
+        root "enable Frameo" <<<"pm enable $FRAMEO"
+        await_pkg_state $FRAMEO enabled
+        reboot_wait
+        sleep 10
+        ok "Frameo enabled; in front: $(front)"
+        ;;
+    *) die "usage: frame frameo disable|enable" ;;
+    esac
+    ;;
+reboot)
+    reboot_wait
+    ;;
 *)
-    sed -n '2,13p' "$0"
+    sed -n '2,32p' "$0"
     exit 2
     ;;
 esac

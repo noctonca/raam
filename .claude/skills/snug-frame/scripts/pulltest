@@ -170,10 +170,13 @@ arm() {
 delay=$1; nth=$2; life=$3
 echo $$ > /data/local/tmp/pulltest-watch.pid
 marker=$(cat /data/local/tmp/pulltest-marker)
-end=$(( $(date +%s) + life ))
+# Seconds since boot, not the wall clock: in the first half minute after
+# a boot the clock reads 2021, and NTP then jumps it by years.
+up() { read -r s _ < /proc/uptime; echo "${s%.*}"; }
+end=$(( $(up) + life ))
 n=0
 logcat -T 1 -v brief -s raam:V | while read -r line; do
-    [ "$(date +%s)" -lt "$end" ] || break
+    [ "$(up)" -lt "$end" ] || break
     case "$line" in
     *"$marker"*)
         n=$((n + 1))

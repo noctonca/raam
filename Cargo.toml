@@ -24,6 +24,9 @@ rust-version.workspace = true
 # for a Linux frame whose GPU has no core profile, as a Raspberry Pi's.
 gles = ["raam-core/gles"]
 
+[lints]
+workspace = true
+
 [dependencies]
 raam-core.workspace = true
 raam-model.workspace = true
@@ -56,6 +59,13 @@ raam-engine = { path = "crates/raam-engine" }
 log = "0.4"
 # Every dependency added here must first earn its row in
 # docs/ARCHITECTURE.md "The dependency register".
+
+# Lints on top of clippy's defaults, for every member (each opts in with
+# `[lints] workspace = true`), so they hold locally and not only in CI's
+# `-D warnings`.
+[workspace.lints.clippy]
+# A public fn that can panic says when, under `# Panics`.
+missing_panics_doc = "warn"
 
 # Profiles live at the workspace root only (Cargo ignores them in
 # members). Release: LTO earns its keep on the frame (binary size and the

@@ -4,6 +4,11 @@
 //! the host through the core's `Waker` seam, and runs the App
 //! controller's effects (`run_effects`).
 
+// The engine's panics are `lock().unwrap()`, TigerStyle's policy (a
+// poisoned lock is a crashed invariant), and expects that can't fire: a
+// `# Panics` section on every function that takes a lock says nothing.
+#![allow(clippy::missing_panics_doc)]
+
 pub mod db;
 pub mod fetch;
 pub mod immich;

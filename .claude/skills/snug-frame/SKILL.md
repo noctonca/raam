@@ -223,6 +223,8 @@ recipes and the log lines that mean success:
 - fault injection and recovery (`fail=rt`), required after risky
   pipeline changes;
 - the `raam.db` edit cycle, and its chown trap;
+- power cuts aimed at a write window (`scripts/pulltest`), and the
+  check after each boot;
 - sound-on clips;
 - reading memory honestly (PSS alone understates it badly);
 - reading a sleep or wake the log has already lost.

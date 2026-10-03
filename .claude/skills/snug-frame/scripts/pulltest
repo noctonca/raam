@@ -1,0 +1,382 @@
+#!/usr/bin/env bash
+# Power-cut tests (raam#17, docs/plan/power-cut-tests.md): aim a cut at
+# a write window, then check what survived the boot. Run from the raam
+# repo. Results and each run's files go to target/pulltest/.
+#
+#   pulltest setup              8 test photos in Pictures/Frame/pulltest,
+#                               only_path set, Raam restarted on them
+#   pulltest arm CASE MARKER [--delay MS] [--nth N] [--real] [--for S]
+#                               start a run: capture Raam's log, and cut
+#                               the power (sysrq reboot) when the Nth line
+#                               containing MARKER appears, MS later. With
+#                               --real the Mac says "pull now" instead,
+#                               for a pull by hand. Disarms itself after S
+#                               seconds (default 300) if nothing matched
+#   pulltest disarm             stop an armed watcher
+#   pulltest curate fit|hide    open the menu and press Fill/Fit or Hide
+#                               on the photo on screen
+#   pulltest evict N            delete N cached Immich previews and
+#                               restart Raam, so prefetch writes again
+#   pulltest check [--grace]    after the cut: wait for the new boot, save
+#                               the log, copy raam.db and the cache
+#                               listings with Raam stopped, check them,
+#                               print the result row. --grace first
+#                               follows the log 11 min untouched (C6)
+#   pulltest teardown           disarm, test photos and their curation
+#                               rows out, props cleared, Raam restarted
+#
+# Debug props are cleared by every reboot: set debug.video.stall (and
+# setup's only_path) again before each arm.
+set -uo pipefail
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(git rev-parse --show-toplevel) || { echo "FAIL not in the raam repo" >&2; exit 1; }
+OUT=$ROOT/target/pulltest
+# After a cut the frame is offline for a while, and the target lookup
+# would fail: check uses the address the run was armed on.
+if [ "${1:-}" = check ] && [ -z "${FRAME:-}" ] && [ -f "$OUT/current" ]; then
+    FRAME=$(sed -n 's/^target=//p' "$(cat "$OUT/current")/run.env")
+    [ -z "$FRAME" ] || export FRAME
+fi
+FRAME_LIB=1
+# shellcheck source=frame
+. "$HERE/frame"
+PT_DIR=$PICS/Frame/pulltest
+WATCH=/data/local/tmp/pulltest-watch.sh
+WATCH_PID=/data/local/tmp/pulltest-watch.pid
+MARKER=/data/local/tmp/pulltest-marker
+SCRATCH=/sdcard/pulltest-scratch
+GRACE_S=660
+# Menu buttons for a local photo on screen, in screen coordinates
+# (1280x800), measured 2026-10-03 from a screenshot of the open menu
+# (Pause, Previous, Next, Fit to frame, Hide, Settings, Close). The tap
+# that opens it also selects the tile under it in a collage: the middle
+# one.
+TAP_MENU="640 400"
+TAP_FIT="${PULLTEST_TAP_FIT:-640 730}"
+TAP_HIDE="${PULLTEST_TAP_HIDE:-766 730}"
+
+mkdir -p "$OUT"
+
+# 8 portrait photos (Fit shows bars on the landscape screen), photo N
+# with N white bars on its own colour, so a screenshot says which is up.
+# The same bytes every time, so the same sha1s.
+make_photos() {
+    local dir=$1 n colours=(0x8b1e3f 0x1e5f8b 0x2e7d32 0x6a1b9a 0xc77700 0x00695c 0x4e342e 0x37474f)
+    mkdir -p "$dir"
+    for n in 1 2 3 4 5 6 7 8; do
+        local vf="" i
+        for i in $(seq 1 "$n"); do
+            vf="${vf:+$vf,}drawbox=x=$((i * 120)):y=500:w=60:h=600:color=white:t=fill"
+        done
+        ffmpeg -loglevel error -y -f lavfi -i "color=c=${colours[n - 1]}:s=1200x1600" \
+            -vf "$vf" -frames:v 1 -q:v 3 -fflags +bitexact -flags +bitexact \
+            "$dir/pulltest-$n.jpg" || die "ffmpeg"
+    done
+}
+
+run_dir() { cat "$OUT/current" 2>/dev/null; }
+
+disarm() {
+    root "disarm" <<EOF
+if [ -f $WATCH_PID ]; then kill \$(cat $WATCH_PID) 2>/dev/null || true; fi
+pkill -f pulltest-watch 2>/dev/null || true
+rm -f $WATCH $WATCH_PID $MARKER
+EOF
+    stop_local
+}
+
+# The Mac's side of a run: the log capture and the adb session the
+# watcher runs in.
+stop_local() {
+    local run f
+    run=$(run_dir)
+    [ -n "$run" ] || return 0
+    for f in capture.pid watch.pid; do
+        if [ -f "$run/$f" ]; then
+            kill "$(cat "$run/$f")" 2>/dev/null
+            rm -f "$run/$f"
+        fi
+    done
+}
+
+arm() {
+    local case=${1:-} marker=${2:-} delay=0 nth=1 real='' life=300
+    [ -n "$case" ] && [ -n "$marker" ] || die "usage: pulltest arm CASE MARKER [--delay MS] [--nth N] [--real] [--for S]"
+    shift 2
+    while [ $# -gt 0 ]; do
+        case $1 in
+        --delay) delay=$2; shift 2 ;;
+        --nth) nth=$2; shift 2 ;;
+        --real) real=1; shift ;;
+        --for) life=$2; shift 2 ;;
+        *) die "arm: unknown $1" ;;
+        esac
+    done
+    case "$delay$nth$life" in *[!0-9]*) die "arm: --delay, --nth and --for take whole numbers" ;; esac
+    [ -z "$(sh_ "ls $WATCH 2>/dev/null")" ] || die "a watcher is armed already: pulltest disarm"
+    local n run
+    n=$(($(find "$OUT" -maxdepth 1 -name "[0-9]*" -type d | wc -l) + 1))
+    run=$OUT/$(printf '%03d' "$n")-$case
+    mkdir -p "$run" || die "mkdir $run"
+    echo "$run" > "$OUT/current"
+    {
+        echo "case=$case"
+        echo "target=$T"
+        echo "marker=$marker"
+        echo "delay_ms=$delay"
+        echo "nth=$nth"
+        echo "cut=$([ -n "$real" ] && echo real || echo sysrq)"
+        echo "boot_id=$(boot_id)"
+        echo "armed_at=$(date '+%Y-%m-%d %H:%M:%S')"
+        echo "stall=$(sh_ getprop debug.video.stall)"
+        echo "only_path=$(sh_ getprop debug.video.only_path)"
+    } > "$run/run.env"
+
+    # Raam's log from now until the frame goes away: after a cut, the
+    # lines before it exist only here.
+    nohup "${A[@]}" logcat -T 1 -v time -s 'raam:*' > "$run/before.log" 2>/dev/null &
+    echo $! > "$run/capture.pid"
+
+    if [ -n "$real" ]; then
+        # The cue: the Mac follows its own capture and speaks.
+        (
+            end=$(($(date +%s) + life))
+            while [ "$(date +%s)" -lt "$end" ]; do
+                if [ "$(grep -cF -- "$marker" "$run/before.log")" -ge "$nth" ]; then
+                    perl -e "select(undef, undef, undef, $delay / 1000)"
+                    say "pull now"; echo "PULL NOW ($(date '+%H:%M:%S'))"
+                    exit 0
+                fi
+                perl -e 'select(undef, undef, undef, 0.1)'
+            done
+            echo "pulltest: nothing matched in ${life} s; the capture keeps running until disarm"
+        ) &
+        ok "armed $run: say \"pull now\" on line $nth with '$marker', +${delay} ms"
+        return
+    fi
+
+    # The trigger runs on the frame: over adb the round trip alone is
+    # tens of milliseconds, and it varies. It runs inside an adb session
+    # the Mac holds open: on this frame nothing started in the background
+    # outlives its adb session, not even under nohup or setsid. So if the
+    # Mac lets go, the watcher dies with it. It reads only new lines (-T 1)
+    # and gives up after $life s, so a forgotten one never reboots the
+    # frame later. Raam's stats line every few seconds keeps the deadline
+    # checked even when nothing matches.
+    local tmp
+    tmp=$(mktemp)
+    cat > "$tmp" <<'EOF'
+delay=$1; nth=$2; life=$3
+echo $$ > /data/local/tmp/pulltest-watch.pid
+marker=$(cat /data/local/tmp/pulltest-marker)
+end=$(( $(date +%s) + life ))
+n=0
+logcat -T 1 -v brief -s raam:V | while read -r line; do
+    [ "$(date +%s)" -lt "$end" ] || break
+    case "$line" in
+    *"$marker"*)
+        n=$((n + 1))
+        [ "$n" -ge "$nth" ] || continue
+        [ "$delay" -eq 0 ] || usleep $((delay * 1000))
+        echo b > /proc/sysrq-trigger
+        ;;
+    esac
+done
+rm -f /data/local/tmp/pulltest-watch.sh /data/local/tmp/pulltest-watch.pid /data/local/tmp/pulltest-marker
+EOF
+    "${A[@]}" push "$tmp" "$WATCH" >/dev/null 2>&1 || { rm -f "$tmp"; die "push watcher"; }
+    # The marker travels as a file, so it needs no quoting through adb and su.
+    printf '%s' "$marker" > "$tmp"
+    "${A[@]}" push "$tmp" "$MARKER" >/dev/null 2>&1 || { rm -f "$tmp"; die "push marker"; }
+    rm -f "$tmp"
+    nohup "${A[@]}" shell "su -c 'sh $WATCH $delay $nth $life'" > "$run/watch.out" 2>&1 &
+    echo $! > "$run/watch.pid"
+    sleep 2
+    [ -n "$(sh_ "su -c 'cat $WATCH_PID 2>/dev/null'")" ] || die "the watcher didn't start"
+    ok "armed $run: sysrq reboot on line $nth with '$marker', +${delay} ms, for ${life} s"
+}
+
+curate() {
+    local what=$1 xy
+    case $what in
+    fit) xy=$TAP_FIT ;;
+    hide) xy=$TAP_HIDE ;;
+    *) die "usage: pulltest curate fit|hide" ;;
+    esac
+    [ -n "$xy" ] || die "no tap position for $what yet: measure it from a screenshot of the open menu"
+    # shellcheck disable=SC2086
+    "${A[@]}" shell input tap $TAP_MENU
+    sleep 2
+    "${A[@]}" logcat -d -v time -s 'raam:*' | tail -20 | grep -q 'overlay opened by tap' ||
+        echo "   (no 'overlay opened by tap' in the last lines: check with frame log)"
+    # shellcheck disable=SC2086
+    "${A[@]}" shell input tap $xy
+    ok "tapped $what at $xy"
+}
+
+evict() {
+    local n=${1:-}
+    case "$n" in '' | *[!0-9]*) die "usage: pulltest evict N" ;; esac
+    root "evict $n" <<EOF
+cd $D/files/immich-cache
+ls | grep '\.jpg\$' | head -n $n | while read -r f; do rm -f "\$f"; done
+am force-stop $PKG
+EOF
+    ok "$n cached previews deleted, Raam stopped (home relaunches it; the sweep drops their rows)"
+}
+
+check() {
+    local grace='' run
+    [ "${1:-}" != --grace ] || grace=1
+    run=$(run_dir)
+    [ -n "$run" ] && [ -f "$run/run.env" ] || die "no armed run"
+    [ ! -f "$run/result.tsv" ] || die "$run is checked already"
+    local old
+    old=$(sed -n 's/^boot_id=//p' "$run/run.env")
+    step "wait for the new boot"
+    local i id=
+    for i in $(seq 1 120); do
+        case "$T" in *:*) adb connect "$T" >/dev/null 2>&1 ;; esac
+        id=$(boot_id)
+        [ -z "$id" ] || [ "$id" = "$old" ] || break
+        sleep 3
+    done
+    [ -n "$id" ] && [ "$id" != "$old" ] || die "no new boot in 6 min"
+    ok "booted, up $(sh_ cut -d. -f1 /proc/uptime) s"
+    stop_local
+    # The watcher died with the old boot; its script may still be there.
+    sh_ "su -c 'rm -f $WATCH $WATCH_PID $MARKER'"
+
+    if [ -n "$grace" ]; then
+        # Stopping Raam would restart the grace timer: follow it untouched.
+        step "follow the log ${GRACE_S} s, untouched"
+        "${A[@]}" logcat -v time -s 'raam:*' > "$run/grace.log" 2>/dev/null &
+        local follow=$!
+        sleep "$GRACE_S"
+        kill "$follow" 2>/dev/null
+        sh_ dumpsys power | sed -n 's/.*mWakefulness=//p' | head -1 > "$run/grace-screen.txt"
+        ok "screen after ${GRACE_S} s: $(cat "$run/grace-screen.txt")"
+    fi
+    "${A[@]}" logcat -d -v time -s 'raam:*' > "$run/boot.log"
+    sh_ "date '+%Y-%m-%d %H:%M:%S'" > "$run/checked-at.txt"
+
+    step "copy raam.db and the cache listings with Raam stopped"
+    root "copy" <<EOF
+am force-stop $PKG
+rm -rf $SCRATCH
+mkdir -p $SCRATCH
+for f in raam.db raam.db-wal raam.db-shm; do
+    if [ -f $D/files/\$f ]; then cp $D/files/\$f $SCRATCH/\$f; fi
+done
+for d in immich-cache local-previews; do
+    if [ -d $D/files/\$d ]; then
+        for f in $D/files/\$d/* $D/files/\$d/.[!.]*; do
+            if [ -e "\$f" ]; then stat -c "\$d %s %n" "\$f"; fi
+        done
+    fi
+done > $SCRATCH/files.txt
+chmod 666 $SCRATCH/*
+EOF
+    local f
+    for f in raam.db raam.db-wal raam.db-shm files.txt; do
+        "${A[@]}" pull "$SCRATCH/$f" "$run/$f" >/dev/null 2>&1
+    done
+    "${A[@]}" pull "$EXPORT" "$run/frame-curation.json" >/dev/null 2>&1
+    sh_ rm -rf "$SCRATCH"
+    "${A[@]}" shell am start -n "$PKG/$ACT" >/dev/null
+    [ -f "$run/raam.db" ] || die "raam.db didn't come off the frame"
+
+    python3 "$HERE/pullcheck.py" "$run" | tee "$run/result.tsv"
+    [ -f "$OUT/results.tsv" ] || python3 "$HERE/pullcheck.py" --header > "$OUT/results.tsv"
+    cat "$run/result.tsv" >> "$OUT/results.tsv"
+}
+
+teardown() {
+    disarm
+    step "test photos out"
+    local tmp keys
+    tmp=$(mktemp -d)
+    make_photos "$tmp"
+    keys=$(shasum "$tmp"/*.jpg | awk '{ printf "%s'\''%s'\''", (NR > 1 ? "," : ""), $1 }')
+    rm -rf "$tmp"
+    sh_ rm -rf "$PT_DIR"
+    "$HERE/frame" clear-props
+
+    step "their curation rows out of raam.db (tier 3: the test's own rows only)"
+    rm -rf "$OUT/teardown-db"
+    mkdir -p "$OUT/teardown-db"
+    root "copy raam.db out" <<EOF
+am force-stop $PKG
+mkdir -p $SCRATCH
+for f in raam.db raam.db-wal raam.db-shm; do
+    if [ -f $D/files/\$f ]; then cp $D/files/\$f $SCRATCH/\$f; fi
+done
+chmod 666 $SCRATCH/*
+EOF
+    for f in raam.db raam.db-wal raam.db-shm; do
+        "${A[@]}" pull "$SCRATCH/$f" "$OUT/teardown-db/$f" >/dev/null 2>&1
+    done
+    local db=$OUT/teardown-db/raam.db n
+    [ -f "$db" ] || die "raam.db didn't come off the frame"
+    sqlite3 "$db" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null || die "checkpoint"
+    n=$(sqlite3 "$db" "SELECT count(*) FROM curation WHERE key IN ($keys)")
+    if [ "$n" -gt 0 ]; then
+        sqlite3 "$db" "DELETE FROM curation WHERE key IN ($keys)" || die "delete"
+        [ "$(sqlite3 "$db" 'PRAGMA integrity_check')" = ok ] || die "edited raam.db fails integrity_check"
+        "${A[@]}" push "$db" "$SCRATCH/raam.db" >/dev/null || die "push raam.db"
+        # cp onto the existing file keeps the app's ownership; the second
+        # stop kills the relaunch that home Raam gets after the first.
+        root "copy raam.db in" <<EOF
+am force-stop $PKG
+cp $SCRATCH/raam.db $D/files/raam.db
+rm -f $D/files/raam.db-wal $D/files/raam.db-shm
+sleep 1
+am force-stop $PKG
+EOF
+        ok "$n curation rows deleted (the export drops them at the next curation change)"
+    else
+        ok "no curation rows of the test photos"
+    fi
+    sh_ rm -rf "$SCRATCH"
+    rm -f "$OUT/current"
+    restart_raam
+}
+
+setup() {
+    [ -z "$(sh_ "ls $WATCH 2>/dev/null")" ] || die "a watcher is armed: pulltest disarm"
+    step "test photos"
+    local tmp
+    tmp=$(mktemp -d)
+    make_photos "$tmp"
+    sh_ mkdir -p "$PT_DIR"
+    "${A[@]}" push "$tmp/." "$PT_DIR/" >/dev/null || { rm -rf "$tmp"; die "push"; }
+    rm -rf "$tmp"
+    ok "$(sh_ ls "$PT_DIR" | wc -l | tr -d ' ') photos in $PT_DIR"
+    sh_ setprop debug.video.only_path pulltest
+    # A restart scans the folder now, not within the 300 s scan interval.
+    restart_raam
+    local i
+    for i in $(seq 1 30); do
+        pid_log "$(raam_pid)" | grep -q 'only_path=pulltest: 8 items left' && break
+        sleep 2
+    done
+    pid_log "$(raam_pid)" | grep -E 'only_path=|local: (preview|hashed)' | tail -4 | sed 's/^/   /'
+    pid_log "$(raam_pid)" | grep -q 'only_path=pulltest: 8 items left' ||
+        die "the queue didn't come down to the 8 test photos in 60 s"
+    ok "the queue holds the 8 test photos"
+}
+
+case "${1:-}" in
+setup) setup ;;
+arm) shift; arm "$@" ;;
+disarm) disarm; ok "disarmed" ;;
+curate) curate "${2:-}" ;;
+evict) evict "${2:-}" ;;
+check) check "${2:-}" ;;
+teardown) teardown ;;
+*)
+    sed -n '2,30p' "$0"
+    exit 2
+    ;;
+esac

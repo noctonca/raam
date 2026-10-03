@@ -375,6 +375,21 @@ mod gles {
 #[cfg(all(feature = "gles", not(target_os = "android")))]
 pub use gles::{bind_vao, glReadPixels};
 
+/// Linear filtering and clamp-to-edge wrap on the bound 2D texture: what
+/// every texture raam makes uses (photos, render targets, egui's, the
+/// glyph atlas).
+///
+/// # Safety
+/// Requires a current GL context with a texture bound to `GL_TEXTURE_2D`.
+pub unsafe fn set_linear_clamp() {
+    unsafe {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as GlInt);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as GlInt);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as GlInt);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as GlInt);
+    }
+}
+
 ///
 /// # Safety
 /// Requires a current GL context.
@@ -541,10 +556,7 @@ impl RenderTarget {
                 std::ptr::null(),
             );
             let tex_error = glGetError();
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as i32);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as i32);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as i32);
+            set_linear_clamp();
 
             let mut fbo = 0;
             glGenFramebuffers(1, &mut fbo);

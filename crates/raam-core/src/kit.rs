@@ -40,10 +40,15 @@ fn with_state(base: Color32, on: Color32, resp: &Response) -> Color32 {
     if o == 0.0 {
         base
     } else if base.a() == 0 {
-        Color32::from_rgba_unmultiplied(on.r(), on.g(), on.b(), (o * 255.0) as u8)
+        at_opacity(on, o)
     } else {
         layer(base, on, o)
     }
+}
+
+/// `c` at `opacity` (0..1), as the state layers draw it.
+fn at_opacity(c: Color32, opacity: f32) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (opacity * 255.0) as u8)
 }
 
 fn icon_font(px: f32, filled: bool) -> FontId {
@@ -246,11 +251,8 @@ fn ring_outside(ui: &Ui, room: Room, own: Rect, outer: Rect) -> bool {
 /// The focus ring round `shape` while the control has the focus: 2 px
 /// outside it, or just inside it where its `room` says. A control that gains it scrolls into view.
 fn focus_ring(ui: &Ui, resp: &Response, shape: Rect, corner: CornerRadius, room: Room) {
-    if !resp.has_focus() {
+    if !ring_due(resp) {
         return;
-    }
-    if resp.gained_focus() {
-        resp.scroll_to_me(None);
     }
     let s = scheme(ui);
     if !ring_outside(ui, room, shape, shape.expand(RING_GAP + RING)) {
@@ -277,6 +279,15 @@ fn focus_ring(ui: &Ui, resp: &Response, shape: Rect, corner: CornerRadius, room:
     );
 }
 
+/// Whether a ring is due (the control has the focus); a control that has
+/// just gained it scrolls into view.
+fn ring_due(resp: &Response) -> bool {
+    if resp.gained_focus() {
+        resp.scroll_to_me(None);
+    }
+    resp.has_focus()
+}
+
 /// A painter whose clip lets a ring outside a control reach past the part
 /// that draws it (the nav pane's top edge clipped the first item's). Grown
 /// by only the ring's own reach.
@@ -290,11 +301,8 @@ fn ring_painter(ui: &Ui) -> Painter {
 /// layer), as `focus_ring`: inside, it's inside the circle.
 fn focus_ring_circle(ui: &Ui, resp: &Response, centre: egui::Pos2, radius: f32, room: Room) {
     let own = Rect::from_center_size(centre, Vec2::splat(radius * 2.0));
-    if !resp.has_focus() {
+    if !ring_due(resp) {
         return;
-    }
-    if resp.gained_focus() {
-        resp.scroll_to_me(None);
     }
     let s = scheme(ui);
     if !ring_outside(ui, room, own, own.expand(RING_GAP + RING)) {
@@ -312,11 +320,8 @@ fn focus_ring_circle(ui: &Ui, resp: &Response, centre: egui::Pos2, radius: f32, 
 /// The focus ring just inside `shape`, for a control that spans its pane
 /// (a list row, a picker's option), where the pane would clip it outside.
 fn focus_ring_inside(ui: &Ui, resp: &Response, shape: Rect, corner: CornerRadius) {
-    if !resp.has_focus() {
+    if !ring_due(resp) {
         return;
-    }
-    if resp.gained_focus() {
-        resp.scroll_to_me(None);
     }
     let s = scheme(ui);
     ui.painter().rect_stroke(
@@ -337,6 +342,12 @@ pub(crate) const ROBOTO_CAP: f32 = 1456.0 / 2048.0;
 pub(crate) const ROBOTO_DESCENT: f32 = 500.0 / 2048.0;
 
 /// Paints `galley` with its first baseline on `y`, rounded to a whole pixel;
+/// A laid-out row's baseline: where its first glyph sits, or `None` for an
+/// empty row.
+fn first_baseline(r: &egui::epaint::text::PlacedRow) -> Option<f32> {
+    r.glyphs.first().map(|g| r.pos.y + g.pos.y)
+}
+
 /// `x` is its left, centre or right edge by `align`. Returns where it went.
 pub(crate) fn galley_on_baseline(
     p: &Painter,
@@ -346,10 +357,7 @@ pub(crate) fn galley_on_baseline(
     galley: Arc<Galley>,
     colour: Color32,
 ) -> Rect {
-    let baseline = galley
-        .rows
-        .first()
-        .and_then(|r| r.glyphs.first().map(|g| r.pos.y + g.pos.y));
+    let baseline = galley.rows.first().and_then(first_baseline);
     let left = match align {
         Align::Min => x,
         Align::Center => x - galley.size().x / 2.0,
@@ -666,7 +674,7 @@ pub fn icon_button(ui: &mut Ui, icon: char, selected: bool) -> Response {
         };
         let bg = with_state(Color32::TRANSPARENT, content, &resp);
         let p = ui.painter();
-        p.circle_filled(rect.center(), 20.0, bg);
+        p.circle_filled(rect.center(), size::STATE_LAYER_R, bg);
         icon_on(
             p,
             rect.center().x,
@@ -676,7 +684,7 @@ pub fn icon_button(ui: &mut Ui, icon: char, selected: bool) -> Response {
             icon_font(size::ICON, selected),
             content,
         );
-        focus_ring_circle(ui, &resp, rect.center(), 20.0, Room::Measure);
+        focus_ring_circle(ui, &resp, rect.center(), size::STATE_LAYER_R, Room::Measure);
     }
     resp
 }
@@ -720,11 +728,7 @@ fn paint_switch(ui: &Ui, rect: Rect, t: f32, resp: &Response) {
     let o = state_opacity(resp);
     if o > 0.0 {
         let halo = if on { s.primary } else { s.on_surface };
-        p.circle_filled(
-            c,
-            20.0,
-            Color32::from_rgba_unmultiplied(halo.r(), halo.g(), halo.b(), (o * 255.0) as u8),
-        );
+        p.circle_filled(c, size::STATE_LAYER_R, at_opacity(halo, o));
     }
     p.circle_filled(c, r, if on { s.on_primary } else { s.outline });
     if on {
@@ -807,11 +811,7 @@ pub fn checkbox(ui: &mut Ui, checked: &mut bool, label: &str) -> Response {
     let o = state_opacity(&resp);
     if o > 0.0 {
         let halo = if *checked { s.primary } else { s.on_surface };
-        p.circle_filled(
-            c,
-            20.0,
-            Color32::from_rgba_unmultiplied(halo.r(), halo.g(), halo.b(), (o * 255.0) as u8),
-        );
+        p.circle_filled(c, size::STATE_LAYER_R, at_opacity(halo, o));
     }
     paint_checkbox(p, &s, c, *checked);
     if let Some(g) = galley {
@@ -824,7 +824,7 @@ pub fn checkbox(ui: &mut Ui, checked: &mut bool, label: &str) -> Response {
             s.on_surface,
         );
     }
-    focus_ring_circle(ui, &resp, c, 20.0, Room::Measure);
+    focus_ring_circle(ui, &resp, c, size::STATE_LAYER_R, Room::Measure);
     resp
 }
 
@@ -1299,7 +1299,7 @@ impl<'a> TextField<'a> {
             );
             p.circle_filled(
                 centre,
-                20.0,
+                size::STATE_LAYER_R,
                 with_state(Color32::TRANSPARENT, s.on_surface_variant, hit),
             );
             icon_on(
@@ -1315,7 +1315,7 @@ impl<'a> TextField<'a> {
                 icon_font(size::ICON, false),
                 s.on_surface_variant,
             );
-            focus_ring_circle(ui, hit, centre, 20.0, Room::Inside);
+            focus_ring_circle(ui, hit, centre, size::STATE_LAYER_R, Room::Inside);
         } else if self.error {
             icon_on(
                 p,
@@ -1694,9 +1694,8 @@ pub fn page_title_back(ui: &mut Ui, title: &str, sub: &str) -> Response {
             ui.available_width() - TEXT_AT,
             egui::TextStyle::Body,
         );
-        let base = |r: &egui::epaint::text::PlacedRow| r.glyphs.first().map(|g| r.pos.y + g.pos.y);
-        let first = galley.rows.first().and_then(base);
-        let last = galley.rows.last().and_then(base);
+        let first = galley.rows.first().and_then(first_baseline);
+        let last = galley.rows.last().and_then(first_baseline);
         let (rect, _) =
             ui.allocate_exact_size(vec2(ui.available_width(), galley.size().y), Sense::hover());
         ui.painter()
@@ -1761,9 +1760,8 @@ pub fn paragraph(ui: &mut Ui, text: &str, ty: Type, colour: Color32) -> Rangef {
         ui.available_width(),
         egui::TextStyle::Body,
     );
-    let baseline = |r: &egui::epaint::text::PlacedRow| r.glyphs.first().map(|g| r.pos.y + g.pos.y);
-    let first = galley.rows.first().and_then(baseline);
-    let last = galley.rows.last().and_then(baseline);
+    let first = galley.rows.first().and_then(first_baseline);
+    let last = galley.rows.last().and_then(first_baseline);
     let rect = ui.label(galley).rect;
     let shown = match (first, last) {
         (Some(f), Some(l)) => Rangef::new(
@@ -2158,7 +2156,7 @@ pub fn top_bar_nav(ui: &mut Ui, nav: char, title: &str, actions: impl FnOnce(&mu
     let p = ui.painter();
     p.circle_filled(
         target.center(),
-        20.0,
+        size::STATE_LAYER_R,
         with_state(Color32::TRANSPARENT, s.on_surface, &resp),
     );
     icon_on(
@@ -2181,20 +2179,18 @@ pub fn top_bar_nav(ui: &mut Ui, nav: char, title: &str, actions: impl FnOnce(&mu
         Type::TitleLarge,
         s.on_surface,
     );
-    focus_ring_circle(ui, &resp, target.center(), 20.0, Room::Measure);
+    focus_ring_circle(
+        ui,
+        &resp,
+        target.center(),
+        size::STATE_LAYER_R,
+        Room::Measure,
+    );
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.add_space(space::S);
         actions(ui);
     });
     resp
-}
-
-/// The scheme for the theme egui draws with, from a Context (for Areas and
-/// Modals, which have no Ui yet).
-fn scheme_of(ctx: &egui::Context) -> Scheme {
-    let s = ctx.data(|d| d.get_temp::<theme::Schemes>(egui::Id::new("theme.schemes")));
-    s.map(|s| *s.get(ctx.theme()))
-        .expect("theme::install not called")
 }
 
 /// One item of a floating toolbar: an icon over its label.
@@ -2226,7 +2222,7 @@ pub fn floating_toolbar(
     // air to the bar's edge and the next item.
     const PAD: f32 = space::M;
     const GAP: f32 = space::M;
-    let s = scheme_of(ctx);
+    let s = theme::scheme_of(ctx);
     let mut hit = None;
     // Measured before the Area, and placed at an explicit position: an
     // anchored Area centres by the size it remembers from the last frame, so
@@ -2279,11 +2275,7 @@ pub fn floating_toolbar(
         };
         p.add(shadow.as_shape(rect, corner));
         let bg = s.surface_container;
-        p.rect_filled(
-            rect,
-            corner,
-            Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), (TOOLBAR_ALPHA * 255.0) as u8),
-        );
+        p.rect_filled(rect, corner, at_opacity(bg, TOOLBAR_ALPHA));
         for (i, t) in status.iter().enumerate() {
             let cy = rect.top() + space::M + line * (i as f32 + 0.5);
             text_on(
@@ -2367,7 +2359,11 @@ pub fn tonal_icon_button(ui: &mut Ui, icon: char) -> Response {
     let s = scheme(ui);
     let (rect, resp) = ui.allocate_exact_size(vec2(size::TOUCH, size::TOUCH), Sense::click());
     focusable(ui, &resp, false);
-    mark_visual(ui, rect, Rangef::point(rect.center().y).expand(20.0));
+    mark_visual(
+        ui,
+        rect,
+        Rangef::point(rect.center().y).expand(size::STATE_LAYER_R),
+    );
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
         // Disabled as M3 has it: on-surface, the container at 12% and the
@@ -2383,7 +2379,7 @@ pub fn tonal_icon_button(ui: &mut Ui, icon: char) -> Response {
                 s.on_surface,
             )
         };
-        p.circle_filled(rect.center(), 20.0, bg);
+        p.circle_filled(rect.center(), size::STATE_LAYER_R, bg);
         shows(p, Rect::from_center_size(rect.center(), Vec2::splat(40.0)));
         icon_on(
             p,
@@ -2394,7 +2390,7 @@ pub fn tonal_icon_button(ui: &mut Ui, icon: char) -> Response {
             icon_font(size::ICON, false),
             fg,
         );
-        focus_ring_circle(ui, &resp, rect.center(), 20.0, Room::Measure);
+        focus_ring_circle(ui, &resp, rect.center(), size::STATE_LAYER_R, Room::Measure);
     }
     resp
 }
@@ -2517,8 +2513,8 @@ pub fn number_picker(
     let side =
         |x: f32| Rect::from_center_size(pos2(x, row.center().y), vec2(size::TOUCH, size::TOUCH));
     for (dir, x, icon) in [
-        (-1, row.left() + 20.0, icons::REMOVE),
-        (1, row.right() - 20.0, icons::ADD),
+        (-1, row.left() + size::STATE_LAYER_R, icons::REMOVE),
+        (1, row.right() - size::STATE_LAYER_R, icons::ADD),
     ] {
         let next = step(*value, dir);
         let mut child = ui.new_child(UiBuilder::new().max_rect(side(x)).id_salt(("step", dir)));
@@ -2579,7 +2575,7 @@ pub fn dialog(
     body: impl FnOnce(&mut Ui) -> bool,
 ) -> bool {
     let mut keep = true;
-    let s = scheme_of(ctx);
+    let s = theme::scheme_of(ctx);
     ctx.data_mut(|d| {
         d.insert_temp(dialog_order_id(), Vec::<Id>::new());
         d.remove::<Id>(own_arrows_id());

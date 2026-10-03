@@ -677,10 +677,7 @@ impl<P: VideoPlayer> Pipeline<P> {
             let mut photo_tex = 0;
             glGenTextures(1, &mut photo_tex);
             glBindTexture(GL_TEXTURE_2D, photo_tex);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as i32);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as i32);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as i32);
+            set_linear_clamp();
 
             let blur_h = ((BLUR_WIDTH_PX as f32) * screen_h as f32 / screen_w as f32)
                 .round()

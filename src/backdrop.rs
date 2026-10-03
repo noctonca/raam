@@ -128,10 +128,7 @@ unsafe fn texture(w: i32, h: i32, seed: u32) -> GlUint {
         let mut tex = 0;
         glGenTextures(1, &mut tex);
         glBindTexture(GL_TEXTURE_2D, tex);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as GlInt);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as GlInt);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as GlInt);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as GlInt);
+        set_linear_clamp();
         glTexImage2D(
             GL_TEXTURE_2D,
             0,

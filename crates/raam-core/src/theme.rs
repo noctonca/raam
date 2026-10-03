@@ -115,6 +115,14 @@ pub fn scheme(ui: &Ui) -> Scheme {
     if dark { s.dark } else { s.light }
 }
 
+/// The scheme for the theme egui draws with, from a Context (for Areas and
+/// Modals, which have no Ui yet).
+pub fn scheme_of(ctx: &egui::Context) -> Scheme {
+    let s = ctx.data(|d| d.get_temp::<Schemes>(schemes_id()));
+    s.map(|s| *s.get(ctx.theme()))
+        .expect("theme::install not called")
+}
+
 /// M3 state layer: `on` drawn over `base` at `opacity`, precomputed because
 /// egui has no overlay concept of its own (one fill per widget state).
 pub fn layer(base: Color32, on: Color32, opacity: f32) -> Color32 {
@@ -276,6 +284,9 @@ pub mod size {
     pub const BUTTON_H: f32 = 48.0;
     pub const LIST_ROW: f32 = 56.0;
     pub const LIST_ROW_2LINE: f32 = 72.0;
+    /// An icon-sized control's circular state layer (M3's 40dp), centred in
+    /// its 48 px target.
+    pub const STATE_LAYER_R: f32 = 20.0;
     pub const TOP_BAR: f32 = 64.0;
     /// List pane width in the list/detail layout (Compose adaptive default).
     pub const LIST_PANE: f32 = 360.0;

@@ -1148,7 +1148,7 @@ impl App {
             return;
         }
         if self.keys.len() >= MAX_QUEUED_KEYS {
-            log::debug!("key queue full: a key dropped");
+            log::warn!("key queue full: a key dropped");
             return;
         }
         self.keys.push_back(item);

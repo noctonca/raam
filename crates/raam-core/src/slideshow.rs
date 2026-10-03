@@ -1652,7 +1652,7 @@ impl<P: VideoPlayer> Pipeline<P> {
                 .transitions
                 .iter()
                 .position(|t| t.name == name)
-                .unwrap_or(0),
+                .expect("a chosen transition has no program (transitions::NAMES)"),
             None => {
                 let i = self.next_transition_idx;
                 self.next_transition_idx = (i + 1) % self.transitions.len();

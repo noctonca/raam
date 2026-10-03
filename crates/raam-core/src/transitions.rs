@@ -60,6 +60,10 @@ const PREAMBLE: &str = "precision mediump float;\nvarying vec2 vUV;\n\
 
 const TAIL: &str = "\nvoid main() { gl_FragColor = transition(vUV); }\n";
 
+/// Every transition's name, in the order [`TransitionProgram::all`] builds
+/// them; each `TransitionChoice::shader_name` is one of these.
+pub const NAMES: [&str; 5] = ["fade", "directionalwipe", "cube", "crosswarp", "swap"];
+
 fn wrap(body: &str) -> String {
     format!("{PREAMBLE}{body}{TAIL}")
 }
@@ -306,25 +310,26 @@ impl TransitionProgram {
         }
     }
 
+    /// Every transition, in [`NAMES`]'s order.
     ///
     /// # Safety
     /// Requires a current GL context.
     pub unsafe fn all() -> Vec<TransitionProgram> {
         unsafe {
             vec![
-                TransitionProgram::new("fade", TRANSITION_FADE_SRC, |_p| {}),
-                TransitionProgram::new("directionalwipe", TRANSITION_DIRECTIONALWIPE_SRC, |p| {
+                TransitionProgram::new(NAMES[0], TRANSITION_FADE_SRC, |_p| {}),
+                TransitionProgram::new(NAMES[1], TRANSITION_DIRECTIONALWIPE_SRC, |p| {
                     glUniform2f(uniform_loc(p, "direction"), 1.0, -1.0);
                     glUniform1f(uniform_loc(p, "smoothness"), 0.5);
                 }),
-                TransitionProgram::new("cube", TRANSITION_CUBE_SRC, |p| {
+                TransitionProgram::new(NAMES[2], TRANSITION_CUBE_SRC, |p| {
                     glUniform1f(uniform_loc(p, "persp"), 0.7);
                     glUniform1f(uniform_loc(p, "unzoom"), 0.3);
                     glUniform1f(uniform_loc(p, "reflection"), 0.4);
                     glUniform1f(uniform_loc(p, "floating"), 3.0);
                 }),
-                TransitionProgram::new("crosswarp", TRANSITION_CROSSWARP_SRC, |_p| {}),
-                TransitionProgram::new("swap", TRANSITION_SWAP_SRC, |p| {
+                TransitionProgram::new(NAMES[3], TRANSITION_CROSSWARP_SRC, |_p| {}),
+                TransitionProgram::new(NAMES[4], TRANSITION_SWAP_SRC, |p| {
                     glUniform1f(uniform_loc(p, "reflection"), 0.4);
                     glUniform1f(uniform_loc(p, "perspective"), 0.2);
                     glUniform1f(uniform_loc(p, "depth"), 3.0);
@@ -379,6 +384,24 @@ impl TransitionProgram {
             glUniform2f(self.u_to_offset, to_kb.1.0, to_kb.1.1);
 
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, std::ptr::null());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NAMES;
+    use raam_model::TransitionChoice;
+
+    #[test]
+    fn every_chosen_transition_has_a_program() {
+        for choice in TransitionChoice::ALL {
+            if let Some(name) = choice.shader_name() {
+                assert!(
+                    NAMES.contains(&name),
+                    "{choice:?} names '{name}', which has no program"
+                );
+            }
         }
     }
 }

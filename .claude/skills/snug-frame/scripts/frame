@@ -131,6 +131,20 @@ restart_raam() {
     await_raam "$old"
 }
 
+# Over Wi-Fi, after a reboot or a cut, adb can keep the old connection
+# as "offline", and adb connect then does nothing ("already connected"):
+# drop it first.
+reconnect() {
+    case "$T" in
+    *:*)
+        if adb devices | awk -v t="$T" '$1 == t && $2 == "offline" { f = 1 } END { exit !f }'; then
+            adb disconnect "$T" >/dev/null 2>&1
+        fi
+        adb connect "$T" >/dev/null 2>&1
+        ;;
+    esac
+}
+
 # A reboot is proved by a new boot_id, not by sys.boot_completed: right
 # after `adb reboot`, the old boot can still answer.
 reboot_wait() {
@@ -141,7 +155,7 @@ reboot_wait() {
     "${A[@]}" reboot
     sleep 5
     for i in $(seq 1 100); do
-        case "$T" in *:*) adb connect "$T" >/dev/null 2>&1 ;; esac
+        reconnect
         id=$(boot_id)
         if [ -n "$id" ] && [ "$id" != "$old" ] && [ "$(sh_ getprop sys.boot_completed)" = 1 ]; then
             ok "booted: up $(sh_ cat /proc/uptime | cut -d. -f1) s"

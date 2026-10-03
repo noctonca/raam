@@ -237,7 +237,7 @@ check() {
     step "wait for the new boot"
     local i id=
     for i in $(seq 1 120); do
-        case "$T" in *:*) adb connect "$T" >/dev/null 2>&1 ;; esac
+        reconnect
         id=$(boot_id)
         [ -z "$id" ] || [ "$id" = "$old" ] || break
         sleep 3

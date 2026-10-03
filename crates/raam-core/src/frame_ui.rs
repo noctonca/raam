@@ -2212,7 +2212,12 @@ fn server_page(ui: &mut Ui, st: &mut AppState) {
         format!("Nothing saved yet · up to {}", cap_label(cap_mb))
     }];
     if lib.free_bytes > 0 {
-        usage.push(format!("{:.1} GB free", lib.free_bytes as f64 / 1e9));
+        // In the cache's own units (1 GB = 1024 MB), so one line never
+        // mixes two kinds of gigabyte.
+        usage.push(format!(
+            "{} free",
+            size(lib.free_bytes.min(i64::MAX as u64) as i64)
+        ));
     }
     // Downloading only means something once there's a server.
     if !no_server(&st.settings) {

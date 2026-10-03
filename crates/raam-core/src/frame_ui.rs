@@ -18,7 +18,8 @@ use crate::network::{self, JoinStage, LinkKind, NetCommand, NetSnapshot, Securit
 use crate::theme::{self, Type, scheme, size, space};
 use egui::{Align, CornerRadius, Ui, UiBuilder};
 use raam_model::limits::{
-    AUDIO_DELAY_RANGE, CAP_CHOICES_MB, DEFAULT_CAP_MB, FOCUS_CLAIM_PASSES, LARGEST_LAYOUT,
+    AUDIO_DELAY_RANGE, CAP_CHOICES_MB, DEFAULT_CAP_MB, FOCUS_CLAIM_PASSES, INTERVAL_RANGE_SECS,
+    LARGEST_LAYOUT,
 };
 use raam_model::{
     AlbumRow, ClockStyle, Corner, FitBackground, GapColour, ScaleMode, Settings, Stats,
@@ -907,7 +908,7 @@ fn interval_step(v: f32, dir: i32) -> f32 {
     } else {
         ((v / 5.0).ceil() - 1.0) * 5.0
     };
-    next.clamp(5.0, 120.0)
+    next.clamp(INTERVAL_RANGE_SECS.0, INTERVAL_RANGE_SECS.1)
 }
 
 /// An audio delay: "+180 ms".
@@ -2896,7 +2897,14 @@ fn dialogs(ctx: &egui::Context, st: &mut AppState) {
                     s.on_surface_variant,
                 );
                 ui.add_space(space::L);
-                kit::number_picker(ui, &mut draft, 5.0..=120.0, 1.0, interval_step, fmt_secs);
+                kit::number_picker(
+                    ui,
+                    &mut draft,
+                    INTERVAL_RANGE_SECS.0..=INTERVAL_RANGE_SECS.1,
+                    1.0,
+                    interval_step,
+                    fmt_secs,
+                );
                 ui.add_space(space::XL);
                 done = kit::dialog_actions(ui, &["Cancel", "OK"]);
                 done.is_none()

@@ -308,7 +308,12 @@ pub fn load_settings(conn: &Connection, s: &mut Settings) -> Vec<String> {
     }
     let str_of = |k: &str| rows.get(k).and_then(|v| v.as_str()).map(str::to_string);
     if let Some(v) = rows.get("slideshow.interval_s").and_then(|v| v.as_f64()) {
-        s.interval_secs = v as f32;
+        // Clamped in f64, before the narrowing: an out-of-range row (a
+        // hand edit, an old build) would otherwise reach
+        // `Duration::from_secs_f32`, which panics on a negative or
+        // infinite value, on every pass.
+        let (lo, hi) = limits::INTERVAL_RANGE_SECS;
+        s.interval_secs = v.clamp(f64::from(lo), f64::from(hi)) as f32;
     }
     if let Some(v) = str_of("slideshow.transition") {
         s.transition = TransitionChoice::ALL
@@ -383,8 +388,10 @@ pub fn load_settings(conn: &Connection, s: &mut Settings) -> Vec<String> {
         s.video_sound = v;
     }
     if let Some(v) = rows.get("video.audio_delay_ms").and_then(|v| v.as_i64()) {
-        s.audio_delay_ms =
-            (v as i32).clamp(limits::AUDIO_DELAY_RANGE.0, limits::AUDIO_DELAY_RANGE.1);
+        // Clamped in i64, before the narrowing, so a huge row can't wrap
+        // into range.
+        let (lo, hi) = limits::AUDIO_DELAY_RANGE;
+        s.audio_delay_ms = v.clamp(i64::from(lo), i64::from(hi)) as i32;
     }
     if let Some(v) = rows.get("video.volume").and_then(|v| v.as_f64()) {
         s.video_volume = (v as f32).clamp(0.0, 1.0);
@@ -400,6 +407,7 @@ pub fn load_settings(conn: &Connection, s: &mut Settings) -> Vec<String> {
             ))
         },
     ) {
+        // In range: the table's CHECKs hold both minutes to 0..=1439.
         s.sleep_min = start;
         s.wake_min = end;
         s.sleep_enabled = enabled;
@@ -1503,6 +1511,39 @@ mod tests {
             (loaded.sleep_enabled, loaded.sleep_min, loaded.wake_min),
             (false, 60, 420)
         );
+    }
+
+    #[test]
+    fn out_of_range_rows_load_inside_their_ranges() {
+        install_clock();
+        let db = open(Path::new(":memory:"), "").unwrap();
+        let conn = db.lock().unwrap();
+        let (lo, hi) = limits::INTERVAL_RANGE_SECS;
+        let (delay_lo, delay_hi) = limits::AUDIO_DELAY_RANGE;
+        // An interval below the range, one past f32's (infinite once
+        // narrowed), and a delay that wraps into range as an i32.
+        for (interval, delay, want) in [
+            ("-1", "-5000", (lo, delay_lo)),
+            ("1e300", "4294967386", (hi, delay_hi)),
+        ] {
+            save_settings(
+                &conn,
+                &[
+                    (
+                        "slideshow.interval_s",
+                        serde_json::from_str(interval).unwrap(),
+                    ),
+                    ("video.audio_delay_ms", serde_json::from_str(delay).unwrap()),
+                ],
+                (false, 60, 420),
+            )
+            .unwrap();
+            let mut loaded = Settings::defaults("", "");
+            load_settings(&conn, &mut loaded);
+            assert_eq!((loaded.interval_secs, loaded.audio_delay_ms), want);
+            // What the controller does with it, which panicked before.
+            let _ = std::time::Duration::from_secs_f32(loaded.interval_secs);
+        }
     }
 
     #[test]

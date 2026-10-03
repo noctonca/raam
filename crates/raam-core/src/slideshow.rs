@@ -892,10 +892,11 @@ impl<P: VideoPlayer> Pipeline<P> {
         self.selected_tile().is_some_and(|t| t.video.is_some())
     }
 
-    /// e.g. "3_2 · tile 2/3", for the status line.
-    pub fn shown_layout(&self) -> String {
-        match self.displayed() {
-            Some(c) if c.video().is_some() => {
+    /// e.g. "3_2 · tile 2/3", for the status line; `None` while nothing
+    /// is shown.
+    pub fn shown_layout(&self) -> Option<String> {
+        let layout = match self.displayed()? {
+            c if c.video().is_some() => {
                 let v = c.video().unwrap();
                 let total = v.clip.info.duration_us as f64 / 1e6;
                 match self.video.live_progress() {
@@ -910,15 +911,15 @@ impl<P: VideoPlayer> Pipeline<P> {
                     ),
                 }
             }
-            Some(c) if c.is_single() => "single photo".to_string(),
-            Some(c) => format!(
+            c if c.is_single() => "single photo".to_string(),
+            c => format!(
                 "collage {} · tile {}/{}",
                 c.name(),
                 self.selected.unwrap_or(0).min(c.tiles.len() - 1) + 1,
                 c.tiles.len()
             ),
-            None => "-".to_string(),
-        }
+        };
+        Some(layout)
     }
 
     /// Flips the selected tile's photo between Fill and Fit, remembered for
@@ -2185,7 +2186,7 @@ impl<P: VideoPlayer> crate::app::Slideshow for Pipeline<P> {
     fn shown_is_video(&self) -> bool {
         Pipeline::shown_is_video(self)
     }
-    fn shown_layout(&self) -> String {
+    fn shown_layout(&self) -> Option<String> {
         Pipeline::shown_layout(self)
     }
     fn is_animating(&self) -> bool {

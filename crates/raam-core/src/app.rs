@@ -162,7 +162,7 @@ pub struct Deps<'a> {
 pub enum Effect {
     SaveSettings {
         rows: Vec<(&'static str, serde_json::Value)>,
-        sleep: (bool, u32, u32),
+        sleep: Schedule,
     },
     SetScale(String, Option<ScaleMode>),
     SetHidden(String, bool),
@@ -262,7 +262,7 @@ pub struct App {
     weather_status: String,
     // What was last sent for saving, so only changes are written.
     saved_rows: Vec<(&'static str, serde_json::Value)>,
-    saved_sleep: (bool, u32, u32),
+    saved_sleep: Schedule,
     saved_server: (String, String),
     saved_cap: u32,
     settings_dirty: Option<Duration>,
@@ -305,11 +305,11 @@ impl App {
         let now = clock::now();
         Self {
             saved_rows: store::settings_rows(&state.settings),
-            saved_sleep: (
-                state.settings.sleep_enabled,
-                state.settings.sleep_min,
-                state.settings.wake_min,
-            ),
+            saved_sleep: Schedule {
+                enabled: state.settings.sleep_enabled,
+                sleep_min: state.settings.sleep_min,
+                wake_min: state.settings.wake_min,
+            },
             saved_server: (
                 state.settings.server_url.clone(),
                 state.settings.api_key.clone(),
@@ -911,11 +911,11 @@ impl App {
                     self.schedule_base.1 = self.state.settings.wake_min;
                 }
                 let rows = store::settings_rows(&self.state.settings);
-                let sleep = (
-                    self.state.settings.sleep_enabled,
-                    self.state.settings.sleep_min,
-                    self.state.settings.wake_min,
-                );
+                let sleep = Schedule {
+                    enabled: self.state.settings.sleep_enabled,
+                    sleep_min: self.state.settings.sleep_min,
+                    wake_min: self.state.settings.wake_min,
+                };
                 if rows != self.saved_rows || sleep != self.saved_sleep {
                     self.settings_dirty.get_or_insert_with(clock::now);
                 }
@@ -1035,19 +1035,19 @@ impl App {
         {
             self.settings_dirty = None;
             let rows = store::settings_rows(&self.state.settings);
-            let sleep = (
-                self.state.settings.sleep_enabled,
-                if self.overrides.sleep.is_some() {
+            let sleep = Schedule {
+                enabled: self.state.settings.sleep_enabled,
+                sleep_min: if self.overrides.sleep.is_some() {
                     self.schedule_base.0
                 } else {
                     self.state.settings.sleep_min
                 },
-                if self.overrides.wake.is_some() {
+                wake_min: if self.overrides.wake.is_some() {
                     self.schedule_base.1
                 } else {
                     self.state.settings.wake_min
                 },
-            );
+            };
             if rows != self.saved_rows || sleep != self.saved_sleep {
                 self.saved_rows = rows.clone();
                 self.saved_sleep = sleep;
@@ -2227,7 +2227,14 @@ mod tests {
             Effect::SaveSettings { sleep, .. } => Some(*sleep),
             _ => None,
         });
-        assert_eq!(sleep, Some((true, 23 * 60, 5 * 60)));
+        assert_eq!(
+            sleep,
+            Some(Schedule {
+                enabled: true,
+                sleep_min: 23 * 60,
+                wake_min: 5 * 60,
+            })
+        );
         // Cleared again: the user's schedule comes back unharmed.
         rig.ov = Overrides::default();
         rig.frame(&[]);
@@ -2255,7 +2262,14 @@ mod tests {
             Effect::SaveSettings { sleep, .. } => Some(*sleep),
             _ => None,
         });
-        assert_eq!(sleep, Some((true, 22 * 60, 5 * 60)));
+        assert_eq!(
+            sleep,
+            Some(Schedule {
+                enabled: true,
+                sleep_min: 22 * 60,
+                wake_min: 5 * 60,
+            })
+        );
         // The override's end keeps the edit, not the time before it.
         rig.ov = Overrides::default();
         rig.frame(&[]);

@@ -20,7 +20,7 @@ use crate::slideshow::SlideshowSettings;
 use crate::source::TileSource;
 use crate::{clock, store, theme, weather_icons};
 use raam_model::limits::{
-    AUTO_DISMISS, DEFAULT_MANUAL_IDLE, MAX_EGUI_WAIT, MAX_QUEUED_KEYS, SAVE_DEBOUNCE,
+    ALARM_RETRY, AUTO_DISMISS, DEFAULT_MANUAL_IDLE, MAX_EGUI_WAIT, MAX_QUEUED_KEYS, SAVE_DEBOUNCE,
     SLEEP_CONFIRM, TAP_SLOP_PX, UNDO_HIDE, WIFI_RESCAN,
 };
 use raam_model::{ClockStyle, Corner, ScaleMode, SourceKind, Stats};
@@ -280,6 +280,9 @@ pub struct App {
     check_wake: bool,
     asleep_since: Option<Duration>,
     manual_wake: Option<Duration>,
+    /// When setting the wake alarm last failed; the next try waits
+    /// `ALARM_RETRY` after it.
+    alarm_failed: Option<Duration>,
     prev_in_sleep: Option<bool>,
     hidden_since: Option<Duration>,
     hidden_wakes: u32,
@@ -346,6 +349,7 @@ impl App {
             check_wake: false,
             asleep_since: None,
             manual_wake: None,
+            alarm_failed: None,
             prev_in_sleep: None,
             hidden_since: Some(now),
             hidden_wakes: 0,
@@ -526,6 +530,7 @@ impl App {
         // The schedule, evaluated only while in front.
         if !in_sleep {
             self.manual_wake = None;
+            self.alarm_failed = None;
         }
         if let Some(since) = self.asleep_since
             && clock::elapsed(since) >= SLEEP_CONFIRM
@@ -549,7 +554,11 @@ impl App {
             let idle_done = self.manual_wake.is_some_and(|m| {
                 clock::elapsed(m).min(clock::elapsed(self.last_touch)) >= self.manual_idle
             });
+            let retry_due = self
+                .alarm_failed
+                .is_none_or(|f| clock::elapsed(f) >= ALARM_RETRY);
             if (crossed || idle_done)
+                && retry_due
                 && !self.overlay_open
                 && let Some(p) = deps.power.as_deref_mut()
             {
@@ -570,9 +579,17 @@ impl App {
                         );
                         self.asleep_since = Some(clock::now());
                         self.manual_wake = None;
+                        self.alarm_failed = None;
                         p.sleep_screen();
                     }
-                    Err(e) => log::error!("schedule: wake alarm failed, staying awake: {e}"),
+                    Err(e) => {
+                        if self.alarm_failed.is_none() {
+                            log::error!("schedule: wake alarm failed, staying awake: {e}");
+                        } else {
+                            log::warn!("schedule: wake alarm failed again, staying awake: {e}");
+                        }
+                        self.alarm_failed = Some(clock::now());
+                    }
                 }
             }
         }
@@ -1079,7 +1096,11 @@ impl App {
             }
             if let Some(m) = self.manual_wake {
                 let idle = clock::elapsed(m).min(clock::elapsed(self.last_touch));
-                w = min_wait(w, self.manual_idle.saturating_sub(idle) + PAST_BOUNDARY);
+                let mut due = self.manual_idle.saturating_sub(idle);
+                if let Some(f) = self.alarm_failed {
+                    due = due.max(ALARM_RETRY.saturating_sub(clock::elapsed(f)));
+                }
+                w = min_wait(w, due + PAST_BOUNDARY);
             }
             if let Some(since) = self.settings_dirty {
                 w = min_wait(
@@ -1438,10 +1459,13 @@ mod tests {
         slept: u32,
         woken: u32,
         fail_alarm: bool,
+        /// Every `set_wake_alarm` call, failed ones included.
+        alarm_tries: u32,
     }
 
     impl Power for FakePower {
         fn set_wake_alarm(&mut self, epoch_ms: i64) -> Result<(), String> {
+            self.alarm_tries += 1;
             if self.fail_alarm {
                 return Err("no alarm".into());
             }
@@ -2209,6 +2233,43 @@ mod tests {
         set_wall_hm(23, 11);
         rig.frame(&[]);
         assert_eq!(rig.power.as_ref().unwrap().slept, 1);
+    }
+
+    #[test]
+    fn a_lasting_alarm_failure_retries_once_a_retry_interval() {
+        let mut rig = Rig::new(Some(FakePower {
+            fail_alarm: true,
+            ..FakePower::default()
+        }));
+        rig.app.state.settings.sleep_enabled = true;
+        rig.app.state.settings.sleep_min = 23 * 60;
+        rig.app.state.settings.wake_min = 5 * 60;
+        set_wall_hm(22, 59);
+        rig.frame(&[]);
+        set_wall_hm(23, 1);
+        rig.frame(&[]);
+        rig.frame(&[]);
+        advance(DEFAULT_MANUAL_IDLE);
+        set_wall_hm(23, 11);
+        rig.frame(&[]);
+        assert_eq!(rig.power.as_ref().unwrap().alarm_tries, 2, "crossing, idle");
+        // Still failing, idle in sleep hours: the loop waits out the
+        // retry interval, not 50 ms, and passes meanwhile don't retry.
+        let out = rig.frame(&[]);
+        assert!(
+            out.wait.is_some_and(|w| w > ALARM_RETRY / 2),
+            "{:?}",
+            out.wait
+        );
+        for _ in 0..20 {
+            advance(PAST_BOUNDARY);
+            rig.frame(&[]);
+        }
+        assert_eq!(rig.power.as_ref().unwrap().alarm_tries, 2);
+        advance(ALARM_RETRY);
+        rig.frame(&[]);
+        assert_eq!(rig.power.as_ref().unwrap().alarm_tries, 3);
+        assert_eq!(rig.power.as_ref().unwrap().slept, 0);
     }
 
     #[test]

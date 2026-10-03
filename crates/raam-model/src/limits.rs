@@ -126,6 +126,10 @@ pub const PREVIEW_SHORT_SIDE: u32 = 1440;
 /// enforcing a lowered cap. Chosen.
 pub const LRU_BATCH_STORE: usize = 16;
 pub const LRU_BATCH_ENFORCE: usize = 32;
+/// Test-only: the longest a `debug.video.stall` may hold a write. Long
+/// enough for a person to pull the plug on a cue; short enough that a
+/// forgotten prop costs a minute per write, not a hung library. Chosen.
+pub const DEBUG_STALL_MAX: Duration = Duration::from_secs(60);
 
 // ---- fetch thread (planning, tile handover) ---------------------------------
 

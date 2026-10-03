@@ -31,6 +31,7 @@
 use crate::db::{self, Db};
 use crate::immich;
 use crate::provider::{ImmichProvider, LocalFolder, Provider};
+use crate::stall::{self, Site, Writer};
 use crate::{Host, Paths};
 use raam_core::{clock, schedule};
 use raam_model::limits::{
@@ -380,7 +381,20 @@ fn writer_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
         }
         if let Some(json) = json {
             let export = &lib.paths.curation_export;
-            let note = match write_atomic(export, json.as_bytes()) {
+            stall::at(
+                &lib.host,
+                Site::Export,
+                Writer::Curation,
+                "the curation export",
+            );
+            let note = match write_atomic(export, json.as_bytes(), || {
+                stall::at(
+                    &lib.host,
+                    Site::Rename,
+                    Writer::Curation,
+                    "the curation export",
+                )
+            }) {
                 Ok(()) => format!("exported to {}", export.display()),
                 Err(e) => {
                     log::error!("curation export: {e}");
@@ -956,11 +970,15 @@ fn materialise_one(lib: &Library, st: &mut Loop) -> bool {
     match kind {
         SourceKind::Local => {
             let path = lib.local_preview_dir.join(format!("{asset}.jpg"));
-            if let Err(e) = write_atomic(&path, &bytes) {
+            let what = format!("asset {asset}");
+            if let Err(e) = write_atomic(&path, &bytes, || {
+                stall::at(&lib.host, Site::Rename, Writer::Local, &what)
+            }) {
                 log::error!("library: {e}");
                 st.failed.insert(asset);
                 return true;
             }
+            stall::at(&lib.host, Site::Row, Writer::Local, &what);
             let _ = db::insert_cached(
                 &lib.db.lock().unwrap(),
                 asset,
@@ -1021,7 +1039,17 @@ pub fn store_immich_preview(
         return Ok(false);
     }
     let path = lib.cache_dir.join(format!("{asset}.jpg"));
-    write_atomic(&path, bytes)?;
+    // Only the on-demand fetch evicts.
+    let writer = if evict {
+        Writer::Fetch
+    } else {
+        Writer::Prefetch
+    };
+    let what = format!("asset {asset}");
+    write_atomic(&path, bytes, || {
+        stall::at(&lib.host, Site::Rename, writer, &what)
+    })?;
+    stall::at(&lib.host, Site::Row, writer, &what);
     let conn = lib.db.lock().unwrap();
     let mut evicted = Vec::new();
     if evict {
@@ -1202,7 +1230,9 @@ fn enforce_cap(lib: &Library) {
 /// Each call has its own temp file: the fetch and library threads can store
 /// the same preview at once, and a shared one would be cut short under the
 /// other's rename. The startup sweep deletes any a crash leaves.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+/// `before_rename` runs with the temp file whole and synced: the
+/// `debug.video.stall` hook (stall.rs).
+fn write_atomic(path: &Path, bytes: &[u8], before_rename: impl FnOnce()) -> Result<(), String> {
     use std::io::Write;
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let mut name = path.file_name().unwrap_or_default().to_os_string();
@@ -1214,6 +1244,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .and_then(|()| file.sync_all())
         .map_err(|e| format!("write {}: {e}", tmp.display()))?;
     drop(file);
+    before_rename();
     std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))?;
     sync_parent(path)
 }
@@ -1257,7 +1288,7 @@ mod tests {
                 let path = &path;
                 s.spawn(move || {
                     for _ in 0..200 {
-                        write_atomic(path, bytes).unwrap();
+                        write_atomic(path, bytes, || {}).unwrap();
                     }
                 });
             }
@@ -1270,6 +1301,29 @@ mod tests {
             .map(|e| e.file_name())
             .collect();
         assert_eq!(names, ["7.jpg"], "a temp file was left");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The stall hook runs inside the window it is named for: the temp
+    /// file whole on disk, the target not yet there.
+    #[test]
+    fn before_rename_runs_with_the_temp_file_whole() {
+        let dir = std::env::temp_dir().join(format!("raam-hook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("8.jpg");
+        let bytes = vec![0xcc; 32 * 1024];
+        let mut ran = false;
+        write_atomic(&path, &bytes, || {
+            ran = true;
+            assert!(!path.exists(), "renamed before the hook");
+            let temps: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+            assert_eq!(temps.len(), 1);
+            assert_eq!(std::fs::read(temps[0].path()).unwrap(), bytes);
+        })
+        .unwrap();
+        assert!(ran);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

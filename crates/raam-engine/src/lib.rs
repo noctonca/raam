@@ -9,6 +9,7 @@ pub mod fetch;
 pub mod immich;
 pub mod library;
 pub mod provider;
+pub mod stall;
 pub mod weather;
 
 use raam_core::app::Effect;

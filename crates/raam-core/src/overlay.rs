@@ -197,7 +197,7 @@ impl ClockOverlay {
         };
         let (shadow_color, (dx, dy), color) = match style {
             ClockStyle::Detailed => (DETAILED_SHADOW, DETAILED_SHADOW_OFFSET, CREAM),
-            _ => (SIMPLE_SHADOW, SIMPLE_SHADOW_OFFSET, WHITE),
+            ClockStyle::Simple | ClockStyle::Off => (SIMPLE_SHADOW, SIMPLE_SHADOW_OFFSET, WHITE),
         };
         // All shadows first, then all text, so no line's shadow darkens the
         // line above it. One draw per (atlas, pass).
@@ -379,7 +379,7 @@ pub fn content(style: ClockStyle, h24: bool, t: &LocalTime, weather: Option<Weat
             ClockStyle::Detailed => {
                 format!("{h}:{:02} {}", t.min, if t.hour < 12 { "AM" } else { "PM" })
             }
-            _ => format!("{h}:{:02}", t.min),
+            ClockStyle::Simple | ClockStyle::Off => format!("{h}:{:02}", t.min),
         }
     };
     let mon = MONTHS[t.mon.clamp(0, 11) as usize];

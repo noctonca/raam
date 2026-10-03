@@ -183,6 +183,14 @@ pub const WEATHER_REFRESH: Duration = Duration::from_secs(15 * 60);
 pub const WEATHER_RETRY_MIN: Duration = Duration::from_secs(5);
 pub const WEATHER_RETRY_MAX: Duration = Duration::from_secs(5 * 60);
 
+// ---- keys -----------------------------------------------------------------------
+
+/// Keys and typed text waiting for the menu, which takes one press a pass.
+/// Chosen: a held key's repeats wait one at a time, so only typing fills
+/// it, and 64 is about two seconds of fast typing on the frame's slowest
+/// passes; anything past that is a backlog nobody is watching.
+pub const MAX_QUEUED_KEYS: usize = 64;
+
 // ---- collage -------------------------------------------------------------------
 
 /// The largest layout's slot count. A collage test asserts the layout

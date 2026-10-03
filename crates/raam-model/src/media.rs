@@ -17,11 +17,13 @@ impl SourceKind {
         }
     }
 
+    /// The `source` table's CHECK holds `kind` to these two names, so
+    /// anything else is a bug, not a row to guess at.
     pub fn parse(s: &str) -> Self {
-        if s == "local" {
-            SourceKind::Local
-        } else {
-            SourceKind::Immich
+        match s {
+            "immich" => SourceKind::Immich,
+            "local" => SourceKind::Local,
+            _ => panic!("unknown source kind {s:?}"),
         }
     }
 }

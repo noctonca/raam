@@ -331,29 +331,21 @@ pub fn load_settings(conn: &Connection, s: &mut Settings) -> Vec<String> {
     {
         s.fill_by_default = v;
     }
+    // A stored name this build doesn't know (a hand edit, a row written by
+    // a newer build before a downgrade) leaves its setting as it was: the
+    // `setting` table has no CHECK on its values, so any string can be
+    // there. The names themselves are each enum's `as_str`.
     if let Some(v) = str_of("display.fit_background") {
-        s.fit_background = if v == "black" {
-            FitBackground::Black
-        } else {
-            FitBackground::Blurred
-        };
+        s.fit_background = FitBackground::parse(&v).unwrap_or(s.fit_background);
     }
     if let Some(v) = rows.get("collage.max").and_then(|v| v.as_u64()) {
         s.collage_max = (v as usize).clamp(1, limits::LARGEST_LAYOUT);
     }
     if let Some(v) = str_of("collage.gap_colour") {
-        s.gap_colour = if v == "white" {
-            GapColour::White
-        } else {
-            GapColour::Black
-        };
+        s.gap_colour = GapColour::parse(&v).unwrap_or(s.gap_colour);
     }
     if let Some(v) = str_of("overlay.clock_style") {
-        s.clock_style = match v.as_str() {
-            "off" => ClockStyle::Off,
-            "detailed" => ClockStyle::Detailed,
-            _ => ClockStyle::Simple,
-        };
+        s.clock_style = ClockStyle::parse(&v).unwrap_or(s.clock_style);
     } else if let Some(v) = str_of("overlay.clock") {
         // Pre-split rows (one key conflating style and corner): read-alias.
         (s.clock_style, s.clock_corner) = match v.as_str() {
@@ -363,12 +355,7 @@ pub fn load_settings(conn: &Connection, s: &mut Settings) -> Vec<String> {
         };
     }
     if let Some(v) = str_of("overlay.clock_corner") {
-        s.clock_corner = match v.as_str() {
-            "topleft" => Corner::TopLeft,
-            "bottomleft" => Corner::BottomLeft,
-            "bottomright" => Corner::BottomRight,
-            _ => Corner::TopRight,
-        };
+        s.clock_corner = Corner::parse(&v).unwrap_or(s.clock_corner);
     }
     if let Some(v) = rows.get("overlay.weather").and_then(|v| v.as_bool()) {
         s.weather_enabled = v;
@@ -385,7 +372,7 @@ pub fn load_settings(conn: &Connection, s: &mut Settings) -> Vec<String> {
         s.cache_cap_mb = v.min(u64::from(most)) as u32;
     }
     if let Some(v) = str_of("video.playback") {
-        s.video_playback = VideoPlayback::parse(&v);
+        s.video_playback = VideoPlayback::parse(&v).unwrap_or(s.video_playback);
     }
     if let Some(v) = rows.get("video.sound").and_then(|v| v.as_bool()) {
         s.video_sound = v;
@@ -1549,6 +1536,34 @@ mod tests {
             },
             OFF_1_TO_7
         );
+    }
+
+    /// Every value of every named setting, not just one off its default:
+    /// the stored name and its read-back must agree for each.
+    #[test]
+    fn every_named_value_round_trips_through_the_db() {
+        install_clock();
+        let db = open(Path::new(":memory:"), "").unwrap();
+        let conn = db.lock().unwrap();
+        let with = |pick: &dyn Fn(&mut Settings)| {
+            let mut s = Settings::defaults("", "");
+            pick(&mut s);
+            s
+        };
+        let mut all = Vec::new();
+        all.extend(TransitionChoice::ALL.map(|v| with(&|s| s.transition = v)));
+        all.extend(FitBackground::ALL.map(|v| with(&|s| s.fit_background = v)));
+        all.extend(GapColour::ALL.map(|v| with(&|s| s.gap_colour = v)));
+        all.extend(ClockStyle::ALL.map(|v| with(&|s| s.clock_style = v)));
+        all.extend(Corner::ALL.map(|v| with(&|s| s.clock_corner = v)));
+        all.extend(VideoPlayback::ALL.map(|v| with(&|s| s.video_playback = v)));
+        for s in &all {
+            let rows = raam_core::store::settings_rows(s);
+            save_settings(&conn, &rows, (false, 60, 420)).unwrap();
+            let mut loaded = Settings::defaults("", "");
+            load_settings(&conn, &mut loaded);
+            assert_eq!(raam_core::store::settings_rows(&loaded), rows);
+        }
     }
 
     #[test]

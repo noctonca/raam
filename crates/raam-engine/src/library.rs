@@ -1114,14 +1114,33 @@ pub fn fetch_immich_video(
         "{asset}.mp4.{}.part",
         if evict { "fetch" } else { "prefetch" }
     ));
+    let cap = lib.cap_bytes() as i64;
+    let room = if evict {
+        cap
+    } else {
+        cap - db::cached_bytes(&lib.db.lock().unwrap(), SourceKind::Immich)
+    };
+    // Prefetch with the cache full: nothing to fetch it into.
+    let Ok(max_bytes @ 1..) = u64::try_from(room) else {
+        return Ok(None);
+    };
     let t = clock::now();
-    let len = match provider.fetch_video(media, &tmp) {
+    let len = match provider.fetch_video(media, &tmp, max_bytes) {
         Ok(n) => n as i64,
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
         }
     };
+    // Before the probe: a download stopped at the cap is short, and a
+    // probe of it would mark a good clip unplayable. Checked again against
+    // the cache now, which may have grown meanwhile.
+    if len > room
+        || (!evict && db::cached_bytes(&lib.db.lock().unwrap(), SourceKind::Immich) + len > cap)
+    {
+        let _ = std::fs::remove_file(&tmp);
+        return Ok(None);
+    }
     let info = lib.host.probe.probe(&tmp.to_string_lossy());
     let why = match &info {
         Ok(i) => lib.host.probe.unplayable(i),
@@ -1154,13 +1173,6 @@ pub fn fetch_immich_video(
         )));
     }
     let info = info.unwrap();
-    let cap = lib.cap_bytes() as i64;
-    if len > cap
-        || (!evict && db::cached_bytes(&lib.db.lock().unwrap(), SourceKind::Immich) + len > cap)
-    {
-        let _ = std::fs::remove_file(&tmp);
-        return Ok(None);
-    }
     let path = lib.cache_dir.join(format!("{asset}.mp4"));
     // The data is synced already (fetch_video); the rename needs the
     // directory synced, before the row says the clip is here.

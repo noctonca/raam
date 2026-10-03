@@ -152,6 +152,9 @@ pub const IMMICH_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 pub const IMMICH_VIDEO_TIMEOUT: Duration = Duration::from_secs(300);
 /// `POST /api/search/metadata` page size (the server's maximum).
 pub const IMMICH_PAGE_SIZE: u32 = 1000;
+/// Pages one album may take: 100k assets, far past any album a frame
+/// shows, so only a server whose `nextPage` never ends reaches it. Chosen.
+pub const IMMICH_MAX_PAGES: u32 = 100;
 /// The largest response body read into memory (previews run ~0.2-2 MB;
 /// clips stream to disk and never pass through here). Chosen.
 pub const HTTP_BODY_LIMIT_BYTES: u64 = 64 * 1024 * 1024;

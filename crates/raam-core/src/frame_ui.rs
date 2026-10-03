@@ -18,8 +18,8 @@ use crate::network::{self, JoinStage, LinkKind, NetCommand, NetSnapshot, Securit
 use crate::theme::{self, Type, scheme, size, space};
 use egui::{Align, CornerRadius, Ui, UiBuilder};
 use raam_model::limits::{
-    AUDIO_DELAY_RANGE, CAP_CHOICES_MB, DEFAULT_CAP_MB, FOCUS_CLAIM_PASSES, INTERVAL_RANGE_SECS,
-    LARGEST_LAYOUT,
+    AUDIO_DELAY_RANGE, CAP_CHOICES_MB, DEFAULT_CAP_MB, FOCUS_CLAIM_PASSES, HIDDEN_LIST_MAX,
+    INTERVAL_RANGE_SECS, LARGEST_LAYOUT,
 };
 use raam_model::{
     AlbumRow, ClockStyle, Corner, FitBackground, GapColour, Prefetch, ScaleMode, Settings, Stats,
@@ -30,6 +30,12 @@ use std::time::Duration;
 
 /// Sleep and wake times move in steps of this many minutes.
 const TIME_STEP: u32 = 15;
+/// The Server and Join pages' text fields share this width (UX.md,
+/// Similarity).
+const FIELD_W: f32 = 560.0;
+/// The Collage row's choices, one per layout size: the array's length
+/// ties them to `LARGEST_LAYOUT`.
+const COLLAGE_OPTIONS: [&str; LARGEST_LAYOUT] = ["Off", "2", "3", "4"];
 
 /// The server URL as it will be used (Postel's Law): trimmed, with
 /// `http://` added when no scheme was typed. `None` when it can't be a
@@ -936,6 +942,15 @@ fn photos(n: i64) -> String {
     format!("{} photo{}", count(n), if n == 1 { "" } else { "s" })
 }
 
+/// The cache-size picker's row for a cap: its own, or the default's when
+/// the cap isn't one of the choices (a quarter of free space, say).
+fn cap_choice(mb: u32) -> usize {
+    let at = |mb| CAP_CHOICES_MB.iter().position(|c| *c == mb);
+    at(mb)
+        .or_else(|| at(DEFAULT_CAP_MB))
+        .expect("DEFAULT_CAP_MB is one of CAP_CHOICES_MB")
+}
+
 fn cap_label(mb: u32) -> String {
     if mb >= 1024 {
         format!("{} GB", mb / 1024)
@@ -1738,7 +1753,7 @@ fn hidden_page(ui: &mut Ui, st: &mut AppState) {
         return;
     }
     kit::section_header(ui, "Most recently hidden first");
-    for item in lib.hidden.iter().take(50) {
+    for item in lib.hidden.iter().take(HIDDEN_LIST_MAX) {
         let icon = if item.label.starts_with("Folder") {
             icons::FOLDER
         } else if item.label.starts_with("Immich") {
@@ -1758,13 +1773,13 @@ fn hidden_page(ui: &mut Ui, st: &mut AppState) {
             st.actions.unhide = Some(item.key.clone());
         }
     }
-    if lib.hidden.len() > 50 {
+    if lib.hidden.len() > HIDDEN_LIST_MAX {
         ui.add_space(space::S);
         on_content_edge(ui, |ui| {
             let s = scheme(ui);
             kit::paragraph(
                 ui,
-                &format!("And {} more.", lib.hidden.len() - 50),
+                &format!("And {} more.", lib.hidden.len() - HIDDEN_LIST_MAX),
                 Type::BodyMedium,
                 s.on_surface_variant,
             );
@@ -1859,7 +1874,7 @@ fn slideshow_page(ui: &mut Ui, st: &mut AppState) {
         .supporting(&collage_sup)
         .trailing(Trailing::Segmented {
             selected: &mut collage,
-            options: &["Off", "2", "3", "4"],
+            options: &COLLAGE_OPTIONS,
             seg_w: 72.0,
         });
     if kit::list_item(ui, row).changed() {
@@ -2120,8 +2135,6 @@ fn sleep_page(ui: &mut Ui, st: &mut AppState) {
 }
 
 fn server_page(ui: &mut Ui, st: &mut AppState) {
-    // The fields share one width (UX.md, Similarity).
-    const FIELD_W: f32 = 560.0;
     kit::page_title(ui, "Server", "The Immich server the albums come from.");
     ui.spacing_mut().item_spacing.y = 0.0;
     let lib = st.library.clone();
@@ -2619,8 +2632,6 @@ fn networks_page(ui: &mut Ui, st: &mut AppState) {
 }
 
 fn join_page(ui: &mut Ui, st: &mut AppState) {
-    // The fields share one width (UX.md, Similarity), the Server page's.
-    const FIELD_W: f32 = 560.0;
     let Some(Ok(w)) = st.network.as_ref().map(|n| n.wifi.clone()) else {
         st.sub = Sub::None;
         return;
@@ -2766,7 +2777,7 @@ fn join_page(ui: &mut Ui, st: &mut AppState) {
     }
     let sec = d.security.unwrap_or(Security::Wpa2);
     let ready = !target.0.is_empty()
-        && target.0.len() <= 32
+        && target.0.len() <= network::SSID_MAX_BYTES
         && (!sec.needs_key() || network::key_problem(&d.key).is_none())
         && !busy
         && !w.joining();
@@ -3001,10 +3012,7 @@ fn dialogs(ctx: &egui::Context, st: &mut AppState) {
         Dialog::CacheSize => {
             let labels: Vec<String> = CAP_CHOICES_MB.iter().map(|mb| cap_label(*mb)).collect();
             let labels: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-            let sel = CAP_CHOICES_MB
-                .iter()
-                .position(|mb| *mb == st.settings.cache_cap_mb)
-                .unwrap_or(3);
+            let sel = cap_choice(st.settings.cache_cap_mb);
             match kit::picker(ctx, "frame.cache", "Cache size", &labels, sel) {
                 DialogResult::Open => {}
                 DialogResult::Dismissed => st.dialog = Dialog::None,
@@ -3330,5 +3338,11 @@ mod tests {
         // No albums at all (a first run): nothing to say yet.
         let st = preset("set-photos-empty").expect("set-photos-empty");
         assert_eq!(albums_problem(&st, true), None);
+    }
+
+    #[test]
+    fn a_cap_off_the_list_picks_the_default_row() {
+        assert_eq!(CAP_CHOICES_MB[cap_choice(2048)], 2048);
+        assert_eq!(CAP_CHOICES_MB[cap_choice(300)], DEFAULT_CAP_MB);
     }
 }

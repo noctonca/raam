@@ -11,7 +11,10 @@
 use crate::icons;
 use std::fmt;
 
-/// A network name: up to 32 bytes, not always UTF-8.
+/// The longest network name, in bytes (802.11).
+pub const SSID_MAX_BYTES: usize = 32;
+
+/// A network name: up to `SSID_MAX_BYTES` bytes, not always UTF-8.
 #[derive(Clone, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
 pub struct Ssid(pub Vec<u8>);
 

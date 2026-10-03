@@ -20,8 +20,8 @@ use crate::slideshow::SlideshowSettings;
 use crate::source::TileSource;
 use crate::{clock, store, theme, weather_icons};
 use raam_model::limits::{
-    AUTO_DISMISS, DEFAULT_MANUAL_IDLE, MAX_EGUI_WAIT, MAX_QUEUED_KEYS, SAVE_DEBOUNCE, TAP_SLOP_PX,
-    UNDO_HIDE, WIFI_RESCAN,
+    AUTO_DISMISS, DEFAULT_MANUAL_IDLE, MAX_EGUI_WAIT, MAX_QUEUED_KEYS, SAVE_DEBOUNCE,
+    SLEEP_CONFIRM, TAP_SLOP_PX, UNDO_HIDE, WIFI_RESCAN,
 };
 use raam_model::{ClockStyle, Corner, ScaleMode, SourceKind, Stats};
 use std::collections::VecDeque;
@@ -498,7 +498,7 @@ impl App {
             // Touches and keys were dropped, not routed, so they don't
             // replay on return.
             out.skip_draw = true;
-            out.wait = boundary_wait.map(|w| w + Duration::from_millis(50));
+            out.wait = boundary_wait.map(|w| w + PAST_BOUNDARY);
             return out;
         }
 
@@ -526,10 +526,11 @@ impl App {
             self.manual_wake = None;
         }
         if let Some(since) = self.asleep_since
-            && clock::elapsed(since) >= Duration::from_secs(30)
+            && clock::elapsed(since) >= SLEEP_CONFIRM
         {
             log::error!(
-                "schedule: screen still on 30s after sleeping, treating it as a manual wake"
+                "schedule: screen still on {}s after sleeping, treating it as a manual wake",
+                SLEEP_CONFIRM.as_secs()
             );
             self.asleep_since = None;
             self.manual_wake = Some(clock::now());
@@ -787,7 +788,7 @@ impl App {
                     egui::vec2(inputs.screen.0 as f32, inputs.screen.1 as f32),
                 )),
                 time: Some(clock::elapsed(self.start).as_secs_f64()),
-                predicted_dt: 1.0 / 30.0,
+                predicted_dt: PREDICTED_DT,
                 events: egui_events,
                 ..Default::default()
             };
@@ -921,7 +922,7 @@ impl App {
                     .map_or(Duration::MAX, |v| v.repaint_delay);
                 self.egui_due = clock::now()
                     .checked_add(delay)
-                    .unwrap_or_else(|| clock::now() + Duration::from_secs(3600));
+                    .unwrap_or_else(|| clock::now() + EGUI_NEVER_DUE);
                 out.egui = Some(EguiOut {
                     textures_delta: std::mem::take(&mut full_output.textures_delta),
                     primitives,
@@ -1051,19 +1052,16 @@ impl App {
                 w = min_wait(w, until_next_minute());
             }
             if let Some(b) = boundary_wait {
-                w = min_wait(w, b + Duration::from_millis(50));
+                w = min_wait(w, b + PAST_BOUNDARY);
             }
             if let Some(m) = self.manual_wake {
                 let idle = clock::elapsed(m).min(clock::elapsed(self.last_touch));
-                w = min_wait(
-                    w,
-                    self.manual_idle.saturating_sub(idle) + Duration::from_millis(50),
-                );
+                w = min_wait(w, self.manual_idle.saturating_sub(idle) + PAST_BOUNDARY);
             }
             if let Some(since) = self.settings_dirty {
                 w = min_wait(
                     w,
-                    SAVE_DEBOUNCE.saturating_sub(clock::elapsed(since)) + Duration::from_millis(10),
+                    SAVE_DEBOUNCE.saturating_sub(clock::elapsed(since)) + PAST_DEBOUNCE,
                 );
             }
             if self.overlay_open {
@@ -1071,7 +1069,7 @@ impl App {
                     w = min_wait(w, egui_delay);
                 }
                 if self.undo.is_some() {
-                    w = min_wait(w, Duration::from_millis(250));
+                    w = min_wait(w, UNDO_TICK);
                 }
                 if !self.ctx.text_edit_focused() {
                     w = min_wait(
@@ -1166,6 +1164,22 @@ impl App {
     }
 }
 
+/// Waits that end at a boundary (sleep, wake, manual idle) end this long
+/// after it, so the pass that wakes sees the boundary crossed, not just
+/// short of it.
+const PAST_BOUNDARY: Duration = Duration::from_millis(50);
+/// The same for the settings save, whose debounce check is `>=`.
+const PAST_DEBOUNCE: Duration = Duration::from_millis(10);
+/// The same for the clock's minute, so the overlay draws the new minute.
+const PAST_MINUTE: Duration = Duration::from_millis(20);
+/// "Undo hide" counts down on screen, so redraw this often while it shows.
+const UNDO_TICK: Duration = Duration::from_millis(250);
+/// egui asked for no repaint (`Duration::MAX` overflows the clock): due
+/// this far ahead, which any input or deadline cuts short.
+const EGUI_NEVER_DUE: Duration = Duration::from_secs(3600);
+/// egui's frame-time hint (s), for its animations. Chosen.
+const PREDICTED_DT: f32 = 1.0 / 30.0;
+
 fn min_wait(a: Option<Duration>, b: Duration) -> Option<Duration> {
     Some(a.map_or(b, |a| a.min(b)))
 }
@@ -1175,7 +1189,7 @@ fn min_wait(a: Option<Duration>, b: Duration) -> Option<Duration> {
 fn until_next_minute() -> Duration {
     let now = clock::wall();
     let into = Duration::from_millis((now.as_millis() % 60_000) as u64);
-    Duration::from_secs(60) - into + Duration::from_millis(20)
+    Duration::from_secs(60) - into + PAST_MINUTE
 }
 
 /// A touch as egui events: mouse-style pointer events for

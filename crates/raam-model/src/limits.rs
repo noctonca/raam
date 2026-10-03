@@ -54,6 +54,11 @@ pub const MAX_EGUI_WAIT: Duration = Duration::from_secs(1);
 pub const UNDO_HIDE: Duration = Duration::from_secs(8);
 /// Settings writes are debounced this long after the last change. Chosen.
 pub const SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
+/// The screen still on this long after the schedule put it to sleep means
+/// the device ignored the sleep (or someone woke it by hand): the
+/// controller treats it as a manual wake. Chosen: far longer than a
+/// screen-off takes to land.
+pub const SLEEP_CONFIRM: Duration = Duration::from_secs(30);
 
 // ---- slideshow pipeline ----------------------------------------------------
 
@@ -212,3 +217,9 @@ pub const AUDIO_DELAY_RANGE: (i32, i32) = (-100, 400);
 /// The photo interval's range (s), chosen: below 5 s a photo can't be
 /// taken in, above 2 min the frame looks stuck.
 pub const INTERVAL_RANGE_SECS: (f32, f32) = (5.0, 120.0);
+
+// ---- UI lists -------------------------------------------------------------------
+
+/// Settings → Photos → Hidden lists this many, newest first, then "And N
+/// more." Chosen: a page that stays quick to draw and scroll on the frame.
+pub const HIDDEN_LIST_MAX: usize = 50;

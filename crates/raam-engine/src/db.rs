@@ -379,7 +379,9 @@ pub fn load_settings(conn: &Connection, s: &mut Settings) -> Vec<String> {
         s.dark_theme = v != "light";
     }
     if let Some(v) = rows.get("cache.cap_mb").and_then(|v| v.as_u64()) {
-        s.cache_cap_mb = v as u32;
+        // No larger than the picker's largest, before the cast can wrap.
+        let most = limits::CAP_CHOICES_MB[limits::CAP_CHOICES_MB.len() - 1];
+        s.cache_cap_mb = v.min(u64::from(most)) as u32;
     }
     if let Some(v) = str_of("video.playback") {
         s.video_playback = VideoPlayback::parse(&v);
@@ -1544,6 +1546,16 @@ mod tests {
             // What the controller does with it, which panicked before.
             let _ = std::time::Duration::from_secs_f32(loaded.interval_secs);
         }
+        // A cap past u32 wrapped to 50 MB; it loads as the largest choice.
+        save_settings(
+            &conn,
+            &[("cache.cap_mb", serde_json::json!(4_294_967_346u64))],
+            (false, 60, 420),
+        )
+        .unwrap();
+        let mut loaded = Settings::defaults("", "");
+        load_settings(&conn, &mut loaded);
+        assert_eq!(loaded.cache_cap_mb, 4096);
     }
 
     #[test]

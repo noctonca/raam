@@ -1,6 +1,8 @@
 //! The one `Settings` type and its value enums. The UI edits it, the
 //! pipeline reads it, the engine persists it (string-keyed JSON rows,
-//! mapped by hand in raam-engine's db module).
+//! mapped by hand in raam-engine's db module). Each value enum's stored
+//! name is its `as_str`, read back by `parse`, so raam-core's rows and
+//! the engine's load share one spelling.
 
 use crate::limits;
 
@@ -14,6 +16,21 @@ pub enum ScaleMode {
 pub enum FitBackground {
     Blurred,
     Black,
+}
+
+impl FitBackground {
+    pub const ALL: [FitBackground; 2] = [FitBackground::Blurred, FitBackground::Black];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FitBackground::Blurred => "blurred",
+            FitBackground::Black => "black",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == s)
+    }
 }
 
 /// How long a clip stays, with Frameo's three choices (its default is
@@ -53,12 +70,8 @@ impl VideoPlayback {
         }
     }
 
-    pub fn parse(s: &str) -> Self {
-        match s {
-            "loop" => VideoPlayback::Loop,
-            "wait" => VideoPlayback::Wait,
-            _ => VideoPlayback::Continue,
-        }
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == s)
     }
 }
 
@@ -69,6 +82,21 @@ impl VideoPlayback {
 pub enum GapColour {
     Black,
     White,
+}
+
+impl GapColour {
+    pub const ALL: [GapColour; 2] = [GapColour::Black, GapColour::White];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GapColour::Black => "black",
+            GapColour::White => "white",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == s)
+    }
 }
 
 /// The clock overlay's look. Style and position are separate choices
@@ -91,6 +119,18 @@ impl ClockStyle {
             ClockStyle::Simple => "Simple",
             ClockStyle::Detailed => "Detailed",
         }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ClockStyle::Off => "off",
+            ClockStyle::Simple => "simple",
+            ClockStyle::Detailed => "detailed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == s)
     }
 }
 
@@ -118,6 +158,19 @@ impl Corner {
             Corner::BottomLeft => "Bottom left",
             Corner::BottomRight => "Bottom right",
         }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Corner::TopLeft => "topleft",
+            Corner::TopRight => "topright",
+            Corner::BottomLeft => "bottomleft",
+            Corner::BottomRight => "bottomright",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == s)
     }
 
     pub fn is_top(self) -> bool {
@@ -267,6 +320,16 @@ mod tests {
             VideoPlayback::Wait => 2,
         });
         assert_eq!(VideoPlayback::ALL.len(), 3);
+        check(&FitBackground::ALL, |v| match v {
+            FitBackground::Blurred => 0,
+            FitBackground::Black => 1,
+        });
+        assert_eq!(FitBackground::ALL.len(), 2);
+        check(&GapColour::ALL, |v| match v {
+            GapColour::Black => 0,
+            GapColour::White => 1,
+        });
+        assert_eq!(GapColour::ALL.len(), 2);
         check(&ClockStyle::ALL, |v| match v {
             ClockStyle::Off => 0,
             ClockStyle::Simple => 1,
@@ -289,5 +352,37 @@ mod tests {
             TransitionChoice::Swap => 5,
         });
         assert_eq!(TransitionChoice::ALL.len(), 6);
+    }
+
+    /// `parse` finds a value by its `as_str` in `ALL`, so two variants
+    /// sharing a stored name would load as the first of them.
+    #[test]
+    fn every_stored_name_is_distinct_and_parses_back() {
+        fn check<T: Copy + PartialEq + std::fmt::Debug>(
+            all: &[T],
+            as_str: fn(T) -> &'static str,
+            parse: fn(&str) -> Option<T>,
+        ) {
+            for (i, v) in all.iter().enumerate() {
+                assert_eq!(parse(as_str(*v)), Some(*v), "{v:?}");
+                for w in &all[i + 1..] {
+                    assert_ne!(as_str(*v), as_str(*w), "{v:?} and {w:?}");
+                }
+            }
+            assert_eq!(parse("no such name"), None);
+        }
+        check(
+            &FitBackground::ALL,
+            FitBackground::as_str,
+            FitBackground::parse,
+        );
+        check(
+            &VideoPlayback::ALL,
+            VideoPlayback::as_str,
+            VideoPlayback::parse,
+        );
+        check(&GapColour::ALL, GapColour::as_str, GapColour::parse);
+        check(&ClockStyle::ALL, ClockStyle::as_str, ClockStyle::parse);
+        check(&Corner::ALL, Corner::as_str, Corner::parse);
     }
 }

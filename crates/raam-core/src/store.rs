@@ -5,7 +5,7 @@
 //! can (localStorage on the web). The rows are built here, not in the
 //! engine, so the dirty check needs no engine.
 
-use raam_model::{ClockStyle, Corner, FitBackground, GapColour, Settings, TransitionChoice};
+use raam_model::{Settings, TransitionChoice};
 
 /// The `setting` rows for everything in `Settings` except the server and
 /// key (on `source`/`credential`) and the sleep schedule (`schedule`).
@@ -16,38 +16,11 @@ pub fn settings_rows(s: &Settings) -> Vec<(&'static str, serde_json::Value)> {
         ("slideshow.transition", json!(transition_str(s.transition))),
         ("slideshow.ken_burns", json!(s.ken_burns_enabled)),
         ("display.fill_by_default", json!(s.fill_by_default)),
-        (
-            "display.fit_background",
-            json!(match s.fit_background {
-                FitBackground::Blurred => "blurred",
-                FitBackground::Black => "black",
-            }),
-        ),
+        ("display.fit_background", json!(s.fit_background.as_str())),
         ("collage.max", json!(s.collage_max)),
-        (
-            "collage.gap_colour",
-            json!(match s.gap_colour {
-                GapColour::Black => "black",
-                GapColour::White => "white",
-            }),
-        ),
-        (
-            "overlay.clock_style",
-            json!(match s.clock_style {
-                ClockStyle::Off => "off",
-                ClockStyle::Simple => "simple",
-                ClockStyle::Detailed => "detailed",
-            }),
-        ),
-        (
-            "overlay.clock_corner",
-            json!(match s.clock_corner {
-                Corner::TopLeft => "topleft",
-                Corner::TopRight => "topright",
-                Corner::BottomLeft => "bottomleft",
-                Corner::BottomRight => "bottomright",
-            }),
-        ),
+        ("collage.gap_colour", json!(s.gap_colour.as_str())),
+        ("overlay.clock_style", json!(s.clock_style.as_str())),
+        ("overlay.clock_corner", json!(s.clock_corner.as_str())),
         ("overlay.weather", json!(s.weather_enabled)),
         ("locale.clock_24h", json!(s.clock_24h)),
         (

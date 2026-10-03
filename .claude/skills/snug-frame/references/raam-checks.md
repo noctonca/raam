@@ -145,8 +145,13 @@ $P teardown                                # always, at the end
   outlives its adb session, not even with `nohup` or `setsid`. If the
   Mac lets go, the watcher dies with it, and it gives up by itself after
   `--for` seconds (300 by default). `disarm` stops it.
-- **`--real`** says "pull now" on the Mac instead, for a pull by hand.
-  Use it with a stall of 20 s or more and `--delay` of a second or two.
+- **`--real`** arms no watcher: the run is recorded for a pull by hand.
+  Hold the window with a 60 s stall, check its marker is in the run's
+  `before.log`, then tell the person at the frame to pull, and to plug
+  back in after about 5 s. Proven on 2026-10-03 with C1, C3 and C4: a
+  chat message is fast enough inside 60 s. The Mac also says "pull now",
+  but nobody at the frame may hear it. A hand can't time C2's
+  milliseconds; C1 covers the same commit.
 - **`check --grace`** follows the log for 11 minutes before copying
   anything, because stopping Raam would restart the sleep grace timer.
 - **The row:** `integrity` and `rows` (each `cached_file` row against

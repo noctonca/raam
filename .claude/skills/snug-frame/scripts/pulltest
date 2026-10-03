@@ -9,8 +9,9 @@
 #                               start a run: capture Raam's log, and cut
 #                               the power (sysrq reboot) when the Nth line
 #                               containing MARKER appears, MS later. With
-#                               --real the Mac says "pull now" instead,
-#                               for a pull by hand. Disarms itself after S
+#                               --real there's no cut: the run is recorded
+#                               for a pull by hand (the Mac also says "pull
+#                               now", in case someone is near it). Disarms itself after S
 #                               seconds (default 300) if nothing matched
 #   pulltest disarm             stop an armed watcher
 #   pulltest curate fit|hide    open the menu and press Fill/Fit or Hide
@@ -151,7 +152,9 @@ arm() {
                 perl -e 'select(undef, undef, undef, 0.1)'
             done
             echo "pulltest: nothing matched in ${life} s; the capture keeps running until disarm"
-        ) &
+        ) > "$run/cue.out" 2>&1 &
+        # Its output goes to a file: on the caller's stdout it would hold a
+        # pipe such as `arm ... | tail -1` open until the cue ran out.
         ok "armed $run: say \"pull now\" on line $nth with '$marker', +${delay} ms"
         return
     fi

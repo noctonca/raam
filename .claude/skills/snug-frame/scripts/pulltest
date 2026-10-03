@@ -254,6 +254,9 @@ check() {
     done
     sh_ su -c id 2>/dev/null | grep -q 'uid=0' || die "su isn't answering 60 s after the boot"
     stop_local
+    # At once: the ring holds only a few minutes, and the boot's first
+    # lines (the sweep, the pipeline coming up) are what the check reads.
+    "${A[@]}" logcat -d -v time -s 'raam:*' > "$run/boot.log"
     if [ -n "$grace" ]; then
         # Stopping Raam would restart the grace timer: follow it untouched.
         step "follow the log ${GRACE_S} s, untouched"
@@ -264,7 +267,6 @@ check() {
         sh_ dumpsys power | sed -n 's/.*mWakefulness=//p' | head -1 > "$run/grace-screen.txt"
         ok "screen after ${GRACE_S} s: $(cat "$run/grace-screen.txt")"
     fi
-    "${A[@]}" logcat -d -v time -s 'raam:*' > "$run/boot.log"
     sh_ "date '+%Y-%m-%d %H:%M:%S'" > "$run/checked-at.txt"
 
     step "copy raam.db and the cache listings with Raam stopped"

@@ -340,7 +340,6 @@ const FLIP_V: [f32; 16] = [
     0.0, 1.0, 0.0, 1.0,
 ];
 
-/// Column-major `a * b`.
 /// The photo's GL size, after checking its pixels are exactly that size:
 /// the upload hands GL a bare pointer, and a short buffer would have the
 /// driver read past it.
@@ -358,6 +357,7 @@ fn upload_size(photo: &Photo) -> (GlSizei, GlSizei) {
     )
 }
 
+/// Column-major `a * b`.
 fn mat_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     let mut out = [0.0; 16];
     for c in 0..4 {

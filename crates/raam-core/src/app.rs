@@ -1127,10 +1127,6 @@ impl App {
         out
     }
 
-    /// A key while the menu is closed (docs/UX.md, Keys): the arrows go to
-    /// the previous and next photo, Escape does nothing, and any other key
-    /// opens the menu as a tap does. A repeat or a shortcut (Ctrl, Alt,
-    /// Command held) is not a tap. True if it opened the menu.
     /// Queues a key or typed text for its turn. The menu takes one press a
     /// pass, so a held key's repeats (about 30 a second) would outrun a
     /// slow frame and keep the focus moving long after the key is let go:
@@ -1154,6 +1150,10 @@ impl App {
         self.keys.push_back(item);
     }
 
+    /// A key while the menu is closed (docs/UX.md, Keys): the arrows go to
+    /// the previous and next photo, Escape does nothing, and any other key
+    /// opens the menu as a tap does. A repeat or a shortcut (Ctrl, Alt,
+    /// Command held) is not a tap. True if it opened the menu.
     fn slideshow_key(
         &mut self,
         k: &KeyEvent,

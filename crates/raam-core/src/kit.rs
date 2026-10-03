@@ -341,13 +341,13 @@ fn focus_ring_inside(ui: &Ui, resp: &Response, shape: Rect, corner: CornerRadius
 pub(crate) const ROBOTO_CAP: f32 = 1456.0 / 2048.0;
 pub(crate) const ROBOTO_DESCENT: f32 = 500.0 / 2048.0;
 
-/// Paints `galley` with its first baseline on `y`, rounded to a whole pixel;
 /// A laid-out row's baseline: where its first glyph sits, or `None` for an
 /// empty row.
 fn first_baseline(r: &egui::epaint::text::PlacedRow) -> Option<f32> {
     r.glyphs.first().map(|g| r.pos.y + g.pos.y)
 }
 
+/// Paints `galley` with its first baseline on `y`, rounded to a whole pixel;
 /// `x` is its left, centre or right edge by `align`. Returns where it went.
 pub(crate) fn galley_on_baseline(
     p: &Painter,

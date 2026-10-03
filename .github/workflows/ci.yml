@@ -48,6 +48,20 @@ jobs:
       - name: desktop host lints clean with gles
         run: cargo clippy --workspace --all-targets --features gles -- -D warnings
 
+  # CI can't run the goldens (pixels are exact per GPU), but it can hold
+  # the rule's other half: a bless is a commit of its own.
+  goldens:
+    name: goldens blessed in their own commits
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - run: scripts/goldens-own-commit.sh "${{ github.event.pull_request.base.sha }}"
+
   # hosts/android is cfg(target_os = "android") throughout, so the native
   # clippy above sees an empty crate. This lints it for the frame's target
   # (32-bit ARM, API 23) with a pinned NDK.

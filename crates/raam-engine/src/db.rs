@@ -10,9 +10,11 @@
 //! One `Connection` behind a `Mutex`, shared by the library and fetch
 //! threads and the writer thread; the render thread never locks it (it
 //! reads everything once at startup and sends its writes to the writer).
-//! WAL with synchronous=NORMAL: a power cut can lose the last commit but
+//! WAL with synchronous=NORMAL: a power cut can lose the last commits but
 //! never corrupt the file — the frame survived dozens of dirty
-//! power-offs this way. Files are never unlinked under the lock: the
+//! power-offs this way. That suits the cache, which is fetched again.
+//! Curation is the person's own work and exists nowhere else, so its
+//! writes commit with synchronous=FULL (`durable`). Files are never unlinked under the lock: the
 //! functions that drop cached files return their paths, and the caller
 //! removes them after letting go.
 //!
@@ -656,24 +658,45 @@ pub fn load_overrides(conn: &Connection) -> HashMap<String, ScaleMode> {
     out
 }
 
+/// Runs `write` with synchronous=FULL, so its commit is on disk when it
+/// returns: in WAL mode, NORMAL syncs only at checkpoints, and a power cut
+/// lost a curation change committed just before it (raam#17), while the
+/// export written after it survived. NORMAL is back afterwards, whatever
+/// `write` returned. About 20 ms per commit on the frame's eMMC.
+fn durable<T>(
+    conn: &Connection,
+    write: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+) -> rusqlite::Result<T> {
+    conn.execute_batch("PRAGMA synchronous = FULL")?;
+    let out = write(conn);
+    let back = conn.execute_batch("PRAGMA synchronous = NORMAL");
+    let out = out?;
+    back?;
+    Ok(out)
+}
+
 pub fn set_scale(conn: &Connection, key: &str, mode: Option<ScaleMode>) -> rusqlite::Result<usize> {
     let mode = mode.map(|m| match m {
         ScaleMode::Fill => "fill",
         ScaleMode::Fit => "fit",
     });
-    conn.execute(
-        "INSERT INTO curation (key, scale_mode, updated_at_ms) VALUES (?1, ?2, ?3)
-         ON CONFLICT (key) DO UPDATE SET scale_mode = excluded.scale_mode, updated_at_ms = excluded.updated_at_ms",
-        params![key, mode, now_ms()],
-    )
+    durable(conn, |conn| {
+        conn.execute(
+            "INSERT INTO curation (key, scale_mode, updated_at_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT (key) DO UPDATE SET scale_mode = excluded.scale_mode, updated_at_ms = excluded.updated_at_ms",
+            params![key, mode, now_ms()],
+        )
+    })
 }
 
 pub fn set_hidden(conn: &Connection, key: &str, hidden: bool) -> rusqlite::Result<usize> {
-    conn.execute(
-        "INSERT INTO curation (key, hidden, updated_at_ms) VALUES (?1, ?2, ?3)
-         ON CONFLICT (key) DO UPDATE SET hidden = excluded.hidden, updated_at_ms = excluded.updated_at_ms",
-        params![key, hidden, now_ms()],
-    )
+    durable(conn, |conn| {
+        conn.execute(
+            "INSERT INTO curation (key, hidden, updated_at_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT (key) DO UPDATE SET hidden = excluded.hidden, updated_at_ms = excluded.updated_at_ms",
+            params![key, hidden, now_ms()],
+        )
+    })
 }
 
 /// Hidden photos, most recently hidden first, labelled by where they are.
@@ -1228,6 +1251,41 @@ pub fn counts(conn: &Connection, kind: SourceKind) -> (i64, i64) {
 mod tests {
     use super::*;
     use crate::install_test_clock as install_clock;
+
+    fn synchronous(conn: &Connection) -> i64 {
+        conn.query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// Curation commits with FULL and leaves the connection at NORMAL for
+    /// everything else, also when the write fails.
+    #[test]
+    fn curation_writes_are_durable_and_leave_normal_behind() {
+        install_clock();
+        let db = open(Path::new(":memory:"), "").unwrap();
+        let conn = db.lock().unwrap();
+        const NORMAL: i64 = 1;
+        const FULL: i64 = 2;
+        assert_eq!(synchronous(&conn), NORMAL);
+        let seen = durable(&conn, |c| Ok(synchronous(c))).unwrap();
+        assert_eq!(seen, FULL);
+        set_scale(&conn, "k", Some(ScaleMode::Fit)).unwrap();
+        set_hidden(&conn, "k", true).unwrap();
+        assert_eq!(synchronous(&conn), NORMAL);
+        let failed = durable(&conn, |c| {
+            c.execute("INSERT INTO no_such_table VALUES (1)", [])
+        });
+        assert!(failed.is_err());
+        assert_eq!(synchronous(&conn), NORMAL);
+        let row: (i64, String) = conn
+            .query_row(
+                "SELECT hidden, scale_mode FROM curation WHERE key = 'k'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (1, "fit".into()));
+    }
 
     fn asset(conn: &Connection, id: &str, kind: &str, playable: Option<(bool, &str)>) {
         conn.execute(

@@ -379,6 +379,12 @@ fn writer_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
                 clock::elapsed(t)
             );
         }
+        let json = json.transpose().unwrap_or_else(|e| {
+            // The export on disk stays as it was: older, but whole.
+            log::error!("curation export: listing the curation failed: {e}");
+            *lib.export_note.lock().unwrap() = format!("export failed: {e}");
+            None
+        });
         if let Some(json) = json {
             let export = &lib.paths.curation_export;
             stall::at(
@@ -723,6 +729,8 @@ fn publish_stats(lib: &Library, st: &Loop) {
 /// upserted by the provider's id; for the local folder that is the content
 /// hash, so a renamed or moved file only updates `location`. Whatever the
 /// provider no longer lists goes, with its files. Curation is untouched.
+/// One row that won't write fails the whole sync, rolled back: a commit
+/// with it missing would count it as gone.
 fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, String> {
     let kind = provider.kind();
     let mut items = provider.list().map_err(|e| e.to_string())?;
@@ -768,14 +776,15 @@ fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, S
                 } else {
                     changed += 1;
                 }
-                let _ = tx.execute(
+                tx.execute(
                     "UPDATE asset SET width = ?2, height = ?3, taken_at_ms = ?4, location = ?5, file_bytes = ?6,
                        file_mtime_ms = ?7, hash = ?8 WHERE id = ?1",
                     rusqlite::params![id, m.width, m.height, m.taken_at_ms, m.location, bytes, mtime, m.sha1],
-                );
+                )
+                .map_err(|e| format!("updating asset {id}: {e}"))?;
             }
             None => {
-                let _ = tx.execute(
+                tx.execute(
                     "INSERT INTO asset (source_id, remote_id, hash, location, kind, width, height, taken_at_ms,
                        added_at_ms, file_bytes, file_mtime_ms)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -792,18 +801,20 @@ fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, S
                         bytes,
                         mtime
                     ],
-                );
+                )
+                .map_err(|e| format!("adding {}: {e}", m.id))?;
                 added += 1;
             }
         }
     }
     // A focus the provider already knows (none of today's two do in
     // `list`: Immich's faces are fetched lazily, the folder has none).
-    for m in items.iter().filter(|m| m.focus.is_some()) {
-        let _ = tx.execute(
+    for (m, focus) in items.iter().filter_map(|m| Some((m, m.focus?))) {
+        tx.execute(
             "UPDATE asset SET focus_x = ?3, focus_y = ?4, faces_checked = 1 WHERE source_id = ?1 AND remote_id = ?2",
-            rusqlite::params![source, m.id, m.focus.unwrap().centre.0, m.focus.unwrap().centre.1],
-        );
+            rusqlite::params![source, m.id, focus.centre.0, focus.centre.1],
+        )
+        .map_err(|e| format!("focus of {}: {e}", m.id))?;
     }
     let removed = existing.len();
     for (id, _, _, loc) in existing.values() {

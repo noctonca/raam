@@ -81,6 +81,11 @@ fn shelf_pack(
     let mut region_bottom = cursor_y;
     let mut placements = Vec::with_capacity(sizes.len());
     for &(w0, h0) in sizes {
+        // A wider glyph would run off its shelf into the next row's.
+        assert!(
+            w0 + 2 * pad <= ATLAS_WIDTH,
+            "a {w0} px glyph doesn't fit the {ATLAS_WIDTH} px atlas"
+        );
         let w = w0 + pad;
         let h = h0 + pad;
         if cursor_x + w > ATLAS_WIDTH {
@@ -330,5 +335,22 @@ impl FontAtlas {
             }
             pen_x += g.advance;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_glyph_as_wide_as_the_atlas_fits_its_own_shelf() {
+        let (at, _) = shelf_pack(&[(10, 10), (ATLAS_WIDTH - 4, 10)], 0, 2);
+        assert_eq!(at, [(2, 2), (2, 16)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "doesn't fit")]
+    fn a_glyph_wider_than_the_atlas_is_refused() {
+        shelf_pack(&[(ATLAS_WIDTH - 3, 10)], 0, 2);
     }
 }

@@ -96,6 +96,9 @@ impl ClockOverlay {
     /// Builds the four glyph atlases (clock, date row, small text,
     /// weather) and links the overlay's program.
     ///
+    /// # Panics
+    /// If a bundled font fails to parse.
+    ///
     /// # Safety
     /// Requires a current GL context.
     pub unsafe fn new() -> Self {
@@ -379,6 +382,10 @@ const MONTHS: [&str; 12] = [
 ];
 const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+/// The overlay's text for `style` at local time `t`.
+///
+/// # Panics
+/// If `t`'s month or weekday is out of range (a clock bug).
 pub fn content(style: ClockStyle, h24: bool, t: &LocalTime, weather: Option<Weather>) -> Content {
     let time = if h24 {
         format!("{:02}:{:02}", t.hour, t.min)

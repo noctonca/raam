@@ -894,9 +894,8 @@ impl<P: VideoPlayer> Pipeline<P> {
 
     /// e.g. "3_2 · tile 2/3", for the status line.
     pub fn shown_layout(&self) -> String {
-        match self.displayed() {
-            Some(c) if c.video().is_some() => {
-                let v = c.video().unwrap();
+        match self.displayed().map(|c| (c, c.video())) {
+            Some((_, Some(v))) => {
                 let total = v.clip.info.duration_us as f64 / 1e6;
                 match self.video.live_progress() {
                     Some((pos, audio)) if matches!(self.state, State::Idle { .. }) => format!(
@@ -910,8 +909,8 @@ impl<P: VideoPlayer> Pipeline<P> {
                     ),
                 }
             }
-            Some(c) if c.is_single() => "single photo".to_string(),
-            Some(c) => format!(
+            Some((c, None)) if c.is_single() => "single photo".to_string(),
+            Some((c, None)) => format!(
                 "collage {} · tile {}/{}",
                 c.name(),
                 self.selected.unwrap_or(0).min(c.tiles.len() - 1) + 1,
@@ -957,12 +956,10 @@ impl<P: VideoPlayer> Pipeline<P> {
         let before = self.history.len();
         self.history
             .retain(|p| p.assets.iter().all(|a| a.key != key));
-        if self
+        if let Some(r) = self
             .ready
-            .as_ref()
-            .is_some_and(|r| r.plan.assets.iter().any(|a| a.key == key))
+            .take_if(|r| r.plan.assets.iter().any(|a| a.key == key))
         {
-            let r = self.ready.take().unwrap();
             log::info!(
                 "dropping built plan {} (it holds the hidden photo)",
                 r.plan.seq
@@ -1368,12 +1365,10 @@ impl<P: VideoPlayer> Pipeline<P> {
             Some(Skip::Prev(ids)) => Some(ids.clone()),
             _ => None,
         };
-        let matches = self
+        if let Some(incoming) = self
             .ready
-            .as_ref()
-            .is_some_and(|r| want.as_ref().is_none_or(|w| *w == r.plan.ids()));
-        if matches {
-            let incoming = self.ready.take().unwrap();
+            .take_if(|r| want.as_ref().is_none_or(|w| *w == r.plan.ids()))
+        {
             self.skip = None;
             source.consumed();
             // A clip cut short (Next, Prev, a hide): its still becomes the
@@ -1913,6 +1908,11 @@ impl<P: VideoPlayer> Pipeline<P> {
         }
     }
 
+    /// Draws the frame: the current collage, or the transition under way.
+    ///
+    /// # Panics
+    /// If a collage transition reaches its shader without the scratch
+    /// pair (one that can't get it is cut instead, at the top).
     pub fn draw_frame(&mut self) {
         unsafe {
             glBindFramebuffer(GL_FRAMEBUFFER, 0);

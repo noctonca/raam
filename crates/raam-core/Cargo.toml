@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 # A desktop host on a GPU with no core profile (a Raspberry Pi's
 # VideoCore): gl.rs takes the Android GLES2 linkage there.

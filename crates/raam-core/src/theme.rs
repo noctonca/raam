@@ -106,6 +106,9 @@ fn schemes_id() -> egui::Id {
 }
 
 /// The scheme egui is currently drawing with.
+///
+/// # Panics
+/// If `install` hasn't been called on this context.
 pub fn scheme(ui: &Ui) -> Scheme {
     let dark = ui.visuals().dark_mode;
     let s = ui
@@ -117,6 +120,9 @@ pub fn scheme(ui: &Ui) -> Scheme {
 
 /// The scheme for the theme egui draws with, from a Context (for Areas and
 /// Modals, which have no Ui yet).
+///
+/// # Panics
+/// If `install` hasn't been called on this context.
 pub fn scheme_of(ctx: &egui::Context) -> Scheme {
     let s = ctx.data(|d| d.get_temp::<Schemes>(schemes_id()));
     s.map(|s| *s.get(ctx.theme()))

@@ -424,11 +424,15 @@ pub unsafe fn gl_string(name: GlEnum) -> String {
     }
 }
 
-/// Compiles and links a vertex+fragment shader pair, panicking with the
-/// driver's own info log on failure - a bad shader is a build defect, not
-/// something to survive (TigerStyle: crash, don't limp). `label` is included in
-/// the panic message so a bad ported gl-transitions shader is identifiable
+/// Compiles and links a vertex+fragment shader pair.
+///
+/// # Panics
+/// If a stage fails to compile or the program to link, with the driver's
+/// own info log: a bad shader is a build defect, not something to
+/// survive (TigerStyle: crash, don't limp). `label` is included in the
+/// panic message so a bad ported gl-transitions shader is identifiable
 /// immediately from logcat among the many programs the pipeline links.
+/// Also if a source holds a NUL byte.
 ///
 /// # Safety
 /// Requires a current GL context.
@@ -501,8 +505,11 @@ unsafe fn compile(label: &str, kind: GlEnum, src: &str) -> GlUint {
     }
 }
 
-/// An active attribute's location in `program`. A name the linker dropped
-/// or never saw is a build defect, so it panics.
+/// An active attribute's location in `program`.
+///
+/// # Panics
+/// If the linker dropped or never saw `name` (a build defect), or `name`
+/// holds a NUL byte.
 ///
 /// # Safety
 /// Requires a current GL context and a linked `program`.
@@ -518,6 +525,9 @@ pub unsafe fn attrib_loc(program: GlUint, name: &str) -> GlUint {
 /// A uniform's location in `program`, or -1 (which GL ignores) when the
 /// linker dropped it. Call it once per program, at startup: on wasm each
 /// call takes a slot in webgl.rs's uniform table.
+///
+/// # Panics
+/// If `name` holds a NUL byte.
 ///
 /// # Safety
 /// Requires a current GL context and a linked `program`.
@@ -542,7 +552,11 @@ pub struct RenderTarget {
 }
 
 impl RenderTarget {
-    /// For targets made once at startup: a failure there is fatal.
+    /// For targets made once at startup.
+    ///
+    /// # Panics
+    /// If the target can't be made (`alloc`'s error): a failure there is
+    /// fatal.
     ///
     /// # Safety
     /// Requires a current GL context.

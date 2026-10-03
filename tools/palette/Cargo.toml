@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 # Tool-time only: the register's "baked colour table" row keeps this (and
 # its ~20 crates, getrandom included) out of the product builds.

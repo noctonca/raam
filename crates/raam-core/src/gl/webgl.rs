@@ -54,6 +54,9 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
 
 /// Host only, once, before any GL call: the canvas's WebGL1 context
 /// becomes the one every entry point draws with.
+///
+/// # Panics
+/// If a context is already current.
 pub fn make_current(gl: Wgl) {
     STATE.with(|s| {
         let mut s = s.borrow_mut();
@@ -178,6 +181,9 @@ pub unsafe fn glCreateShader(shader_type: GlEnum) -> GlUint {
 }
 
 /// One NUL-terminated string (all the core's callers pass that).
+///
+/// # Panics
+/// If `count` isn't 1.
 pub unsafe fn glShaderSource(
     shader: GlUint,
     count: GlSizei,

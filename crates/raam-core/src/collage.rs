@@ -350,9 +350,11 @@ impl Choice {
     }
 }
 
-/// Frameo's layout pick for the group at the front of `queue`, which
-/// must not be empty (a pick for nothing is a caller bug).
+/// Frameo's layout pick for the group at the front of `queue`.
 /// `rand_below(n)` must return a uniform integer in `0..n`.
+///
+/// # Panics
+/// If `queue` is empty (a pick for nothing is a caller bug).
 pub fn pick(queue: &[Orientation], max: usize, mut rand_below: impl FnMut(u32) -> u32) -> Choice {
     assert!(!queue.is_empty(), "collage pick on an empty queue");
     let mut n = max.min(LARGEST_LAYOUT).min(queue.len());

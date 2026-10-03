@@ -286,6 +286,9 @@ impl FontAtlas {
     /// with each glyph's blurred shadow, packs both into one alpha atlas
     /// and uploads it.
     ///
+    /// # Panics
+    /// If the packed pixels fall short of the atlas size (a packing bug).
+    ///
     /// # Safety
     /// Requires a current GL context (it makes and fills a texture).
     pub unsafe fn build(font: &fontdue::Font, px: f32, shadow: Shadow, extra: Vec<Raster>) -> Self {

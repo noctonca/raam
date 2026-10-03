@@ -1098,6 +1098,7 @@ pub fn slider(
 /// up once there is focus or text, and an indicator line that thickens to
 /// primary on focus. Editing, the cursor and selection are egui's TextEdit,
 /// drawn frameless inside it.
+#[must_use = "call .show(ui): a builder dropped without it draws nothing"]
 pub struct TextField<'a> {
     text: &'a mut String,
     label: &'a str,
@@ -1419,6 +1420,7 @@ pub enum Leading {
     Blank,
 }
 
+#[must_use = "call .show(ui): a builder dropped without it draws nothing"]
 pub struct ListItem<'a> {
     pub leading: Leading,
     pub headline: &'a str,
@@ -2196,6 +2198,7 @@ pub fn top_bar_nav(ui: &mut Ui, nav: char, title: &str, actions: impl FnOnce(&mu
 }
 
 /// One item of a floating toolbar: an icon over its label.
+#[must_use = "call .show(ui): a builder dropped without it draws nothing"]
 pub struct ToolItem<'a> {
     pub icon: char,
     pub label: &'a str,

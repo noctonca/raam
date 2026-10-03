@@ -238,6 +238,7 @@ pub enum Tick {
 /// A short-lived decoder bringing up a clip's first frame for a tile of the
 /// plan being built. The plan bookkeeping (slot, rect, meta) stays with the
 /// slideshow's `Building`.
+#[must_use = "stop() it: a dropped probe leaks its decoder, and no clip opens again"]
 pub struct ProbePlayer<C> {
     clip: C,
     opened: Duration,
@@ -265,6 +266,7 @@ struct Live<C> {
 
 /// A live clip taken back by `finish`, with the frame that was on screen
 /// (if any) for the restill. `stop` it once that is composed.
+#[must_use = "stop() it: a dropped clip leaks its decoder, and no clip opens again"]
 pub struct Finished<C> {
     clip: C,
     pub frame: Option<ClipFrame>,
@@ -335,6 +337,7 @@ impl<P: VideoPlayer> Video<P> {
     }
 
     /// Clips the decoder refused since the last call.
+    #[must_use = "a refused clip not recorded is planned again"]
     pub fn take_unplayable(&mut self) -> Vec<(i64, String)> {
         std::mem::take(&mut self.unplayable)
     }
@@ -507,6 +510,7 @@ impl<P: VideoPlayer> Video<P> {
 
     /// Keeps the playing clip in step: pause, sound, the loop flag, the
     /// first frame's hand-over (play), and its end.
+    #[must_use = "a Finished clip is taken back with `finish`, or it never ends"]
     pub fn tick(&mut self, cue: &LiveCue, paused: bool, looping: bool) -> Tick {
         self.open_live(cue);
         let Some(live) = self.live.as_mut() else {
@@ -561,6 +565,7 @@ impl<P: VideoPlayer> Video<P> {
 
     /// The clip's slide is going (its end, Next, a hide): takes the live
     /// clip back for the restill, its still holding from here.
+    #[must_use = "stop() the clip: a dropped one leaks its decoder"]
     pub fn finish(&mut self) -> Option<Finished<P::Clip>> {
         self.live_wanted = None;
         let mut live = self.live.take()?;
@@ -790,11 +795,11 @@ mod tests {
         assert_eq!(fake.with(|s| s.opens.len()), 1, "only the probe so far");
         assert_eq!(video.deadline(), Some(DECODER_RELEASE_POLL));
         advance(ms(800));
-        video.tick(&cue(&clip), false, false);
+        assert_eq!(video.tick(&cue(&clip), false, false), Tick::Running);
         assert_eq!(fake.with(|s| s.opens.len()), 1);
         fake.with(|s| s.decoders = 0);
         advance(DECODER_RELEASE_POLL);
-        video.tick(&cue(&clip), false, false);
+        assert_eq!(video.tick(&cue(&clip), false, false), Tick::Running);
         assert_eq!(
             fake.with(|s| s.opens.clone()),
             vec![(42, Role::Probe), (42, Role::Live { sound: None })]
@@ -842,14 +847,14 @@ mod tests {
         let clip = clip();
         video.start(&cue(&clip));
         fake.with(|s| s.live_phase = Phase::FirstFrame);
-        video.tick(&cue(&clip), false, true);
+        assert_eq!(video.tick(&cue(&clip), false, true), Tick::Running);
         assert_eq!(fake.with(|s| (s.plays, s.looping)), (0, false));
         assert!(video.animating(true), "a clip not yet played animates");
         advance(AUDIO_PREROLL_WAIT + ms(1));
-        video.tick(&cue(&clip), false, true);
+        assert_eq!(video.tick(&cue(&clip), false, true), Tick::Running);
         assert_eq!(fake.with(|s| s.plays), 1);
         assert!(!video.animating(true), "played and paused holds still");
-        video.tick(&cue(&clip), false, true);
+        assert_eq!(video.tick(&cue(&clip), false, true), Tick::Running);
         assert_eq!(fake.with(|s| (s.plays, s.looping)), (1, true));
 
         let fake = Fake::new();
@@ -859,7 +864,7 @@ mod tests {
             s.live_phase = Phase::FirstFrame;
             s.audio_ready = true;
         });
-        video.tick(&cue(&clip), false, false);
+        assert_eq!(video.tick(&cue(&clip), false, false), Tick::Running);
         assert_eq!(fake.with(|s| s.plays), 1, "pre-rolled: plays at once");
     }
 

@@ -9,6 +9,19 @@
 //! gl/webgl.rs, which implements them over the canvas's context. The
 //! helpers below the entry points are one copy for all three. EGL lives
 //! with the Android host.
+//!
+//! # Safety
+//!
+//! Every GL entry point, here and in webgl.rs, needs the host's context
+//! current on the calling thread; that is the one invariant behind the
+//! crate's plain GL calls, so they carry no note of their own. The types
+//! that own GL objects (`Painter`, `ClockOverlay`, `FontAtlas`,
+//! `TransitionProgram`, `Pipeline`, `RenderTarget`) are made only by an
+//! `unsafe` constructor run under that context, and the host keeps it
+//! current on its render thread for their whole life, so their safe
+//! methods rely on it. A block that does more than pass plain values to
+//! GL (a pointer with a length the driver will read or write, a C string
+//! read back) says why its pointer holds in a `SAFETY:` note.
 use std::ffi::{CStr, c_char, c_void};
 
 pub type GlUint = u32;
@@ -294,6 +307,7 @@ mod desktop {
                 pixels,
             );
             let swizzle = [GL_ZERO, GL_ZERO, GL_ZERO, GL_RED as GlInt];
+            // SAFETY: SWIZZLE_RGBA reads four GLints, and `swizzle` is four.
             glTexParameteriv(target, GL_TEXTURE_SWIZZLE_RGBA, swizzle.as_ptr());
         }
     }
@@ -390,6 +404,8 @@ pub unsafe fn set_linear_clamp() {
     }
 }
 
+/// One of the driver's identification strings (`GL_VENDOR`,
+/// `GL_RENDERER`, `GL_VERSION`), or "?" when it has none.
 ///
 /// # Safety
 /// Requires a current GL context.
@@ -399,6 +415,9 @@ pub unsafe fn gl_string(name: GlEnum) -> String {
         if ptr.is_null() {
             return "?".to_string();
         }
+        // SAFETY: a non-null glGetString answer is a NUL-terminated string
+        // the driver keeps for the context's life (webgl.rs keeps its own
+        // the same way), and it is copied out before returning.
         CStr::from_ptr(ptr as *const c_char)
             .to_string_lossy()
             .into_owned()
@@ -437,6 +456,8 @@ pub unsafe fn link_program(label: &str, vs_src: &str, fs_src: &str) -> GlUint {
             glGetProgramiv(program, GL_INFO_LOG_LENGTH, &mut len);
             let mut buf = vec![0u8; len.max(1) as usize];
             let mut written = 0i32;
+            // SAFETY: `buf` holds at least `len` bytes, the most the driver
+            // writes (log and NUL), and `written` is a valid i32 to fill.
             glGetProgramInfoLog(program, len, &mut written, buf.as_mut_ptr() as *mut c_char);
             panic!(
                 "[{label}] program link failed: {}",
@@ -447,11 +468,18 @@ pub unsafe fn link_program(label: &str, vs_src: &str, fs_src: &str) -> GlUint {
     }
 }
 
+/// Compiles one shader stage, panicking with the driver's log on failure
+/// (see `link_program`).
+///
+/// # Safety
+/// Requires a current GL context.
 unsafe fn compile(label: &str, kind: GlEnum, src: &str) -> GlUint {
     unsafe {
         let shader = glCreateShader(kind);
         let c_src = std::ffi::CString::new(src).unwrap();
         let ptr = c_src.as_ptr();
+        // SAFETY: one NUL-terminated string (the null lengths say so) that
+        // outlives the call; GL copies the source.
         glShaderSource(shader, 1, &ptr, std::ptr::null());
         glCompileShader(shader);
         let mut status = 0;
@@ -461,6 +489,8 @@ unsafe fn compile(label: &str, kind: GlEnum, src: &str) -> GlUint {
             glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &mut len);
             let mut buf = vec![0u8; len.max(1) as usize];
             let mut written = 0i32;
+            // SAFETY: `buf` holds at least `len` bytes, the most the driver
+            // writes (log and NUL), and `written` is a valid i32 to fill.
             glGetShaderInfoLog(shader, len, &mut written, buf.as_mut_ptr() as *mut c_char);
             panic!(
                 "[{label}] shader compile failed (type 0x{kind:x}): {}\n--- source ---\n{src}",
@@ -471,6 +501,8 @@ unsafe fn compile(label: &str, kind: GlEnum, src: &str) -> GlUint {
     }
 }
 
+/// An active attribute's location in `program`. A name the linker dropped
+/// or never saw is a build defect, so it panics.
 ///
 /// # Safety
 /// Requires a current GL context and a linked `program`.
@@ -483,6 +515,9 @@ pub unsafe fn attrib_loc(program: GlUint, name: &str) -> GlUint {
     }
 }
 
+/// A uniform's location in `program`, or -1 (which GL ignores) when the
+/// linker dropped it. Call it once per program, at startup: on wasm each
+/// call takes a slot in webgl.rs's uniform table.
 ///
 /// # Safety
 /// Requires a current GL context and a linked `program`.
@@ -587,6 +622,8 @@ impl RenderTarget {
         }
     }
 
+    /// Makes this target the draw framebuffer, with the viewport over all
+    /// of it.
     ///
     /// # Safety
     /// Requires a current GL context.

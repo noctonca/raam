@@ -12,7 +12,7 @@
 //! only when the displayed text changes (a minute tick, a weather update,
 //! a setting); every other frame is just the bind plus 2 draw calls per
 //! atlas.
-use crate::atlas::{FontAtlas, Shadow};
+use crate::atlas::{FontAtlas, Raster, Shadow};
 use crate::clock;
 use crate::gl::*;
 use crate::weather_icons;
@@ -93,6 +93,8 @@ pub struct ClockOverlay {
 }
 
 impl ClockOverlay {
+    /// Builds the four glyph atlases (clock, date row, small text,
+    /// weather) and links the overlay's program.
     ///
     /// # Safety
     /// Requires a current GL context.
@@ -106,7 +108,11 @@ impl ClockOverlay {
         let icon_set = |px: f32, scale: f32, gap: f32| {
             weather_icons::all((px * scale).round() as usize, px * 0.711, gap)
         };
-        let clock = FontAtlas::build(
+        // SAFETY: this constructor's own contract: the context is current.
+        let atlas = |font: &fontdue::Font, px: f32, shadow: Shadow, extra: Vec<Raster>| unsafe {
+            FontAtlas::build(font, px, shadow, extra)
+        };
+        let clock = atlas(
             &bold,
             80.0,
             Shadow {
@@ -116,7 +122,7 @@ impl ClockOverlay {
             },
             Vec::new(),
         );
-        let date_row = FontAtlas::build(
+        let date_row = atlas(
             &bold,
             40.0,
             Shadow {
@@ -126,7 +132,7 @@ impl ClockOverlay {
             },
             icon_set(40.0, 1.15, 6.0),
         );
-        let small = FontAtlas::build(
+        let small = atlas(
             &regular,
             26.0,
             Shadow {
@@ -136,7 +142,7 @@ impl ClockOverlay {
             },
             Vec::new(),
         );
-        let weather = FontAtlas::build(
+        let weather = atlas(
             &regular,
             32.0,
             Shadow {
@@ -229,6 +235,8 @@ impl ClockOverlay {
         drop(lines);
         self.draws = draws;
         if !verts.is_empty() {
+            // SAFETY: the size is `verts`' length in bytes (f32s), and it
+            // outlives the call; GL copies the data.
             unsafe {
                 glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
                 glBufferData(
@@ -327,6 +335,8 @@ impl ClockOverlay {
             for d in &self.draws {
                 glBindTexture(GL_TEXTURE_2D, d.texture);
                 glUniform4f(self.u_color, d.color.0, d.color.1, d.color.2, d.color.3);
+                // SAFETY: `draws` and the VBO are rebuilt together, so each
+                // range is within the vertices last uploaded.
                 glDrawArrays(GL_TRIANGLES, d.first, d.count);
             }
             glDisableVertexAttribArray(self.a_pos);

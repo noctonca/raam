@@ -46,6 +46,7 @@ pub fn local_now() -> (u32, i64) {
 /// Time from `now_sod` (seconds after midnight) to the next `target_min`,
 /// always in the future (a full day if it is exactly now).
 pub fn until(target_min: u32, now_sod: u32) -> Duration {
+    debug_assert!(target_min < raam_model::limits::MINUTES_PER_DAY);
     let target = target_min * 60;
     let secs = (target + 86_400 - now_sod) % 86_400;
     Duration::from_secs(if secs == 0 { 86_400 } else { secs as u64 })

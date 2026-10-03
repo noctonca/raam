@@ -57,7 +57,7 @@ impl SlotKind {
     fn constrained(self) -> u32 {
         match self {
             SlotKind::Any => 0,
-            _ => 1,
+            SlotKind::Landscape | SlotKind::Portrait => 1,
         }
     }
 }

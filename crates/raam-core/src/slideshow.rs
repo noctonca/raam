@@ -988,13 +988,13 @@ impl<P: VideoPlayer> Pipeline<P> {
 
     /// Whether an idle tile on screen no longer matches its settings.
     pub fn recompose_pending(&self) -> bool {
-        match (&self.state, &self.current) {
-            (State::Idle { .. }, Some(c)) => c
+        matches!(
+            (&self.state, &self.current),
+            (State::Idle { .. }, Some(c)) if c
                 .tiles
                 .iter()
-                .any(|t| t.video.is_none() && t.comp != self.wanted_comp(&t.meta.key)),
-            _ => false,
-        }
+                .any(|t| t.video.is_none() && t.comp != self.wanted_comp(&t.meta.key))
+        )
     }
 
     pub fn is_animating(&self) -> bool {
@@ -1624,12 +1624,11 @@ impl<P: VideoPlayer> Pipeline<P> {
     fn tick_live(&mut self) {
         let paused = self.video_paused();
         let looping = self.settings.video_playback == VideoPlayback::Loop
-            && match &self.state {
-                State::Idle { dwell_start } => {
-                    self.clock.now().saturating_sub(*dwell_start) < self.settings.dwell
-                }
-                _ => false,
-            };
+            && matches!(
+                &self.state,
+                State::Idle { dwell_start }
+                    if self.clock.now().saturating_sub(*dwell_start) < self.settings.dwell
+            );
         let cue = Self::live_cue(&self.current, &self.settings);
         if self.video.tick(&cue, paused, looping) == Tick::Finished {
             self.finish_live();
@@ -1921,12 +1920,11 @@ impl<P: VideoPlayer> Pipeline<P> {
             glClearColor(0.05, 0.06, 0.09, 1.0);
             glClear(GL_COLOR_BUFFER_BIT);
         }
-        let needs_scratch = match (&self.state, &self.current) {
-            (State::Transitioning { incoming, .. }, Some(c)) => {
-                !(c.is_single() && incoming.is_single())
-            }
-            _ => false,
-        };
+        let needs_scratch = matches!(
+            (&self.state, &self.current),
+            (State::Transitioning { incoming, .. }, Some(c))
+                if !(c.is_single() && incoming.is_single())
+        );
         // Without its scratch pair (GPU out of memory) a collage transition
         // becomes a cut to the incoming collage.
         let mut cut = false;

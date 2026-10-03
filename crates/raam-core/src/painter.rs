@@ -189,48 +189,14 @@ impl Painter {
         let mut verts: Vec<GpuVertex> = Vec::new();
         let mut indices: Vec<u16> = Vec::new();
         self.cmds.clear();
-        for prim in primitives {
-            let egui::epaint::Primitive::Mesh(mesh) = &prim.primitive else {
-                continue;
-            };
-            if mesh.indices.is_empty() {
-                continue;
-            }
-            if mesh.vertices.len() > u16::MAX as usize {
-                log::warn!(
-                    "egui mesh has {} vertices (> u16::MAX), skipping",
-                    mesh.vertices.len()
-                );
-                continue;
-            }
-            let clip = egui::Rect::from_min_max(
-                (prim.clip_rect.min.to_vec2() * ppp).to_pos2(),
-                (prim.clip_rect.max.to_vec2() * ppp).to_pos2(),
-            );
-            let x = clip.min.x.max(0.0).floor() as i32;
-            let w = (clip.max.x.min(screen_w as f32) - clip.min.x.max(0.0))
-                .max(0.0)
-                .ceil() as i32;
-            let h = (clip.max.y.min(screen_h as f32) - clip.min.y.max(0.0))
-                .max(0.0)
-                .ceil() as i32;
-            let y_gl = (screen_h as f32 - clip.max.y.min(screen_h as f32))
-                .max(0.0)
-                .floor() as i32;
-            self.cmds.push(DrawCmd {
-                texture: mesh.texture_id,
-                scissor: (x, y_gl, w, h),
-                vert_byte_offset: verts.len() * std::mem::size_of::<GpuVertex>(),
-                idx_byte_offset: indices.len() * 2,
-                idx_count: mesh.indices.len() as i32,
-            });
-            verts.extend(mesh.vertices.iter().map(|v| GpuVertex {
-                pos: [v.pos.x, v.pos.y],
-                uv: [v.uv.x, v.uv.y],
-                color: v.color.to_array(),
-            }));
-            indices.extend(mesh.indices.iter().map(|&i| i as u16));
-        }
+        tessellated(
+            primitives,
+            ppp,
+            (screen_w, screen_h),
+            &mut verts,
+            &mut indices,
+            &mut self.cmds,
+        );
         unsafe {
             glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
             glBufferData(
@@ -326,6 +292,68 @@ impl Painter {
     }
 }
 
+/// The CPU half of `upload`: a frame's meshes as one vertex and one index
+/// list plus the draw list over them. GLES2 has only 16-bit indices, so a
+/// mesh past `u16::MAX` vertices (a long scrolled list, say) is split into
+/// parts that fit, the way epaint suggests, instead of being dropped.
+fn tessellated(
+    primitives: &[egui::ClippedPrimitive],
+    ppp: f32,
+    (screen_w, screen_h): (i32, i32),
+    verts: &mut Vec<GpuVertex>,
+    indices: &mut Vec<u16>,
+    cmds: &mut Vec<DrawCmd>,
+) {
+    for prim in primitives {
+        let egui::epaint::Primitive::Mesh(mesh) = &prim.primitive else {
+            continue;
+        };
+        if mesh.indices.is_empty() {
+            continue;
+        }
+        let clip = egui::Rect::from_min_max(
+            (prim.clip_rect.min.to_vec2() * ppp).to_pos2(),
+            (prim.clip_rect.max.to_vec2() * ppp).to_pos2(),
+        );
+        let x = clip.min.x.max(0.0).floor() as i32;
+        let w = (clip.max.x.min(screen_w as f32) - clip.min.x.max(0.0))
+            .max(0.0)
+            .ceil() as i32;
+        let h = (clip.max.y.min(screen_h as f32) - clip.min.y.max(0.0))
+            .max(0.0)
+            .ceil() as i32;
+        let y_gl = (screen_h as f32 - clip.max.y.min(screen_h as f32))
+            .max(0.0)
+            .floor() as i32;
+        let mut push = |vertices: &[egui::epaint::Vertex], part: &mut dyn Iterator<Item = u16>| {
+            let idx_start = indices.len();
+            let vert_byte_offset = verts.len() * std::mem::size_of::<GpuVertex>();
+            verts.extend(vertices.iter().map(|v| GpuVertex {
+                pos: [v.pos.x, v.pos.y],
+                uv: [v.uv.x, v.uv.y],
+                color: v.color.to_array(),
+            }));
+            indices.extend(part);
+            cmds.push(DrawCmd {
+                texture: mesh.texture_id,
+                scissor: (x, y_gl, w, h),
+                vert_byte_offset,
+                idx_byte_offset: idx_start * 2,
+                idx_count: i32::try_from(indices.len() - idx_start)
+                    .expect("a 16-bit part's indices fit i32"),
+            });
+        };
+        // epaint's own bound for one 16-bit part.
+        if mesh.vertices.len() <= usize::from(u16::MAX) {
+            push(&mesh.vertices, &mut mesh.indices.iter().map(|&i| i as u16));
+        } else {
+            for part in mesh.clone().split_to_u16() {
+                push(&part.vertices, &mut part.indices.into_iter());
+            }
+        }
+    }
+}
+
 fn image_to_rgba_bytes(image: &egui::ImageData) -> Vec<u8> {
     match image {
         egui::ImageData::Color(color_image) => color_image
@@ -333,5 +361,72 @@ fn image_to_rgba_bytes(image: &egui::ImageData) -> Vec<u8> {
             .iter()
             .flat_map(|c| c.to_array())
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::epaint::{Mesh, Primitive, Vertex};
+
+    /// A strip of separate triangles, `tris` of them, so every part split
+    /// off is a whole number of triangles.
+    fn mesh(tris: u32) -> egui::ClippedPrimitive {
+        let mut m = Mesh::default();
+        for i in 0..tris * 3 {
+            m.vertices.push(Vertex {
+                pos: egui::pos2(i as f32, 0.0),
+                uv: egui::Pos2::ZERO,
+                color: egui::Color32::WHITE,
+            });
+            m.indices.push(i);
+        }
+        egui::ClippedPrimitive {
+            clip_rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 480.0)),
+            primitive: Primitive::Mesh(m),
+        }
+    }
+
+    fn tessellate(prims: &[egui::ClippedPrimitive]) -> (Vec<GpuVertex>, Vec<u16>, Vec<DrawCmd>) {
+        let (mut v, mut i, mut c) = (Vec::new(), Vec::new(), Vec::new());
+        tessellated(prims, 1.0, (800, 480), &mut v, &mut i, &mut c);
+        (v, i, c)
+    }
+
+    #[test]
+    fn a_mesh_past_u16_vertices_is_split_not_dropped() {
+        let tris = 30_000; // 90,000 vertices
+        let (verts, indices, cmds) = tessellate(&[mesh(tris)]);
+        assert!(
+            cmds.len() > 1,
+            "the mesh should be split, got {} parts",
+            cmds.len()
+        );
+        let drawn: i32 = cmds.iter().map(|c| c.idx_count).sum();
+        assert_eq!(drawn as u32, tris * 3, "every triangle is drawn");
+        let vsize = std::mem::size_of::<GpuVertex>();
+        let mut ends: Vec<usize> = cmds.iter().map(|c| c.vert_byte_offset / vsize).collect();
+        ends.push(verts.len());
+        for (k, cmd) in cmds.iter().enumerate() {
+            let start = cmd.idx_byte_offset / 2;
+            let part = &indices[start..start + cmd.idx_count as usize];
+            let len = ends[k + 1] - ends[k];
+            assert!(
+                part.iter().all(|&i| usize::from(i) < len),
+                "part {k} indexes past its vertices"
+            );
+        }
+    }
+
+    #[test]
+    fn a_small_mesh_stays_one_part() {
+        let (verts, indices, cmds) = tessellate(&[mesh(2), mesh(1)]);
+        assert_eq!(cmds.len(), 2);
+        assert_eq!((verts.len(), indices.len()), (9, 9));
+        assert_eq!(
+            cmds[1].vert_byte_offset,
+            6 * std::mem::size_of::<GpuVertex>()
+        );
+        assert_eq!((cmds[1].idx_byte_offset, cmds[1].idx_count), (12, 3));
     }
 }

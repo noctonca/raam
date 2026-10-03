@@ -35,8 +35,8 @@ use crate::stall::{self, Site, Writer};
 use crate::{Host, Paths};
 use raam_core::{clock, schedule};
 use raam_model::limits::{
-    DEFAULT_CAP_MB, LRU_BATCH_ENFORCE, LRU_BATCH_STORE, PREVIEW_SHORT_SIDE, SCAN_EVERY, SYNC_EVERY,
-    SYNC_RETRY,
+    ALBUM_PICK_DEBOUNCE, CAP_CHOICES_MB, DEFAULT_CAP_MB, LIBRARY_IDLE_WAIT, LRU_BATCH_ENFORCE,
+    LRU_BATCH_STORE, PREVIEW_SHORT_SIDE, SCAN_EVERY, SYNC_EVERY, SYNC_RETRY,
 };
 use raam_model::{MediaRef, ProviderError, ScaleMode, SourceKind, Stats};
 use std::path::{Path, PathBuf};
@@ -203,6 +203,11 @@ impl Library {
     }
 }
 
+const MIB: u64 = 1024 * 1024;
+/// The free space the panel shows moves in these steps, so it doesn't
+/// redraw for every block written.
+const FREE_SPACE_STEP: u64 = 10 * MIB;
+
 pub fn spawn(db: Db, paths: Paths, cap_mb: u32, host: Host) -> Arc<Library> {
     let (writer_tx, writer_rx) = std::sync::mpsc::channel();
     let (library_tx, library_rx) = std::sync::mpsc::channel();
@@ -229,7 +234,7 @@ pub fn spawn(db: Db, paths: Paths, cap_mb: u32, host: Host) -> Arc<Library> {
         online: AtomicBool::new(false),
         immich_on: AtomicBool::new(immich_row.enabled),
         local_on: AtomicBool::new(local_row.enabled),
-        cap_bytes: AtomicU64::new(cap_mb as u64 * 1_048_576),
+        cap_bytes: AtomicU64::new(u64::from(cap_mb) * MIB),
         config: Mutex::new(immich::Config {
             url: immich_row.base_url,
             key,
@@ -255,11 +260,13 @@ pub fn spawn(db: Db, paths: Paths, cap_mb: u32, host: Host) -> Arc<Library> {
 
 /// The first-run cap: 1 GB, or a quarter of the free space if that is less.
 pub fn default_cap_mb(files_dir: &Path) -> u32 {
-    let free_mb = free_bytes(files_dir) / 1_048_576;
+    let free_mb = free_bytes(files_dir) / MIB;
     if free_mb == 0 {
         DEFAULT_CAP_MB
     } else {
-        DEFAULT_CAP_MB.min((free_mb / 4) as u32).max(50)
+        // Never under the smallest cap the picker offers.
+        let quarter = u32::try_from(free_mb / 4).unwrap_or(u32::MAX);
+        DEFAULT_CAP_MB.min(quarter).max(CAP_CHOICES_MB[0])
     }
 }
 
@@ -509,7 +516,7 @@ fn library_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
             log::info!("library: debug cap override {test_cap:?} MB");
             st.test_cap = test_cap;
             lib.cap_bytes.store(
-                test_cap.map_or(st.setting_cap, |mb| mb as u64 * 1_048_576),
+                test_cap.map_or(st.setting_cap, |mb| u64::from(mb) * MIB),
                 Ordering::Relaxed,
             );
             enforce_cap(&lib);
@@ -626,7 +633,7 @@ fn library_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
             st.next_scan
                 .min(st.next_sync)
                 .saturating_sub(clock::now())
-                .min(Duration::from_secs(5))
+                .min(LIBRARY_IDLE_WAIT)
         };
         let first = match rx.recv_timeout(wait) {
             Ok(c) => Some(c),
@@ -646,7 +653,7 @@ fn hm_now() -> String {
 fn handle(lib: &Library, st: &mut Loop, cmd: Cmd) {
     match cmd {
         Cmd::SetCap(mb) => {
-            st.setting_cap = mb as u64 * 1_048_576;
+            st.setting_cap = u64::from(mb) * MIB;
             if st.test_cap.is_none() {
                 lib.cap_bytes.store(st.setting_cap, Ordering::Relaxed);
             }
@@ -688,9 +695,8 @@ fn handle(lib: &Library, st: &mut Loop, cmd: Cmd) {
         }
         Cmd::Refresh => st.idle = false,
         Cmd::AlbumsChanged => {
-            // Another tap within 2 s pushes it back, so a run of taps is
-            // one sync.
-            st.next_sync = clock::now() + Duration::from_secs(2);
+            // Another tap meanwhile pushes it back.
+            st.next_sync = clock::now() + ALBUM_PICK_DEBOUNCE;
             st.idle = false;
             st.failed.clear();
         }
@@ -727,8 +733,7 @@ fn publish_stats(lib: &Library, st: &Loop) {
         local_note: st.local_note.clone(),
         immich_note: st.immich_note.clone(),
         prefetch_note: st.prefetch_note.clone(),
-        // Rounded so the panel doesn't redraw for every block written.
-        free_bytes: free_bytes(&lib.cache_dir) / 10_485_760 * 10_485_760,
+        free_bytes: free_bytes(&lib.cache_dir) / FREE_SPACE_STEP * FREE_SPACE_STEP,
         hidden,
         export_note: lib.export_note.lock().unwrap().clone(),
         albums,
@@ -917,7 +922,7 @@ fn materialise_one(lib: &Library, st: &mut Loop) -> bool {
                 if st.prefetch_note != "stopped at the cap" {
                     log::info!(
                         "library: prefetch stopped at the {} MB cap",
-                        lib.cap_bytes() / 1_048_576
+                        lib.cap_bytes() / MIB
                     );
                 }
                 st.prefetch_note = "stopped at the cap".into();
@@ -999,7 +1004,7 @@ fn materialise_one(lib: &Library, st: &mut Loop) -> bool {
                 if st.prefetch_note != "stopped at the cap" {
                     log::info!(
                         "library: prefetch stopped at the {} MB cap",
-                        lib.cap_bytes() / 1_048_576
+                        lib.cap_bytes() / MIB
                     );
                 }
                 st.prefetch_note = "stopped at the cap".into();
@@ -1215,7 +1220,7 @@ fn enforce_cap(lib: &Library) {
     if dropped > 0 {
         log::info!(
             "library: {dropped} previews evicted to fit the {} MB cap",
-            cap / 1_048_576
+            cap / MIB as i64
         );
         lib.bump();
     }

@@ -16,6 +16,7 @@
 use crate::immich;
 use raam_core::clock;
 use raam_core::seams::MediaProbe;
+use raam_model::limits;
 use raam_model::{Focus, MediaKind, MediaRef, ProviderError, SourceKind};
 use std::collections::HashMap;
 use std::io::Read;
@@ -240,7 +241,7 @@ impl Provider for LocalFolder {
                 if granted { "given" } else { "refused" }
             );
             // The remount after a grant lands asynchronously.
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            std::thread::sleep(limits::STORAGE_GRANT_SETTLE);
             if !dir.is_dir() {
                 match std::fs::create_dir_all(dir) {
                     Ok(()) => log::info!("local: created {}", dir.display()),
@@ -333,7 +334,7 @@ impl Provider for LocalFolder {
 fn sha1_of_file(path: &str) -> Result<String, String> {
     let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut ctx = ring::digest::Context::new(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY);
-    let mut buf = vec![0u8; 64 * 1024];
+    let mut buf = vec![0u8; limits::HASH_BUFFER_BYTES];
     loop {
         let n = file.read(&mut buf).map_err(|e| e.to_string())?;
         if n == 0 {

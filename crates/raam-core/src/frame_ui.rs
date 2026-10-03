@@ -893,7 +893,7 @@ const NONE: &str = "—";
 
 /// 10966 as "10,966".
 fn count(n: i64) -> String {
-    let s = n.abs().to_string();
+    let s = n.unsigned_abs().to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
         if i > 0 && (s.len() - i).is_multiple_of(3) {
@@ -3162,5 +3162,174 @@ mod tests {
         }
         assert!(preset("menu-bogus").is_none());
         assert!(preset("set-photos-empty-full").is_none());
+    }
+
+    #[test]
+    fn a_typed_url_gets_a_scheme_and_loses_its_trailing_slash() {
+        let cases = [
+            ("immich.local:2283", Some("http://immich.local:2283")),
+            ("  immich.local:2283/ ", Some("http://immich.local:2283")),
+            (
+                "https://photos.example.org/",
+                Some("https://photos.example.org"),
+            ),
+            ("http://10.0.0.2:2283", Some("http://10.0.0.2:2283")),
+            ("", None),
+            ("   ", None),
+            ("immich local", None),
+        ];
+        for (typed, want) in cases {
+            assert_eq!(normalise_url(typed).as_deref(), want, "{typed:?}");
+        }
+    }
+
+    #[test]
+    fn counts_are_grouped_in_thousands() {
+        let cases = [
+            (0, "0"),
+            (7, "7"),
+            (999, "999"),
+            (1_000, "1,000"),
+            (10_966, "10,966"),
+            (1_234_567, "1,234,567"),
+            (-1_234, "-1,234"),
+            (i64::MIN, "-9,223,372,036,854,775,808"),
+        ];
+        for (n, want) in cases {
+            assert_eq!(count(n), want, "{n}");
+        }
+    }
+
+    #[test]
+    fn the_interval_steps_by_seconds_then_by_fives() {
+        let (lo, hi) = INTERVAL_RANGE_SECS;
+        let cases = [
+            (10.0, 1, 11.0),
+            (29.0, 1, 30.0),
+            (30.0, 1, 35.0),
+            (32.0, 1, 35.0),
+            (35.0, -1, 30.0),
+            (32.0, -1, 30.0),
+            (30.0, -1, 29.0),
+            (hi, 1, hi),
+            (lo, -1, lo),
+        ];
+        for (v, dir, want) in cases {
+            assert_eq!(interval_step(v, dir), want, "{v} {dir:+}");
+        }
+    }
+
+    /// Its doc's promise: from any value the picker can reach, one end of
+    /// the range is at most 23 taps away.
+    #[test]
+    fn no_interval_is_more_than_23_taps_from_an_end() {
+        let (lo, hi) = INTERVAL_RANGE_SECS;
+        let taps = |mut v: f32, dir: i32, end: f32| {
+            let mut n = 0;
+            while v != end {
+                v = interval_step(v, dir);
+                n += 1;
+                assert!(n < 1000, "never reached {end}");
+            }
+            n
+        };
+        let mut v = lo;
+        loop {
+            let nearest = taps(v, -1, lo).min(taps(v, 1, hi));
+            assert!(nearest <= 23, "{v} s is {nearest} taps from an end");
+            if v == hi {
+                break;
+            }
+            v = interval_step(v, 1);
+        }
+    }
+
+    #[test]
+    fn the_cache_fits_its_cap_over_the_average_preview() {
+        let mut lib = sample_stats();
+        lib.cap_bytes = 300 * 1024 * 1000;
+        lib.immich_cached = 0;
+        lib.cache_bytes = 0;
+        // Nothing cached yet: about 300 KB a preview.
+        assert_eq!(cache_fits(&lib), 1000);
+        lib.immich_cached = 10;
+        lib.cache_bytes = 10 * 600 * 1024;
+        assert_eq!(cache_fits(&lib), 500);
+        // A cache of empty files still divides.
+        lib.cache_bytes = 0;
+        assert_eq!(cache_fits(&lib), lib.cap_bytes);
+    }
+
+    #[test]
+    fn the_status_line_says_what_shows_or_what_to_fix() {
+        let line = |name: &str| status_line(&preset(name).expect(name));
+        assert_eq!(
+            line("menu"),
+            "Digital Frame + 2 more  ·  417 photos  ·  Lisbon 18°C  ·  sleeps at 23:00"
+        );
+        assert_eq!(
+            line("menu-empty"),
+            "No photos yet  ·  add a server in Settings  ·  sleeps at 23:00"
+        );
+        assert_eq!(
+            line("menu-nopick"),
+            "On-device folder  ·  6 photos  ·  Lisbon 18°C  ·  sleeps at 23:00"
+        );
+
+        let mut st = preset("menu").expect("menu");
+        st.status.online = false;
+        st.settings.sleep_enabled = false;
+        assert_eq!(
+            status_line(&st),
+            "Digital Frame + 2 more  ·  417 photos  ·  offline: saved photos only  ·  Lisbon 18°C"
+        );
+
+        let mut st = preset("menu-nopick").expect("menu-nopick");
+        st.settings.local_enabled = false;
+        assert_eq!(
+            status_line(&st),
+            "No photos yet  ·  pick albums in Settings  ·  Lisbon 18°C  ·  sleeps at 23:00"
+        );
+    }
+
+    #[test]
+    fn the_albums_note_names_the_worst_problem() {
+        let st = preset("set-photos").expect("set-photos");
+        assert_eq!(
+            albums_problem(&st, true).as_deref(),
+            Some("“Iceland” is not on the server any more, so it plays nothing.")
+        );
+        // The album picker says it on the album's own row instead.
+        assert_eq!(albums_problem(&st, false), None);
+
+        let mut st = preset("set-photos").expect("set-photos");
+        let other = st
+            .library
+            .albums
+            .iter_mut()
+            .find(|a| a.selected && !a.missing)
+            .expect("a picked album");
+        other.missing = true;
+        let note = albums_problem(&st, true).expect("a note");
+        assert!(note.ends_with("and 1 more are not on the server any more, so they play nothing."));
+
+        let st = preset("set-photos-nopick").expect("set-photos-nopick");
+        assert_eq!(
+            albums_problem(&st, true).as_deref(),
+            Some("No album picked, so Immich adds no photos.")
+        );
+
+        let st = preset("set-photos-full").expect("set-photos-full");
+        assert_eq!(
+            albums_problem(&st, false).as_deref(),
+            Some(
+                "The picked albums hold 11,379 photos and about 3,413 fit in the cache: \
+                 the rest play only while the server can be reached."
+            )
+        );
+
+        // No albums at all (a first run): nothing to say yet.
+        let st = preset("set-photos-empty").expect("set-photos-empty");
+        assert_eq!(albums_problem(&st, true), None);
     }
 }

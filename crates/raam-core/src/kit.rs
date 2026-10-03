@@ -930,6 +930,8 @@ pub fn slider(
     // so the end values sit on the dots in the pills' rounded ends.
     let x0 = rect.left() + TRACK / 2.0;
     let x1 = rect.right() - TRACK / 2.0;
+    // A zero step would snap every value to NaN (and a time to 00:00).
+    debug_assert!(step.is_none_or(|st| st > 0.0), "slider step {step:?}");
     let snap = |v: f32| {
         let v = step.map_or(v, |st| lo + ((v - lo) / st).round() * st);
         v.clamp(lo, hi)
@@ -2662,6 +2664,20 @@ mod tests {
 
     fn ring_of(r: Rect) -> Rect {
         r.expand(RING_GAP + RING)
+    }
+
+    #[test]
+    fn minutes_after_midnight_read_as_hh_mm() {
+        let cases = [
+            (0, "00:00"),
+            (5, "00:05"),
+            (60, "01:00"),
+            (1380, "23:00"),
+            (1439, "23:59"),
+        ];
+        for (min, want) in cases {
+            assert_eq!(fmt_hm(min), want, "{min}");
+        }
     }
 
     #[test]

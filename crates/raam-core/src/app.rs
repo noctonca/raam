@@ -897,6 +897,19 @@ impl App {
                     self.saved_cap = self.state.settings.cache_cap_mb;
                     out.effects.push(Effect::SetCap(self.saved_cap));
                 }
+                // A time changed in Settings while a debug override holds it
+                // is the user's: it becomes the one saved, and the one the
+                // override's end puts back.
+                if let Some(v) = self.overrides.sleep
+                    && self.state.settings.sleep_min != v
+                {
+                    self.schedule_base.0 = self.state.settings.sleep_min;
+                }
+                if let Some(v) = self.overrides.wake
+                    && self.state.settings.wake_min != v
+                {
+                    self.schedule_base.1 = self.state.settings.wake_min;
+                }
                 let rows = store::settings_rows(&self.state.settings);
                 let sleep = (
                     self.state.settings.sleep_enabled,
@@ -2220,6 +2233,33 @@ mod tests {
         rig.frame(&[]);
         assert_eq!(rig.app.state.settings.sleep_min, 23 * 60);
         assert_eq!(rig.app.state.settings.wake_min, 5 * 60);
+    }
+
+    #[test]
+    fn a_time_changed_under_a_debug_override_is_kept() {
+        let mut rig = Rig::new(Some(FakePower::default()));
+        rig.app.state.settings.sleep_enabled = true;
+        rig.app.state.settings.sleep_min = 23 * 60;
+        rig.app.state.settings.wake_min = 5 * 60;
+        set_wall_hm(12, 0);
+        rig.frame(&[]);
+        rig.ov.sleep = Some(13 * 60);
+        rig.frame(&[]);
+        // The user moves the sleep time in Settings while the test runs.
+        rig.tap(100.0, 100.0);
+        rig.app.state.settings.sleep_min = 22 * 60;
+        rig.frame(&[]);
+        advance(SAVE_DEBOUNCE);
+        let out = rig.frame(&[]);
+        let sleep = out.effects.iter().find_map(|e| match e {
+            Effect::SaveSettings { sleep, .. } => Some(*sleep),
+            _ => None,
+        });
+        assert_eq!(sleep, Some((true, 22 * 60, 5 * 60)));
+        // The override's end keeps the edit, not the time before it.
+        rig.ov = Overrides::default();
+        rig.frame(&[]);
+        assert_eq!(rig.app.state.settings.sleep_min, 22 * 60);
     }
 
     /// Settings → Connectivity → Wi-Fi networks, on a rig with a network

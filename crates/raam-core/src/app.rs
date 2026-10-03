@@ -685,6 +685,9 @@ impl App {
         if self.clock_inputs != Some(clock_inputs) {
             self.clock_inputs = Some(clock_inputs);
             let (city, current) = weather.map_or((None, None), |w| w.snapshot());
+            // A reading with no number (NaN from a bad answer) counts as
+            // none: "0°" or "NaN°C" would be a made-up temperature.
+            let current = current.filter(|c| c.temp_c.is_finite());
             let w = current.map(|c| {
                 let (description, icon) = weather_icons::describe(c.code, c.is_day);
                 overlay::Weather {
@@ -1353,13 +1356,17 @@ mod tests {
         }
     }
 
-    struct FakeWeather;
+    #[derive(Default)]
+    struct FakeWeather {
+        city: Option<String>,
+        now: Option<WeatherNow>,
+    }
     impl WeatherInfo for FakeWeather {
         fn version(&self) -> u64 {
             1
         }
         fn snapshot(&self) -> (Option<String>, Option<WeatherNow>) {
-            (None, None)
+            (self.city.clone(), self.now)
         }
     }
 
@@ -1462,7 +1469,7 @@ mod tests {
                 show: FakeShow::new(),
                 source: FakeSource,
                 lib: FakeLib,
-                weather: Some(FakeWeather),
+                weather: Some(FakeWeather::default()),
                 power,
                 net: None,
                 ov: Overrides::default(),
@@ -1568,6 +1575,23 @@ mod tests {
         assert_eq!(rig.app.state.status.weather, "");
         // The Weather switch greys out.
         assert!(!rig.app.state.has_weather);
+    }
+
+    #[test]
+    fn a_temperature_that_isnt_a_number_shows_as_pending() {
+        let mut rig = Rig::new(None);
+        rig.app.state.settings.weather_enabled = true;
+        rig.weather = Some(FakeWeather {
+            city: Some("Paris".to_string()),
+            now: Some(WeatherNow {
+                temp_c: f64::NAN,
+                code: 0,
+                is_day: true,
+            }),
+        });
+        rig.tap(640.0, 400.0);
+        assert!(rig.app.overlay_open());
+        assert_eq!(rig.app.state.status.weather, "Paris, weather pending");
     }
 
     /// The `SetWeather` effects a pass sent.

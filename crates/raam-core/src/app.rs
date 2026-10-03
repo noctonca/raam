@@ -102,6 +102,7 @@ pub trait Slideshow {
     fn update(&mut self, source: &dyn TileSource);
     fn request_next(&mut self);
     fn request_prev(&mut self, source: &dyn TileSource);
+    #[must_use = "save the new scale, or it is lost at the next restart"]
     fn toggle_shown_scale(&mut self) -> Option<(String, Option<ScaleMode>)>;
     fn shown_photo(&self) -> Option<(String, i64)>;
     fn forget(&mut self, key: &str, source: &dyn TileSource);
@@ -361,6 +362,7 @@ impl App {
     /// One pass of the product's behaviour. The host calls it every loop
     /// pass — before the first window too (`stage: None`), so wake-at-boot
     /// works — then draws unless `skip_draw` and executes the effects.
+    #[must_use = "the pass's effects and draw orders are in its FrameOut"]
     pub fn frame(&mut self, events: &[Event], inputs: &Inputs, deps: &mut Deps) -> FrameOut {
         let mut out = FrameOut {
             wait: None,

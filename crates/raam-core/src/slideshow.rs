@@ -925,6 +925,7 @@ impl<P: VideoPlayer> Pipeline<P> {
     /// that photo. Recomposed by the next `update`. Flipping back to the
     /// default drops the override (NULL in `curation`), so the photo
     /// follows the default again if it changes. Returns what to persist.
+    #[must_use = "save the new scale, or it is lost at the next restart"]
     pub fn toggle_shown_scale(&mut self) -> Option<(String, Option<ScaleMode>)> {
         let (key, id) = self
             .selected_tile()
@@ -1126,7 +1127,7 @@ impl<P: VideoPlayer> Pipeline<P> {
         };
         if source.tile_is_clip(seq) {
             if self.video.backing_off() {
-                source.take_tile(seq);
+                drop(source.take_tile(seq));
                 log::warn!(
                     "plan {seq} dropped: its clip comes while backing off after a decoder failure"
                 );

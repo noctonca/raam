@@ -16,13 +16,16 @@ use std::time::Duration;
 /// `consumed`.
 pub trait TileSource {
     /// Takes a newly parked plan.
+    #[must_use = "a dropped plan leaves the source waiting, and the slideshow stalls"]
     fn take_plan(&self) -> Option<Plan>;
 
     /// Takes the parked tile if it belongs to plan `seq`. A tile from an
     /// abandoned plan is dropped.
+    #[must_use = "a dropped tile leaves its plan unfinished, and the slideshow stalls"]
     fn take_tile(&self, seq: u64) -> Option<TilePhoto>;
 
     /// Takes the seq of a plan whose fetch failed; that plan won't finish.
+    #[must_use = "a failed plan not dropped is waited on for good"]
     fn take_failed(&self) -> Option<u64>;
 
     /// The slideshow has shown (or discarded) the collage it built; the

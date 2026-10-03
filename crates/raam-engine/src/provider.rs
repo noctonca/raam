@@ -80,19 +80,27 @@ impl ImmichProvider {
     }
 
     pub fn albums(&self) -> Result<Vec<immich::RemoteAlbum>, ProviderError> {
-        self.client.as_ref().ok_or(no_client())?.albums()
+        self.connected()?.albums()
     }
 
     pub fn user_id(&self) -> Result<String, ProviderError> {
-        self.client.as_ref().ok_or(no_client())?.user_id()
+        self.connected()?.user_id()
+    }
+
+    /// The client, once `with_config` has made one.
+    fn connected(&self) -> Result<&immich::Client, ProviderError> {
+        self.client
+            .as_ref()
+            .ok_or_else(|| ProviderError::Failed("no Immich client".into()))
     }
 
     /// Follows a server or key change from settings.
     fn client(&mut self, config: immich::Config) -> Result<&immich::Client, ProviderError> {
-        if self.client.as_ref().is_none_or(|c| c.config != config) {
-            self.client = Some(immich::Client::new(config)?);
-        }
-        Ok(self.client.as_ref().unwrap())
+        let client = match self.client.take() {
+            Some(c) if c.config == config => c,
+            _ => immich::Client::new(config)?,
+        };
+        Ok(self.client.insert(client))
     }
 
     pub fn with_config(&mut self, config: immich::Config) -> Result<&mut Self, ProviderError> {
@@ -109,7 +117,7 @@ impl Provider for ImmichProvider {
     /// The union of the picked albums, one item per asset however many of
     /// them it is in (each album is its own call; see `album_assets`).
     fn list(&mut self) -> Result<Vec<MediaRef>, ProviderError> {
-        let client = self.client.as_ref().ok_or(no_client())?;
+        let client = self.connected()?;
         let mut out: Vec<MediaRef> = Vec::new();
         let mut index: HashMap<String, usize> = HashMap::new();
         for album in &self.albums {
@@ -145,13 +153,11 @@ impl Provider for ImmichProvider {
         media: &MediaRef,
         _short_side: u32,
     ) -> Result<Vec<u8>, ProviderError> {
-        self.client.as_ref().ok_or(no_client())?.preview(&media.id)
+        self.connected()?.preview(&media.id)
     }
 
     fn fetch_focus(&mut self, media: &MediaRef) -> Result<Option<Focus>, ProviderError> {
-        Ok(Some(
-            self.client.as_ref().ok_or(no_client())?.faces(&media.id)?,
-        ))
+        Ok(Some(self.connected()?.faces(&media.id)?))
     }
 
     fn fetch_video(
@@ -160,15 +166,8 @@ impl Provider for ImmichProvider {
         dest: &Path,
         max_bytes: u64,
     ) -> Result<u64, ProviderError> {
-        self.client
-            .as_ref()
-            .ok_or(no_client())?
-            .download_video(&media.id, dest, max_bytes)
+        self.connected()?.download_video(&media.id, dest, max_bytes)
     }
-}
-
-fn no_client() -> ProviderError {
-    ProviderError::Failed("no Immich client".into())
 }
 
 // ---- the local folder ------------------------------------------------------
@@ -221,7 +220,7 @@ impl Provider for LocalFolder {
             log::info!("local: created {}", dir.display());
         }
         let mut files = Vec::new();
-        if let Err(e) = list_jpegs(dir, &mut files) {
+        if let Err(e) = list_media(dir, &mut files) {
             // Unreadable, or missing because it couldn't be created: both
             // are what no storage permission looks like. Grant once.
             if self.granted {
@@ -235,7 +234,11 @@ impl Provider for LocalFolder {
                 "local: {} not usable ({e}), granting storage",
                 dir.display()
             );
-            (self.grant)();
+            let granted = (self.grant)();
+            log::info!(
+                "local: storage grant {}",
+                if granted { "given" } else { "refused" }
+            );
             // The remount after a grant lands asynchronously.
             std::thread::sleep(std::time::Duration::from_millis(500));
             if !dir.is_dir() {
@@ -245,7 +248,7 @@ impl Provider for LocalFolder {
                 }
             }
             files.clear();
-            list_jpegs(dir, &mut files).map_err(|e| {
+            list_media(dir, &mut files).map_err(|e| {
                 ProviderError::Failed(format!("cannot read {}: {e}", dir.display()))
             })?;
         }
@@ -338,12 +341,7 @@ fn sha1_of_file(path: &str) -> Result<String, String> {
         }
         ctx.update(&buf[..n]);
     }
-    Ok(ctx
-        .finish()
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    Ok(immich::to_hex(ctx.finish().as_ref()))
 }
 
 /// A new or changed file's `MediaRef`: its SHA-1, its size after EXIF
@@ -424,7 +422,10 @@ const VIDEO_EXTENSIONS: [&str; 4] = [".mp4", ".m4v", ".mov", ".3gp"];
 
 /// Every .jpg/.jpeg (and clip) under `dir` (recursively, skipping
 /// dot-files) with its (bytes, mtime ms).
-fn list_jpegs(dir: &Path, out: &mut Vec<(String, (i64, i64))>) -> std::io::Result<()> {
+///
+/// An unreadable subfolder is logged and passed over; only `dir` itself
+/// failing is an error (it is how no storage permission looks).
+fn list_media(dir: &Path, out: &mut Vec<(String, (i64, i64))>) -> std::io::Result<()> {
     for e in std::fs::read_dir(dir)? {
         let e = e?;
         let name = e.file_name().to_string_lossy().to_ascii_lowercase();
@@ -433,7 +434,9 @@ fn list_jpegs(dir: &Path, out: &mut Vec<(String, (i64, i64))>) -> std::io::Resul
         }
         let meta = e.metadata()?;
         if meta.is_dir() {
-            let _ = list_jpegs(&e.path(), out);
+            if let Err(err) = list_media(&e.path(), out) {
+                log::warn!("local: skipping folder {}: {err}", e.path().display());
+            }
         } else if name.ends_with(".jpg") || name.ends_with(".jpeg") || is_video_name(&name) {
             let mtime_ms = meta
                 .modified()

@@ -187,9 +187,13 @@ impl Library {
         let _ = tx.send(cmd);
     }
 
-    /// (version, stats): the version changes whenever the stats do.
-    pub fn stats(&self) -> (u64, Stats) {
-        self.stats.lock().unwrap().clone()
+    /// Changes whenever the stats do.
+    pub fn stats_version(&self) -> u64 {
+        self.stats.lock().unwrap().0
+    }
+
+    pub fn stats(&self) -> Stats {
+        self.stats.lock().unwrap().1.clone()
     }
 
     fn publish(&self, s: Stats) {
@@ -1265,7 +1269,10 @@ fn sync_parent(path: &Path) -> Result<(), String> {
 
 /// The controller's read-only view (raam-core app.rs).
 impl raam_core::app::LibraryInfo for Library {
-    fn stats(&self) -> (u64, raam_model::Stats) {
+    fn version(&self) -> u64 {
+        Library::stats_version(self)
+    }
+    fn stats(&self) -> raam_model::Stats {
         Library::stats(self)
     }
     fn online(&self) -> bool {

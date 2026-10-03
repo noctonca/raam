@@ -53,8 +53,12 @@ struct WebLibrary {
 }
 
 impl LibraryInfo for WebLibrary {
-    fn stats(&self) -> (u64, Stats) {
-        (self.version.get(), self.stats.borrow().clone())
+    fn version(&self) -> u64 {
+        self.version.get()
+    }
+
+    fn stats(&self) -> Stats {
+        self.stats.borrow().clone()
     }
 
     fn online(&self) -> bool {

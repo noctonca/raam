@@ -1137,7 +1137,6 @@ impl App {
         s.fit_background = ss.fit_background;
         s.video_playback = ss.video_playback;
         s.video_sound = ss.video_sound;
-        s.video_volume = ss.video_volume;
         // Hidden time never counts: the controller pauses the clock while
         // there is nothing to draw on, and this only runs while drawing.
         slideshow.set_clock_paused(self.state.paused);
@@ -1233,7 +1232,6 @@ mod tests {
                     gap_colour: raam_model::GapColour::Black,
                     video_playback: raam_model::VideoPlayback::Continue,
                     video_sound: false,
-                    video_volume: 0.5,
                 }),
                 selected: Cell::new(0),
                 nexts: 0,

@@ -118,7 +118,6 @@ impl Live {
             gap_colour: GapColour::Black,
             video_playback: state.settings.video_playback,
             video_sound: false,
-            video_volume: state.settings.video_volume,
         };
         let controller = App::new(state, || None);
         let pipeline = unsafe { Pipeline::new(w, h, DENSITY_DPI, settings, NoVideo, || None) };

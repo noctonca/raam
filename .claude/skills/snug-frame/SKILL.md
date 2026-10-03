@@ -205,6 +205,8 @@ loop pass, so most take effect live. `$S props` lists what's set, and
 | `mech` | `flags` `wakelock` `both` | how the screen is turned on |
 | `only_videos` | `1` | queue only clips |
 | `only_path` | text | queue only items whose path contains it |
+| `cap_mb` | MB | override the cache cap |
+| `stall` | `<site>[@<writer>]:<s>` | hold a write window open, up to 60 s, to aim a power cut ([docs/plan/power-cut-tests.md](../../../docs/plan/power-cut-tests.md)). Sites `export`, `rename`, `row`; writers `curation`, `local`, `prefetch`, `fetch`. Logs `debug.video.stall: <site> of <what> by <writer> for <s>s` |
 | `hold_first` | `1` | hold a live clip on frame 0 |
 | `show_still` | `1` | draw the composed still instead of the live clip |
 | `audio_extra_ms` | ms | override the audio delay calibration |

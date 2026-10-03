@@ -39,7 +39,7 @@ D=/data/data/$PKG
 PICS=/sdcard/Pictures
 EXPORT=$PICS/frame-curation.json
 RESTRICTIONS=/data/system/users/0/package-restrictions.xml
-PROPS="fail sleep wake idle mech only_videos only_path hold_first show_still audio_extra_ms cap_mb"
+PROPS="fail sleep wake idle mech only_videos only_path hold_first show_still audio_extra_ms cap_mb stall"
 
 envf="$(git rev-parse --git-common-dir 2>/dev/null)/../.env"
 if [ -z "${RAAM_FRAME_SERIAL:-}" ] && [ -f "$envf" ]; then

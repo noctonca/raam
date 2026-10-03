@@ -306,11 +306,21 @@ fn strip_query(path: &str) -> &str {
     path.split('?').next().unwrap_or(path)
 }
 
+/// Lowercase hex, two digits a byte.
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(out, "{b:02x}").expect("writing to a String never fails");
+    }
+    out
+}
+
 /// Standard base64 (with padding) to lowercase hex.
 fn base64_to_hex(s: &str) -> Option<String> {
     let mut bits: u32 = 0;
     let mut n = 0;
-    let mut out = String::new();
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
     for c in s.bytes().filter(|&c| c != b'=') {
         let v = match c {
             b'A'..=b'Z' => c - b'A',
@@ -324,10 +334,10 @@ fn base64_to_hex(s: &str) -> Option<String> {
         n += 6;
         if n >= 8 {
             n -= 8;
-            out.push_str(&format!("{:02x}", (bits >> n) & 0xff));
+            out.push((bits >> n) as u8);
         }
     }
-    (!out.is_empty()).then_some(out)
+    (!out.is_empty()).then(|| to_hex(&out))
 }
 
 /// "2024-05-01T10:20:30.000Z" (Immich's UTC timestamps) to epoch ms.
@@ -385,6 +395,18 @@ mod tests {
             let _ = stream.write_all(&vec![0xaa; len]);
         });
         url
+    }
+
+    /// Immich's `checksum` of an empty file is the SHA-1 the local folder
+    /// computes for it, so the two sources match.
+    #[test]
+    fn a_base64_checksum_reads_as_the_hex_sha1() {
+        assert_eq!(
+            base64_to_hex("2jmj7l5rSw0yVb/vlWAYkK/YBwk=").as_deref(),
+            Some("da39a3ee5e6b4b0d3255bfef95601890afd80709")
+        );
+        assert_eq!(base64_to_hex("not base64!"), None);
+        assert_eq!(base64_to_hex(""), None);
     }
 
     /// A clip bigger than the room left stops one byte past it, so the

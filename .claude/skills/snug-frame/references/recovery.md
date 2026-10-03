@@ -14,12 +14,12 @@ flash-mode procedure and the LBA table. Read it before any write.
 
 - `adb devices -l`: the frame may be there under the other transport
   (USB serial vs `<ip>:5555`).
-- The address may have moved (DHCP). Ask the owner for the frame's
+- The address may have moved (DHCP). Ask the maintainer for the frame's
   address on the router, then `adb connect <ip>:5555`.
 - A dark screen alone means little: Raam may be in its sleep hours, or
   Frameo's sleep mode is on. `input keyevent 224` wakes it if adb
   answers.
-- Ask the owner what they see on the screen. They're next to it.
+- Ask the maintainer what they see on the screen. They're next to it.
 
 ## 1. Wireless adb
 
@@ -45,7 +45,7 @@ The cable matters, and so does the order:
   `vbus_status=2` and never appears in `adb devices`.
 - **Plugging the cable into a running frame resets it.** Its USB power
   line is tied to its own supply, and the Mac's port browns it out. Plug
-  in once, at the start of a session, and leave it in. Tell the owner
+  in once, at the start of a session, and leave it in. Tell the maintainer
   before asking them to plug in, because the frame will restart.
 - USB adb stays up through boot, Frameo's first-run setup and an
   updated Frameo's start (checked with Frameo 1.13.4 and 1.32.12).
@@ -66,11 +66,11 @@ adb -s <usb-serial> reboot bootloader   # the screen stays dark
 R=~/code/tools/rkdeveloptool/rkdeveloptool
 $R ld                     # DevNo=1 Vid=0x2207,Pid=0x310d … Loader
 $R rl <lba> <sectors> out.img
-$R wl <lba> image.img     # tier 4: the owner runs it, from a script
+$R wl <lba> image.img     # tier 4: the maintainer runs it, from a script
 $R rd                     # reboot into Android; pulling power also works
 ```
 
-If Android is too broken for `adb reboot bootloader`, ask the owner;
+If Android is too broken for `adb reboot bootloader`, ask the maintainer;
 the button combination for this frame is untested.
 
 - **Addresses are shifted.** Flash-mode LBA = Android sector − 8192
@@ -96,7 +96,7 @@ the button combination for this frame is untested.
   and md5 against the backup's record, the write, and a read-back
   compared with the md5. The backups folder's `scripts/` holds the ones
   used before (`restore-0923.sh`, `write-test.sh`, `factory-reset.sh`).
-  Copy their shape. The owner runs it with `! sh <script>`.
+  Copy their shape. The maintainer runs it with `! sh <script>`.
 - **A dump of a live, mounted partition can be torn.** The September
   `userdata` image was taken while Android ran, and restoring it
   boot-looped Android (PackageManagerService choked on `packages.xml`).
@@ -127,7 +127,7 @@ the curation export, `/sdcard/Pictures/Frame`). Afterwards, USB adb is
 up but nothing else: wireless adb, disabled updaters, Raam and Frameo's
 "disabled" state are all gone. Disable the updaters before the frame
 joins Wi-Fi (Frameo self-updates), then work through FRAME-SETUP.
-The owner does Frameo's onboarding by touch. Frameo's licence files
+The maintainer does Frameo's onboarding by touch. Frameo's licence files
 come back on their own.
 
 ## Known traps

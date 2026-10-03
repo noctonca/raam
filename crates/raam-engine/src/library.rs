@@ -1199,9 +1199,15 @@ fn enforce_cap(lib: &Library) {
 /// empty or short one (raam#17). The frame mounts /data `noauto_da_alloc`,
 /// so ext4 won't flush the data before the rename on its own: the temp
 /// file is synced first, and the directory after, so the rename holds too.
+/// Each call has its own temp file: the fetch and library threads can store
+/// the same preview at once, and a shared one would be cut short under the
+/// other's rename. The startup sweep deletes any a crash leaves.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
-    let tmp = path.with_extension("tmp");
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.tmp", NEXT.fetch_add(1, Ordering::Relaxed)));
+    let tmp = path.with_file_name(name);
     let mut file =
         std::fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
     file.write_all(bytes)
@@ -1230,5 +1236,40 @@ impl raam_core::app::LibraryInfo for Library {
     }
     fn online(&self) -> bool {
         Library::online(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The fetch and library threads can store the same preview at once
+    /// (raam#17): each must leave a whole file, and neither may fail.
+    #[test]
+    fn two_writers_of_one_file_both_finish_whole() {
+        let dir = std::env::temp_dir().join(format!("raam-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("7.jpg");
+        let contents = [vec![0xaa; 64 * 1024], vec![0xbb; 96 * 1024]];
+        std::thread::scope(|s| {
+            for bytes in &contents {
+                let path = &path;
+                s.spawn(move || {
+                    for _ in 0..200 {
+                        write_atomic(path, bytes).unwrap();
+                    }
+                });
+            }
+        });
+        let left = std::fs::read(&path).unwrap();
+        assert!(contents.contains(&left), "{} bytes, a mix", left.len());
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(names, ["7.jpg"], "a temp file was left");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

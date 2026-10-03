@@ -1079,11 +1079,17 @@ pub fn cached_bytes(conn: &Connection, kind: SourceKind) -> i64 {
 /// back for `remove_files` once the caller has let go of the lock. A crash
 /// in between leaves files no row points at, which the startup sweep
 /// deletes; asset ids are never reused (AUTOINCREMENT), so no new asset can
-/// take such a file for its own first.
+/// take such a file for its own first. A failed delete gives back no
+/// paths: the rows still point at their files, so they must stay.
 pub fn drop_cached(conn: &Connection, asset: i64) -> Vec<PathBuf> {
     let paths = cached_paths(conn, asset);
-    let _ = conn.execute("DELETE FROM cached_file WHERE asset_id = ?1", [asset]);
-    paths
+    match conn.execute("DELETE FROM cached_file WHERE asset_id = ?1", [asset]) {
+        Ok(_) => paths,
+        Err(e) => {
+            log::error!("db: dropping the cached files of asset {asset} failed: {e}");
+            Vec::new()
+        }
+    }
 }
 
 fn cached_paths(conn: &Connection, asset: i64) -> Vec<PathBuf> {
@@ -1397,5 +1403,28 @@ mod tests {
         assert!(!paths[1].exists() && !paths[2].exists() && !stray.exists());
         assert_eq!(sweep(&conn, &[&dir]), (0, 0));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_drop_keeps_its_files() {
+        install_clock();
+        let db = open(Path::new(":memory:"), "").unwrap();
+        let conn = db.lock().unwrap();
+        set_immich_server(&conn, "http://immich.local:2283", "key").unwrap();
+        asset(&conn, "kept", "image", None);
+        let id = conn.last_insert_rowid();
+        insert_cached(&conn, id, Path::new("/cache/kept.jpg"), 100, 0).unwrap();
+        // A full disk, say: the delete fails.
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER no_delete BEFORE DELETE ON cached_file
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+        )
+        .unwrap();
+        assert!(drop_cached(&conn, id).is_empty());
+        assert_eq!(cached_paths(&conn, id), [PathBuf::from("/cache/kept.jpg")]);
+
+        conn.execute_batch("DROP TRIGGER no_delete;").unwrap();
+        assert_eq!(drop_cached(&conn, id), [PathBuf::from("/cache/kept.jpg")]);
+        assert!(cached_paths(&conn, id).is_empty());
     }
 }

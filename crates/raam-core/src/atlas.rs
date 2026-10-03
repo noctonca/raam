@@ -14,9 +14,10 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 
 use raam_model::limits::ATLAS_WIDTH;
-/// Printable ASCII, plus the degree sign for the weather (one codepoint,
-/// not general Unicode).
-const CHARSET: [(u32, u32); 2] = [(32, 126), (0xB0, 0xB0)];
+/// Printable ASCII and the Latin-1 Supplement (NBSP to ÿ, the degree sign
+/// among them), so a weather city such as "Malmö" or "São Paulo" reads as
+/// given; anything else draws as '?'.
+const CHARSET: [(u32, u32); 2] = [(32, 126), (0xA0, 0xFF)];
 
 /// A coverage bitmap to pack: fontdue's for text, weather_icons.rs's for
 /// icons.
@@ -145,113 +146,143 @@ fn box_blur(src: &[u8], w: usize, h: usize, r: usize) -> Vec<u8> {
     pass(&tmp, h, w, &|x, y| y * w + x)
 }
 
+/// The CPU half of an atlas: its coverage pixels, `ATLAS_WIDTH` wide, and
+/// where each glyph landed.
+struct Packed {
+    pixels: Vec<u8>,
+    height: usize,
+    glyphs: HashMap<char, Glyph>,
+}
+
+/// Rasterizes the charset and `extra`, blurs each glyph's shadow copy and
+/// packs both into one bitmap.
+fn pack(font: &fontdue::Font, px: f32, shadow: Shadow, extra: Vec<Raster>) -> Packed {
+    let t0 = clock::now();
+    let mut rasters: Vec<Raster> = CHARSET
+        .iter()
+        .flat_map(|&(a, b)| a..=b)
+        .map(|code| {
+            let ch = char::from_u32(code).unwrap();
+            let (m, bitmap) = font.rasterize(ch, px);
+            Raster {
+                ch,
+                width: m.width,
+                height: m.height,
+                xmin: m.xmin,
+                ymin: m.ymin,
+                advance: m.advance_width,
+                bitmap,
+            }
+        })
+        .collect();
+    rasters.extend(extra);
+    let pad = 1usize;
+
+    let mut sharp_order: Vec<usize> = (0..rasters.len()).collect();
+    sharp_order.sort_by(|&a, &b| rasters[b].height.cmp(&rasters[a].height));
+    let sharp_sizes: Vec<(usize, usize)> = sharp_order
+        .iter()
+        .map(|&i| (rasters[i].width, rasters[i].height))
+        .collect();
+    let (sharp_placements, sharp_end_y) = shelf_pack(&sharp_sizes, 0, pad);
+
+    let t_blur0 = clock::elapsed(t0);
+    let blurred: Vec<(Vec<u8>, usize, usize)> = rasters
+        .iter()
+        .map(|r| {
+            let (padded, pw, ph) = pad_bitmap(&r.bitmap, r.width, r.height, shadow.bleed);
+            let mut b = box_blur(&padded, pw, ph, shadow.radius);
+            if shadow.gain != 1.0 {
+                b.iter_mut()
+                    .for_each(|v| *v = (*v as f32 * shadow.gain).min(255.0) as u8);
+            }
+            (b, pw, ph)
+        })
+        .collect();
+    let t_blur = clock::elapsed(t0) - t_blur0;
+
+    let mut shadow_order: Vec<usize> = (0..blurred.len()).collect();
+    shadow_order.sort_by(|&a, &b| blurred[b].2.cmp(&blurred[a].2));
+    let shadow_sizes: Vec<(usize, usize)> = shadow_order
+        .iter()
+        .map(|&i| (blurred[i].1, blurred[i].2))
+        .collect();
+    let (shadow_placements, atlas_h) = shelf_pack(&shadow_sizes, sharp_end_y, pad);
+
+    let mut pixels = vec![0u8; ATLAS_WIDTH * atlas_h];
+    let mut sharp_at = vec![(0usize, 0usize); rasters.len()];
+    for (idx, &i) in sharp_order.iter().enumerate() {
+        let r = &rasters[i];
+        let (x, y) = sharp_placements[idx];
+        sharp_at[i] = (x, y);
+        for row in 0..r.height {
+            let dst = (y + row) * ATLAS_WIDTH + x;
+            pixels[dst..dst + r.width]
+                .copy_from_slice(&r.bitmap[row * r.width..(row + 1) * r.width]);
+        }
+    }
+    let mut shadow_at = vec![(0usize, 0usize); rasters.len()];
+    for (idx, &i) in shadow_order.iter().enumerate() {
+        let (bitmap, bw, bh) = &blurred[i];
+        let (x, y) = shadow_placements[idx];
+        shadow_at[i] = (x, y);
+        for row in 0..*bh {
+            let dst = (y + row) * ATLAS_WIDTH + x;
+            pixels[dst..dst + bw].copy_from_slice(&bitmap[row * bw..(row + 1) * bw]);
+        }
+    }
+
+    let (aw, ah) = (ATLAS_WIDTH as f32, atlas_h as f32);
+    let mut glyphs = HashMap::with_capacity(rasters.len());
+    for (i, r) in rasters.iter().enumerate() {
+        let (sx, sy) = sharp_at[i];
+        let (hx, hy) = shadow_at[i];
+        let (_, bw, bh) = &blurred[i];
+        glyphs.insert(
+            r.ch,
+            Glyph {
+                u0: sx as f32 / aw,
+                v0: sy as f32 / ah,
+                u1: (sx + r.width) as f32 / aw,
+                v1: (sy + r.height) as f32 / ah,
+                width: r.width as f32,
+                height: r.height as f32,
+                xmin: r.xmin as f32,
+                ymin: r.ymin as f32,
+                advance: r.advance,
+                su0: hx as f32 / aw,
+                sv0: hy as f32 / ah,
+                su1: (hx + bw) as f32 / aw,
+                sv1: (hy + bh) as f32 / ah,
+                swidth: *bw as f32,
+                sheight: *bh as f32,
+                sxmin: r.xmin as f32 - shadow.bleed as f32,
+                symin: r.ymin as f32 - shadow.bleed as f32,
+            },
+        );
+    }
+
+    log::info!(
+        "built {px}px atlas {ATLAS_WIDTH}x{atlas_h} ({} KB) in {:.1}ms (blur r={} {:.1}ms)",
+        ATLAS_WIDTH * atlas_h / 1024,
+        clock::elapsed(t0).as_secs_f64() * 1000.0,
+        shadow.radius,
+        t_blur.as_secs_f64() * 1000.0,
+    );
+    Packed {
+        pixels,
+        height: atlas_h,
+        glyphs,
+    }
+}
+
 impl FontAtlas {
     pub fn build(font: &fontdue::Font, px: f32, shadow: Shadow, extra: Vec<Raster>) -> Self {
-        let t0 = clock::now();
-        let mut rasters: Vec<Raster> = CHARSET
-            .iter()
-            .flat_map(|&(a, b)| a..=b)
-            .map(|code| {
-                let ch = char::from_u32(code).unwrap();
-                let (m, bitmap) = font.rasterize(ch, px);
-                Raster {
-                    ch,
-                    width: m.width,
-                    height: m.height,
-                    xmin: m.xmin,
-                    ymin: m.ymin,
-                    advance: m.advance_width,
-                    bitmap,
-                }
-            })
-            .collect();
-        rasters.extend(extra);
-        let pad = 1usize;
-
-        let mut sharp_order: Vec<usize> = (0..rasters.len()).collect();
-        sharp_order.sort_by(|&a, &b| rasters[b].height.cmp(&rasters[a].height));
-        let sharp_sizes: Vec<(usize, usize)> = sharp_order
-            .iter()
-            .map(|&i| (rasters[i].width, rasters[i].height))
-            .collect();
-        let (sharp_placements, sharp_end_y) = shelf_pack(&sharp_sizes, 0, pad);
-
-        let t_blur0 = clock::elapsed(t0);
-        let blurred: Vec<(Vec<u8>, usize, usize)> = rasters
-            .iter()
-            .map(|r| {
-                let (padded, pw, ph) = pad_bitmap(&r.bitmap, r.width, r.height, shadow.bleed);
-                let mut b = box_blur(&padded, pw, ph, shadow.radius);
-                if shadow.gain != 1.0 {
-                    b.iter_mut()
-                        .for_each(|v| *v = (*v as f32 * shadow.gain).min(255.0) as u8);
-                }
-                (b, pw, ph)
-            })
-            .collect();
-        let t_blur = clock::elapsed(t0) - t_blur0;
-
-        let mut shadow_order: Vec<usize> = (0..blurred.len()).collect();
-        shadow_order.sort_by(|&a, &b| blurred[b].2.cmp(&blurred[a].2));
-        let shadow_sizes: Vec<(usize, usize)> = shadow_order
-            .iter()
-            .map(|&i| (blurred[i].1, blurred[i].2))
-            .collect();
-        let (shadow_placements, atlas_h) = shelf_pack(&shadow_sizes, sharp_end_y, pad);
-
-        let mut pixels = vec![0u8; ATLAS_WIDTH * atlas_h];
-        let mut sharp_at = vec![(0usize, 0usize); rasters.len()];
-        for (idx, &i) in sharp_order.iter().enumerate() {
-            let r = &rasters[i];
-            let (x, y) = sharp_placements[idx];
-            sharp_at[i] = (x, y);
-            for row in 0..r.height {
-                let dst = (y + row) * ATLAS_WIDTH + x;
-                pixels[dst..dst + r.width]
-                    .copy_from_slice(&r.bitmap[row * r.width..(row + 1) * r.width]);
-            }
-        }
-        let mut shadow_at = vec![(0usize, 0usize); rasters.len()];
-        for (idx, &i) in shadow_order.iter().enumerate() {
-            let (bitmap, bw, bh) = &blurred[i];
-            let (x, y) = shadow_placements[idx];
-            shadow_at[i] = (x, y);
-            for row in 0..*bh {
-                let dst = (y + row) * ATLAS_WIDTH + x;
-                pixels[dst..dst + bw].copy_from_slice(&bitmap[row * bw..(row + 1) * bw]);
-            }
-        }
-
-        let (aw, ah) = (ATLAS_WIDTH as f32, atlas_h as f32);
-        let mut glyphs = HashMap::with_capacity(rasters.len());
-        for (i, r) in rasters.iter().enumerate() {
-            let (sx, sy) = sharp_at[i];
-            let (hx, hy) = shadow_at[i];
-            let (_, bw, bh) = &blurred[i];
-            glyphs.insert(
-                r.ch,
-                Glyph {
-                    u0: sx as f32 / aw,
-                    v0: sy as f32 / ah,
-                    u1: (sx + r.width) as f32 / aw,
-                    v1: (sy + r.height) as f32 / ah,
-                    width: r.width as f32,
-                    height: r.height as f32,
-                    xmin: r.xmin as f32,
-                    ymin: r.ymin as f32,
-                    advance: r.advance,
-                    su0: hx as f32 / aw,
-                    sv0: hy as f32 / ah,
-                    su1: (hx + bw) as f32 / aw,
-                    sv1: (hy + bh) as f32 / ah,
-                    swidth: *bw as f32,
-                    sheight: *bh as f32,
-                    sxmin: r.xmin as f32 - shadow.bleed as f32,
-                    symin: r.ymin as f32 - shadow.bleed as f32,
-                },
-            );
-        }
-
+        let Packed {
+            pixels,
+            height: atlas_h,
+            glyphs,
+        } = pack(font, px, shadow, extra);
         let mut texture = 0;
         unsafe {
             glActiveTexture(GL_TEXTURE0);
@@ -276,13 +307,6 @@ impl FontAtlas {
         let lm = font
             .horizontal_line_metrics(px)
             .expect("font has no horizontal line metrics");
-        log::info!(
-            "built {px}px atlas {ATLAS_WIDTH}x{atlas_h} ({} KB) in {:.1}ms (blur r={} {:.1}ms)",
-            ATLAS_WIDTH * atlas_h / 1024,
-            clock::elapsed(t0).as_secs_f64() * 1000.0,
-            shadow.radius,
-            t_blur.as_secs_f64() * 1000.0,
-        );
         Self {
             texture,
             ascent: lm.ascent,
@@ -352,5 +376,47 @@ mod tests {
     #[should_panic(expected = "doesn't fit")]
     fn a_glyph_wider_than_the_atlas_is_refused() {
         shelf_pack(&[(ATLAS_WIDTH - 3, 10)], 0, 2);
+    }
+
+    const SHADOW: Shadow = Shadow {
+        bleed: 6,
+        radius: 3,
+        gain: 2.0,
+    };
+
+    fn roboto() -> fontdue::Font {
+        fontdue::Font::from_bytes(
+            &include_bytes!("../assets/Roboto-Regular.ttf")[..],
+            fontdue::FontSettings::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_weather_city_with_accents_has_its_own_glyphs() {
+        crate::clock::fake::install();
+        let packed = pack(&roboto(), 26.0, SHADOW, Vec::new());
+        for ch in ['ö', 'ã', 'é', 'ñ', 'ß', '°'] {
+            assert!(packed.glyphs.contains_key(&ch), "{ch:?} would draw as '?'");
+        }
+    }
+
+    #[test]
+    fn both_overlay_fonts_draw_every_charset_glyph() {
+        // A codepoint a font lacks would rasterize its empty .notdef.
+        let bold = fontdue::Font::from_bytes(
+            &include_bytes!("../assets/Roboto-Bold.ttf")[..],
+            fontdue::FontSettings::default(),
+        )
+        .unwrap();
+        for font in [roboto(), bold] {
+            for ch in CHARSET
+                .iter()
+                .flat_map(|&(a, b)| a..=b)
+                .filter_map(char::from_u32)
+            {
+                assert_ne!(font.lookup_glyph_index(ch), 0, "{ch:?} missing");
+            }
+        }
     }
 }

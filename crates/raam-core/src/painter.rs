@@ -223,6 +223,12 @@ impl Painter {
         }
     }
 
+    /// Draws the meshes of the last `upload`.
+    ///
+    /// # Panics
+    ///
+    /// If a mesh is on a texture that was never set: the host sets a
+    /// pass's textures before uploading its meshes.
     pub fn draw(&self, ppp: f32, screen_w: i32, screen_h: i32) {
         let p = if self.text_boost {
             &self.boosted

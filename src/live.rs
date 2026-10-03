@@ -340,7 +340,6 @@ impl Live {
             gap_colour: GapColour::Black,
             video_playback: s.video_playback,
             video_sound: false,
-            video_volume: s.video_volume,
         };
         let mut pipeline = unsafe { Pipeline::new(w, h, DENSITY_DPI, settings, NoVideo, || None) };
         if let Some(o) = self.overrides.take() {

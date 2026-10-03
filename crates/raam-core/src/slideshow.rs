@@ -100,9 +100,9 @@ pub struct SlideshowSettings {
     /// What shows through the separators between collage tiles.
     pub gap_colour: GapColour,
     pub video_playback: VideoPlayback,
-    /// Sound on, and at what volume (0..1).
+    /// Sound on. Its volume is the music stream's, which the controller
+    /// sets on the host (app.rs), so the pipeline never needs it.
     pub video_sound: bool,
-    pub video_volume: f32,
 }
 
 /// Frameo draws its collage separators as a white background showing
@@ -135,10 +135,6 @@ struct PhotoMeta {
 }
 
 impl PhotoMeta {
-    fn clone_of(m: &PhotoMeta) -> Self {
-        m.clone()
-    }
-
     fn of(photo: &Photo) -> Self {
         Self {
             asset_id: photo.asset_id,
@@ -681,10 +677,7 @@ impl<P: VideoPlayer> Pipeline<P> {
             let mut photo_tex = 0;
             glGenTextures(1, &mut photo_tex);
             glBindTexture(GL_TEXTURE_2D, photo_tex);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as i32);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as i32);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as i32);
+            set_linear_clamp();
 
             let blur_h = ((BLUR_WIDTH_PX as f32) * screen_h as f32 / screen_w as f32)
                 .round()
@@ -1489,7 +1482,7 @@ impl<P: VideoPlayer> Pipeline<P> {
         let meta = PhotoMeta {
             width: w,
             height: h,
-            ..PhotoMeta::clone_of(&probe.meta)
+            ..probe.meta.clone()
         };
         self.compose_video_target(source.texture, &target, &meta, bg.as_ref());
         let kb = KenBurns::still(self.clock.now());

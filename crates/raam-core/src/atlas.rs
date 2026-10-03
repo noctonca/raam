@@ -299,10 +299,7 @@ impl FontAtlas {
                 GL_UNSIGNED_BYTE,
                 pixels.as_ptr() as *const c_void,
             );
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as i32);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as i32);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as i32);
+            set_linear_clamp();
         }
         let lm = font
             .horizontal_line_metrics(px)

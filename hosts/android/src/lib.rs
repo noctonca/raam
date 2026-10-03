@@ -472,7 +472,6 @@ fn android_main(app: AndroidApp) {
                         gap_colour: GapColour::Black,
                         video_playback: controller.state.settings.video_playback,
                         video_sound: controller.state.settings.video_sound,
-                        video_volume: controller.state.settings.video_volume,
                     },
                     video::Decoders::new(app.create_waker()),
                     mem_free_kb,

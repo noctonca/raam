@@ -26,32 +26,35 @@ pub enum Fail {
     Panic,
 }
 
+/// Each injectable fault and its `debug.video.fail` value: the one table
+/// both the property's decode and the atomic's read go through.
+const FAILS: [(Fail, &str); 6] = [
+    (Fail::Rt, "rt"),
+    (Fail::Probe, "probe"),
+    (Fail::Live, "live"),
+    (Fail::Hang, "hang"),
+    (Fail::Open, "open"),
+    (Fail::Panic, "panic"),
+];
+
 static FAIL: AtomicU8 = AtomicU8::new(Fail::None as u8);
 
 /// Host only, at startup and then once per loop pass.
 pub fn set_fail(prop: &str) {
-    let value = match prop.trim() {
-        "rt" => Fail::Rt,
-        "probe" => Fail::Probe,
-        "live" => Fail::Live,
-        "hang" => Fail::Hang,
-        "open" => Fail::Open,
-        "panic" => Fail::Panic,
-        _ => Fail::None,
-    };
+    let prop = prop.trim();
+    let value = FAILS
+        .iter()
+        .find(|(_, name)| *name == prop)
+        .map_or(Fail::None, |(fail, _)| *fail);
     FAIL.store(value as u8, Ordering::Relaxed);
 }
 
 pub fn fail() -> Fail {
-    match FAIL.load(Ordering::Relaxed) {
-        x if x == Fail::Rt as u8 => Fail::Rt,
-        x if x == Fail::Probe as u8 => Fail::Probe,
-        x if x == Fail::Live as u8 => Fail::Live,
-        x if x == Fail::Hang as u8 => Fail::Hang,
-        x if x == Fail::Open as u8 => Fail::Open,
-        x if x == Fail::Panic as u8 => Fail::Panic,
-        _ => Fail::None,
-    }
+    let stored = FAIL.load(Ordering::Relaxed);
+    FAILS
+        .iter()
+        .find(|(fail, _)| *fail as u8 == stored)
+        .map_or(Fail::None, |(fail, _)| *fail)
 }
 
 static HOLD_FIRST: AtomicBool = AtomicBool::new(false);

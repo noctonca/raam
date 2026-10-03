@@ -194,8 +194,7 @@ fn layouts_of_size(n: usize) -> impl Iterator<Item = (usize, &'static Layout)> {
 /// Frameo's default collage max, from the screen diagonal in inches (the
 /// raw pixel size over `densityDpi`).
 pub fn screen_default_max(width_px: i32, height_px: i32, density_dpi: u32) -> usize {
-    let diagonal =
-        ((width_px as f64).powi(2) + (height_px as f64).powi(2)).sqrt() / density_dpi as f64;
+    let diagonal = screen_diagonal_inches(width_px, height_px, density_dpi);
     if diagonal >= 9.0 {
         if diagonal < 15.0 { 3 } else { 4 }
     } else {

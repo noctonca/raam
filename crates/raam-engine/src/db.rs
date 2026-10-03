@@ -22,6 +22,7 @@
 //! database. Curation carries over through the JSON export/import
 //! (`import_curation`).
 use raam_core::clock;
+use raam_core::schedule::Schedule;
 use raam_core::store::transition_str;
 use raam_model::limits;
 use raam_model::{
@@ -422,7 +423,7 @@ pub fn load_settings(conn: &Connection, s: &mut Settings) -> Vec<String> {
 pub fn save_settings(
     conn: &Connection,
     rows: &[(&'static str, serde_json::Value)],
-    sleep: (bool, u32, u32),
+    sleep: Schedule,
 ) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     {
@@ -436,7 +437,7 @@ pub fn save_settings(
     tx.execute("DELETE FROM schedule WHERE kind = 'sleep'", [])?;
     tx.execute(
         "INSERT INTO schedule (kind, start_min, end_min, enabled) VALUES ('sleep', ?1, ?2, ?3)",
-        params![sleep.1, sleep.2, sleep.0],
+        params![sleep.sleep_min, sleep.wake_min, sleep.enabled],
     )?;
     tx.commit()
 }
@@ -1342,6 +1343,13 @@ mod tests {
     use super::*;
     use crate::install_test_clock as install_clock;
 
+    /// A sleep schedule off its defaults: switched off, 01:00 to 07:00.
+    const OFF_1_TO_7: Schedule = Schedule {
+        enabled: false,
+        sleep_min: 60,
+        wake_min: 420,
+    };
+
     fn synchronous(conn: &Connection) -> i64 {
         conn.query_row("PRAGMA synchronous", [], |r| r.get(0))
             .unwrap()
@@ -1528,14 +1536,18 @@ mod tests {
         for (row, default) in rows.iter().zip(&defaults) {
             assert_ne!(row, default, "{} is at its default", row.0);
         }
-        save_settings(&conn, &rows, (false, 60, 420)).unwrap();
+        save_settings(&conn, &rows, OFF_1_TO_7).unwrap();
 
         let mut loaded = Settings::defaults("", "");
         load_settings(&conn, &mut loaded);
         assert_eq!(raam_core::store::settings_rows(&loaded), rows);
         assert_eq!(
-            (loaded.sleep_enabled, loaded.sleep_min, loaded.wake_min),
-            (false, 60, 420)
+            Schedule {
+                enabled: loaded.sleep_enabled,
+                sleep_min: loaded.sleep_min,
+                wake_min: loaded.wake_min,
+            },
+            OFF_1_TO_7
         );
     }
 
@@ -1561,7 +1573,7 @@ mod tests {
                     ),
                     ("video.audio_delay_ms", serde_json::from_str(delay).unwrap()),
                 ],
-                (false, 60, 420),
+                OFF_1_TO_7,
             )
             .unwrap();
             let mut loaded = Settings::defaults("", "");
@@ -1574,7 +1586,7 @@ mod tests {
         save_settings(
             &conn,
             &[("cache.cap_mb", serde_json::json!(4_294_967_346u64))],
-            (false, 60, 420),
+            OFF_1_TO_7,
         )
         .unwrap();
         let mut loaded = Settings::defaults("", "");

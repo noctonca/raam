@@ -49,7 +49,7 @@ pub enum Cmd {
     // To the writer thread.
     SaveSettings {
         rows: Vec<(&'static str, serde_json::Value)>,
-        sleep: (bool, u32, u32),
+        sleep: schedule::Schedule,
     },
     SetScale(String, Option<ScaleMode>),
     SetHidden(String, bool),

@@ -116,6 +116,19 @@ pub const SYNC_EVERY: Duration = Duration::from_secs(1800);
 /// Sync retry cadence while offline — also how the queue comes back
 /// online. Chosen.
 pub const SYNC_RETRY: Duration = Duration::from_secs(60);
+/// Picking an album syncs this long after the last pick, so a run of taps
+/// is one sync. Chosen.
+pub const ALBUM_PICK_DEBOUNCE: Duration = Duration::from_secs(2);
+/// The library thread's longest sleep with no work and no command: how
+/// soon it sees a `debug.video.cap_mb` change or the offline retry come
+/// due. Chosen.
+pub const LIBRARY_IDLE_WAIT: Duration = Duration::from_secs(5);
+/// After the one-time storage grant, the wait before the photos folder is
+/// read again: the remount the grant causes lands asynchronously. Chosen.
+pub const STORAGE_GRANT_SETTLE: Duration = Duration::from_millis(500);
+/// The read buffer for hashing a local file. Chosen: big enough that the
+/// SHA-1 of a 28 MB clip is a few hundred reads, small next to the heap.
+pub const HASH_BUFFER_BYTES: usize = 64 * 1024;
 /// Wi-Fi networks are scanned for again this often while their list is
 /// open. A scan takes about 11 s on a USB adapter (both bands). Chosen.
 pub const WIFI_RESCAN: Duration = Duration::from_secs(30);

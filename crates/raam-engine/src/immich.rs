@@ -123,8 +123,9 @@ impl Client {
                 out.extend(items.iter().filter_map(|a| {
                     Some(RemoteAsset {
                         id: a.get("id")?.as_str()?.to_string(),
-                        width: a.get("width")?.as_u64()? as u32,
-                        height: a.get("height")?.as_u64()? as u32,
+                        // A size past u32 is no size: the asset is left out.
+                        width: u32::try_from(a.get("width")?.as_u64()?).ok()?,
+                        height: u32::try_from(a.get("height")?.as_u64()?).ok()?,
                         taken_at_ms: a
                             .get("fileCreatedAt")
                             .and_then(|v| v.as_str())

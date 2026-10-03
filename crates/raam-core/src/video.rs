@@ -397,23 +397,25 @@ impl<P: VideoPlayer> Video<P> {
         probe.clip.latch();
         let phase = probe.clip.phase();
         if let Phase::Failed(e) = &phase {
-            log::error!("clip {asset_id}: {e}");
-            if let PlayerError::Decoder(why) = e {
-                // The decoder refused it: not something a retry fixes. Only
-                // when it was the one decoder open (a second instance
-                // failing next to a playing clip may be contention, not
-                // the clip).
-                if self.live.is_none() {
-                    self.unplayable.push((asset_id, why.clone()));
+            match e {
+                PlayerError::File(why) => log::error!("clip {asset_id}: {why}"),
+                PlayerError::Decoder(why) => {
+                    // The decoder refused it: not something a retry fixes.
+                    // Only when it was the one decoder open (a second
+                    // instance failing next to a playing clip may be
+                    // contention, not the clip).
+                    if self.live.is_none() {
+                        self.unplayable.push((asset_id, why.clone()));
+                    }
+                    self.record_failure(&format!("clip {asset_id} probe: {why}"));
                 }
-                self.record_failure(&format!("clip {asset_id} probe: {why}"));
             }
             return ProbeStatus::Failed;
         }
         if probe.age() > FIRST_FRAME_TIMEOUT {
-            let why = format!("no first frame within {FIRST_FRAME_TIMEOUT:?}");
-            log::error!("clip {asset_id}: {why}");
-            self.record_failure(&format!("clip {asset_id} probe: {why}"));
+            self.record_failure(&format!(
+                "clip {asset_id} probe: no first frame within {FIRST_FRAME_TIMEOUT:?}"
+            ));
             return ProbeStatus::Failed;
         }
         if phase == Phase::FirstFrame {
@@ -463,12 +465,11 @@ impl<P: VideoPlayer> Video<P> {
             if clock::elapsed(since) < LIVE_DECODER_WAIT {
                 return;
             }
-            log::error!(
-                "{open} decoder(s) still not released after {LIVE_DECODER_WAIT:?}, the clip's still holds"
-            );
             self.live_wanted = None;
             self.done = true;
-            self.record_failure("the previous decoder wasn't released");
+            self.record_failure(&format!(
+                "{open} decoder(s) still not released after {LIVE_DECODER_WAIT:?}, the clip's still holds"
+            ));
             return;
         }
         self.live_wanted = None;
@@ -501,9 +502,8 @@ impl<P: VideoPlayer> Video<P> {
             Err(e) => {
                 // As for a probe that can't open: the backoff keeps a
                 // decoder under pressure from being asked clip after clip.
-                log::error!("clip {asset_id}: can't start playback: {e}");
                 self.done = true;
-                self.record_failure(&format!("clip {asset_id} open: {e}"));
+                self.record_failure(&format!("clip {asset_id}: can't start playback: {e}"));
             }
         }
     }
@@ -558,8 +558,7 @@ impl<P: VideoPlayer> Video<P> {
                 return Tick::Running;
             }
         };
-        log::error!("clip failed: {failed}");
-        self.record_failure(&format!("playback: {failed}"));
+        self.record_failure(&format!("clip failed: {failed}"));
         Tick::Finished
     }
 
@@ -581,13 +580,13 @@ impl<P: VideoPlayer> Video<P> {
     /// A decoder failed or hung (on the frame, typically the RK VPU out of
     /// ion memory). Clips are passed over for a while, longer after each
     /// failure in a row: 30 s, 1, 2, 4, 8, then 10 min. A clip that plays
-    /// to its end ends the run.
+    /// to its end ends the run. The failure's one log line.
     pub fn record_failure(&mut self, why: &str) {
         self.failures += 1;
         let secs =
             (DECODER_BACKOFF_BASE_SECS << (self.failures - 1).min(5)).min(DECODER_BACKOFF_CAP_SECS);
         self.backoff_until = Some(clock::now() + Duration::from_secs(secs));
-        log::warn!(
+        log::error!(
             "decoder failure {} in a row ({why}): clips passed over for {secs} s",
             self.failures
         );

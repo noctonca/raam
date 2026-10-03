@@ -610,7 +610,7 @@ impl Live {
                 self.frames as f64 / since.as_secs_f64(),
                 self.passes,
                 self.controller.overlay_open(),
-                run.pipeline.shown_layout(),
+                run.pipeline.shown_layout().as_deref().unwrap_or("-"),
             );
             self.frames = 0;
             self.passes = 0;

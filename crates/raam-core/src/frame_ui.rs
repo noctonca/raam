@@ -15,6 +15,7 @@
 use crate::icons;
 use crate::kit::{self, ButtonKind, DialogResult, ListItem, Tone, ToolItem, Trailing};
 use crate::network::{self, JoinStage, LinkKind, NetCommand, NetSnapshot, Security, Ssid, Wifi};
+use crate::schedule;
 use crate::theme::{self, Type, scheme, size, space};
 use egui::{Align, CornerRadius, Ui, UiBuilder};
 use raam_model::limits::{
@@ -1229,7 +1230,7 @@ fn status_line(st: &AppState) -> String {
         parts.push(st.status.weather.clone());
     }
     if s.sleep_enabled {
-        parts.push(format!("sleeps at {}", kit::fmt_hm(s.sleep_min)));
+        parts.push(format!("sleeps at {}", schedule::fmt_hm(s.sleep_min)));
     }
     parts.join("  ·  ")
 }
@@ -2098,8 +2099,9 @@ fn sleep_page(ui: &mut Ui, st: &mut AppState) {
             .supporting("A tap on the screen wakes it for a while")
             .trailing(Trailing::Switch(&mut s.sleep_enabled)),
     );
-    let (sleep, wake) = (kit::fmt_hm(s.sleep_min), kit::fmt_hm(s.wake_min));
-    let mut open = Dialog::None;
+    let (sleep, wake) = (schedule::fmt_hm(s.sleep_min), schedule::fmt_hm(s.wake_min));
+    // The dialog a tap opens, and the time it starts on.
+    let mut open = None;
     ui.add_enabled_ui(s.sleep_enabled, |ui| {
         if kit::list_item(
             ui,
@@ -2109,7 +2111,7 @@ fn sleep_page(ui: &mut Ui, st: &mut AppState) {
         )
         .clicked()
         {
-            open = Dialog::SleepAt;
+            open = Some((Dialog::SleepAt, s.sleep_min));
         }
         if kit::list_item(
             ui,
@@ -2119,19 +2121,12 @@ fn sleep_page(ui: &mut Ui, st: &mut AppState) {
         )
         .clicked()
         {
-            open = Dialog::WakeAt;
+            open = Some((Dialog::WakeAt, s.wake_min));
         }
     });
-    match open {
-        Dialog::SleepAt => {
-            st.time_draft = st.settings.sleep_min;
-            st.dialog = open;
-        }
-        Dialog::WakeAt => {
-            st.time_draft = st.settings.wake_min;
-            st.dialog = open;
-        }
-        _ => {}
+    if let Some((dialog, draft)) = open {
+        st.time_draft = draft;
+        st.dialog = dialog;
     }
 }
 
@@ -2567,7 +2562,12 @@ fn networks_page(ui: &mut Ui, st: &mut AppState) {
                             hidden: false,
                         });
                     }
-                    _ => {
+                    // WEP and 802.1X can't be tapped (`supported`).
+                    Security::Wpa2
+                    | Security::Wpa2Wpa3
+                    | Security::Wpa3
+                    | Security::Wep
+                    | Security::Enterprise => {
                         st.join = JoinDraft::listed(n.ssid.clone(), n.security);
                         st.sub = Sub::Join;
                     }

@@ -340,7 +340,6 @@ const FLIP_V: [f32; 16] = [
     0.0, 1.0, 0.0, 1.0,
 ];
 
-/// Column-major `a * b`.
 /// The photo's GL size, after checking its pixels are exactly that size:
 /// the upload hands GL a bare pointer, and a short buffer would have the
 /// driver read past it.
@@ -358,6 +357,7 @@ fn upload_size(photo: &Photo) -> (GlSizei, GlSizei) {
     )
 }
 
+/// Column-major `a * b`.
 fn mat_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     let mut out = [0.0; 16];
     for c in 0..4 {
@@ -892,10 +892,11 @@ impl<P: VideoPlayer> Pipeline<P> {
         self.selected_tile().is_some_and(|t| t.video.is_some())
     }
 
-    /// e.g. "3_2 · tile 2/3", for the status line.
-    pub fn shown_layout(&self) -> String {
-        match self.displayed() {
-            Some(c) if c.video().is_some() => {
+    /// e.g. "3_2 · tile 2/3", for the status line; `None` while nothing
+    /// is shown.
+    pub fn shown_layout(&self) -> Option<String> {
+        let layout = match self.displayed()? {
+            c if c.video().is_some() => {
                 let v = c.video().unwrap();
                 let total = v.clip.info.duration_us as f64 / 1e6;
                 match self.video.live_progress() {
@@ -910,15 +911,15 @@ impl<P: VideoPlayer> Pipeline<P> {
                     ),
                 }
             }
-            Some(c) if c.is_single() => "single photo".to_string(),
-            Some(c) => format!(
+            c if c.is_single() => "single photo".to_string(),
+            c => format!(
                 "collage {} · tile {}/{}",
                 c.name(),
                 self.selected.unwrap_or(0).min(c.tiles.len() - 1) + 1,
                 c.tiles.len()
             ),
-            None => "-".to_string(),
-        }
+        };
+        Some(layout)
     }
 
     /// Flips the selected tile's photo between Fill and Fit, remembered for
@@ -988,13 +989,13 @@ impl<P: VideoPlayer> Pipeline<P> {
 
     /// Whether an idle tile on screen no longer matches its settings.
     pub fn recompose_pending(&self) -> bool {
-        match (&self.state, &self.current) {
-            (State::Idle { .. }, Some(c)) => c
+        matches!(
+            (&self.state, &self.current),
+            (State::Idle { .. }, Some(c)) if c
                 .tiles
                 .iter()
-                .any(|t| t.video.is_none() && t.comp != self.wanted_comp(&t.meta.key)),
-            _ => false,
-        }
+                .any(|t| t.video.is_none() && t.comp != self.wanted_comp(&t.meta.key))
+        )
     }
 
     pub fn is_animating(&self) -> bool {
@@ -1624,12 +1625,11 @@ impl<P: VideoPlayer> Pipeline<P> {
     fn tick_live(&mut self) {
         let paused = self.video_paused();
         let looping = self.settings.video_playback == VideoPlayback::Loop
-            && match &self.state {
-                State::Idle { dwell_start } => {
-                    self.clock.now().saturating_sub(*dwell_start) < self.settings.dwell
-                }
-                _ => false,
-            };
+            && matches!(
+                &self.state,
+                State::Idle { dwell_start }
+                    if self.clock.now().saturating_sub(*dwell_start) < self.settings.dwell
+            );
         let cue = Self::live_cue(&self.current, &self.settings);
         if self.video.tick(&cue, paused, looping) == Tick::Finished {
             self.finish_live();
@@ -1921,12 +1921,11 @@ impl<P: VideoPlayer> Pipeline<P> {
             glClearColor(0.05, 0.06, 0.09, 1.0);
             glClear(GL_COLOR_BUFFER_BIT);
         }
-        let needs_scratch = match (&self.state, &self.current) {
-            (State::Transitioning { incoming, .. }, Some(c)) => {
-                !(c.is_single() && incoming.is_single())
-            }
-            _ => false,
-        };
+        let needs_scratch = matches!(
+            (&self.state, &self.current),
+            (State::Transitioning { incoming, .. }, Some(c))
+                if !(c.is_single() && incoming.is_single())
+        );
         // Without its scratch pair (GPU out of memory) a collage transition
         // becomes a cut to the incoming collage.
         let mut cut = false;
@@ -2186,7 +2185,7 @@ impl<P: VideoPlayer> crate::app::Slideshow for Pipeline<P> {
     fn shown_is_video(&self) -> bool {
         Pipeline::shown_is_video(self)
     }
-    fn shown_layout(&self) -> String {
+    fn shown_layout(&self) -> Option<String> {
         Pipeline::shown_layout(self)
     }
     fn is_animating(&self) -> bool {

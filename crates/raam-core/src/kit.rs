@@ -8,6 +8,7 @@
 //! `theme::install` sets. Its checkbox, slider and text edit didn't pass on
 //! the frame, so the kit has its own (the text field keeps egui's editing).
 use crate::icons;
+use crate::schedule;
 use crate::theme::{self, Scheme, Type, layer, scheme, shape, size, space, state};
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{
@@ -341,13 +342,13 @@ fn focus_ring_inside(ui: &Ui, resp: &Response, shape: Rect, corner: CornerRadius
 pub(crate) const ROBOTO_CAP: f32 = 1456.0 / 2048.0;
 pub(crate) const ROBOTO_DESCENT: f32 = 500.0 / 2048.0;
 
-/// Paints `galley` with its first baseline on `y`, rounded to a whole pixel;
 /// A laid-out row's baseline: where its first glyph sits, or `None` for an
 /// empty row.
 fn first_baseline(r: &egui::epaint::text::PlacedRow) -> Option<f32> {
     r.glyphs.first().map(|g| r.pos.y + g.pos.y)
 }
 
+/// Paints `galley` with its first baseline on `y`, rounded to a whole pixel;
 /// `x` is its left, centre or right edge by `align`. Returns where it went.
 pub(crate) fn galley_on_baseline(
     p: &Painter,
@@ -2560,15 +2561,10 @@ pub fn time_picker(ui: &mut Ui, minutes: &mut u32, step: u32) -> bool {
         0.0..=(DAY - step) as f32,
         step as f32,
         wrap,
-        |v| fmt_hm(v as u32),
+        |v| schedule::fmt_hm(v as u32),
     );
     *minutes = v as u32;
     changed
-}
-
-/// Minutes after midnight as HH:MM (as `schedule::fmt_hm` writes them).
-pub fn fmt_hm(min: u32) -> String {
-    format!("{:02}:{:02}", min / 60, min % 60)
 }
 
 /// An M3 dialog through egui's own Modal: extra-large corners on
@@ -2663,20 +2659,6 @@ mod tests {
 
     fn ring_of(r: Rect) -> Rect {
         r.expand(RING_GAP + RING)
-    }
-
-    #[test]
-    fn minutes_after_midnight_read_as_hh_mm() {
-        let cases = [
-            (0, "00:00"),
-            (5, "00:05"),
-            (60, "01:00"),
-            (1380, "23:00"),
-            (1439, "23:59"),
-        ];
-        for (min, want) in cases {
-            assert_eq!(fmt_hm(min), want, "{min}");
-        }
     }
 
     #[test]

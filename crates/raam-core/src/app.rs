@@ -109,7 +109,7 @@ pub trait Slideshow {
     fn unforget(&mut self, key: &str);
     fn shown_scale_mode(&self) -> Option<ScaleMode>;
     fn shown_is_video(&self) -> bool;
-    fn shown_layout(&self) -> String;
+    fn shown_layout(&self) -> Option<String>;
     fn is_animating(&self) -> bool;
     fn recompose_pending(&self) -> bool;
     fn next_deadline(&self) -> Option<Duration>;
@@ -790,7 +790,7 @@ impl App {
                 }
             }
             self.state.status = Status {
-                layout: (layout != "-").then_some(layout),
+                layout,
                 weather: self.weather_status.clone(),
                 online: stage.library.online(),
             };
@@ -1129,10 +1129,6 @@ impl App {
         out
     }
 
-    /// A key while the menu is closed (docs/UX.md, Keys): the arrows go to
-    /// the previous and next photo, Escape does nothing, and any other key
-    /// opens the menu as a tap does. A repeat or a shortcut (Ctrl, Alt,
-    /// Command held) is not a tap. True if it opened the menu.
     /// Queues a key or typed text for its turn. The menu takes one press a
     /// pass, so a held key's repeats (about 30 a second) would outrun a
     /// slow frame and keep the focus moving long after the key is let go:
@@ -1150,12 +1146,16 @@ impl App {
             return;
         }
         if self.keys.len() >= MAX_QUEUED_KEYS {
-            log::debug!("key queue full: a key dropped");
+            log::warn!("key queue full: a key dropped");
             return;
         }
         self.keys.push_back(item);
     }
 
+    /// A key while the menu is closed (docs/UX.md, Keys): the arrows go to
+    /// the previous and next photo, Escape does nothing, and any other key
+    /// opens the menu as a tap does. A repeat or a shortcut (Ctrl, Alt,
+    /// Command held) is not a tap. True if it opened the menu.
     fn slideshow_key(
         &mut self,
         k: &KeyEvent,
@@ -1168,7 +1168,7 @@ impl App {
         }
         // Nothing shown yet: nothing to go back or on from (the menu
         // disables Previous and Next then too).
-        let showing = slideshow.shown_layout() != "-";
+        let showing = slideshow.shown_layout().is_some();
         match k.key {
             egui::Key::ArrowRight if showing => slideshow.request_next(),
             egui::Key::ArrowLeft if showing => slideshow.request_prev(source),
@@ -1356,8 +1356,8 @@ mod tests {
         fn shown_is_video(&self) -> bool {
             false
         }
-        fn shown_layout(&self) -> String {
-            "1 (single)".into()
+        fn shown_layout(&self) -> Option<String> {
+            Some("1 (single)".into())
         }
         fn is_animating(&self) -> bool {
             false

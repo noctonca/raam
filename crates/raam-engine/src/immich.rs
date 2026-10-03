@@ -110,7 +110,7 @@ impl Client {
     pub fn album_assets(&self, album_id: &str) -> Result<Vec<RemoteAsset>, ProviderError> {
         let mut out = Vec::new();
         let mut page = 1;
-        loop {
+        for _ in 0..limits::IMMICH_MAX_PAGES {
             let body = self.post_json(
                 "/api/search/metadata",
                 &serde_json::json!({ "albumIds": [album_id], "size": limits::IMMICH_PAGE_SIZE, "page": page }),
@@ -143,10 +143,14 @@ impl Client {
                 .and_then(|p| p.parse().ok())
             {
                 Some(next) if next > page => page = next,
-                _ => break,
+                _ => return Ok(out),
             }
         }
-        Ok(out)
+        // Never a partial list: the sync would drop every asset past it.
+        Err(ProviderError::Failed(format!(
+            "album {album_id}: more than {} pages",
+            limits::IMMICH_MAX_PAGES
+        )))
     }
 
     /// The preview JPEG's bytes, as the server sends them.
@@ -179,8 +183,15 @@ impl Client {
     /// `GET /api/assets/{id}/video/playback`: the H.264 transcode when the
     /// server made one, otherwise the original file as uploaded. Streamed
     /// to `dest`, never held in memory (clips run 2-28 MB against a few MB
-    /// free). Returns the bytes written.
-    pub fn download_video(&self, id: &str, dest: &std::path::Path) -> Result<u64, ProviderError> {
+    /// free). Returns the bytes written. Stops after `max_bytes + 1`: a
+    /// count over `max_bytes` means the clip is bigger than that, and the
+    /// file cut short.
+    pub fn download_video(
+        &self,
+        id: &str,
+        dest: &std::path::Path,
+        max_bytes: u64,
+    ) -> Result<u64, ProviderError> {
         let mut resp = self
             .http
             .get(format!(
@@ -201,7 +212,9 @@ impl Client {
         }
         let mut file = std::fs::File::create(dest)
             .map_err(|e| ProviderError::Failed(format!("create {}: {e}", dest.display())))?;
-        let n = std::io::copy(&mut resp.body_mut().as_reader(), &mut file)
+        // The reader has no limit of its own (ureq's default is none).
+        let mut body = std::io::Read::take(resp.body_mut().as_reader(), max_bytes + 1);
+        let n = std::io::copy(&mut body, &mut file)
             .map_err(|e| ProviderError::Transport(format!("video body: {e}")))?;
         file.sync_all()
             .map_err(|e| ProviderError::Failed(format!("sync {}: {e}", dest.display())))?;
@@ -351,4 +364,45 @@ pub fn chain(e: &dyn std::error::Error) -> String {
         source = s.source();
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// Serves one response with a `len`-byte body on a local port.
+    fn serve_once(len: usize) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {len}\r\n\r\n");
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&vec![0xaa; len]);
+        });
+        url
+    }
+
+    /// A clip bigger than the room left stops one byte past it, so the
+    /// caller can tell, and never fills the disk.
+    #[test]
+    fn a_clip_download_stops_past_its_limit() {
+        let dir = std::env::temp_dir().join(format!("raam-download-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("clip.mp4.part");
+        for (len, max, written) in [(1000, 4096, 1000), (10_000, 4096, 4097)] {
+            let client = Client::new(Config {
+                url: serve_once(len),
+                key: "key".into(),
+            })
+            .unwrap();
+            assert_eq!(client.download_video("a", &dest, max).unwrap(), written);
+            assert_eq!(std::fs::metadata(&dest).unwrap().len(), written);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

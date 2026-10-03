@@ -37,8 +37,15 @@ pub trait Provider {
     fn fetch_focus(&mut self, _media: &MediaRef) -> Result<Option<Focus>, ProviderError> {
         Ok(None)
     }
-    /// The clip to play, written to `dest`; the bytes written.
-    fn fetch_video(&mut self, _media: &MediaRef, _dest: &Path) -> Result<u64, ProviderError> {
+    /// The clip to play, written to `dest`; the bytes written. It stops
+    /// after `max_bytes + 1`, so a count over `max_bytes` is a clip too big
+    /// to keep, cut short.
+    fn fetch_video(
+        &mut self,
+        _media: &MediaRef,
+        _dest: &Path,
+        _max_bytes: u64,
+    ) -> Result<u64, ProviderError> {
         Err(ProviderError::Failed(
             "this source has no clips to fetch".into(),
         ))
@@ -147,11 +154,16 @@ impl Provider for ImmichProvider {
         ))
     }
 
-    fn fetch_video(&mut self, media: &MediaRef, dest: &Path) -> Result<u64, ProviderError> {
+    fn fetch_video(
+        &mut self,
+        media: &MediaRef,
+        dest: &Path,
+        max_bytes: u64,
+    ) -> Result<u64, ProviderError> {
         self.client
             .as_ref()
             .ok_or(no_client())?
-            .download_video(&media.id, dest)
+            .download_video(&media.id, dest, max_bytes)
     }
 }
 

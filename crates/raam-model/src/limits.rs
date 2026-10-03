@@ -33,6 +33,11 @@ pub const MINUTES_PER_DAY: u32 = 24 * 60;
 /// Awake by hand during sleep hours: back to sleep after this long
 /// untouched. Chosen.
 pub const DEFAULT_MANUAL_IDLE: Duration = Duration::from_secs(10 * 60);
+/// A wake alarm that failed to set is tried again after this long, the
+/// screen staying on meanwhile. Chosen: soon enough that a passing fault
+/// costs a minute of screen, slow enough that a lasting one doesn't spin
+/// the loop or flood the log.
+pub const ALARM_RETRY: Duration = Duration::from_secs(60);
 
 // ---- the app controller (input, overlay, saving) --------------------------
 

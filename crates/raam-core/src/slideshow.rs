@@ -184,6 +184,12 @@ impl KenBurns {
         }
     }
 
+    /// The window is still changing at `now`: a clip's still window never
+    /// does, and a motion is over once its duration has run.
+    fn moving(&self, now: Duration) -> bool {
+        self.zoom_from != self.zoom_to && now < self.born + self.duration
+    }
+
     /// Re-aims at a face after the slide under it was recomposed with a
     /// different scaling. Keeps the zoom and timing so the motion carries on.
     fn refocus(&mut self, focal: Option<(f32, f32)>) {
@@ -996,12 +1002,23 @@ impl<P: VideoPlayer> Pipeline<P> {
         )
     }
 
+    /// Needs `update` every frame: a transition, a first frame on its way,
+    /// or a clip playing (not paused). Ken Burns is `ken_burns_moving`.
     pub fn is_animating(&self) -> bool {
         self.is_transitioning()
-            || (self.has_slide() && self.settings.ken_burns && !self.clock.paused())
-            // A first frame on its way, or a clip playing (not paused).
             || self.building.as_ref().is_some_and(|b| b.probe.is_some())
             || self.video.animating(self.video_paused())
+    }
+
+    /// A tile on screen is panning or zooming, so every frame draws
+    /// something new. Only the drawing needs it: nothing waits on it.
+    pub fn ken_burns_moving(&self) -> bool {
+        self.settings.ken_burns
+            && !self.clock.paused()
+            && self.current.as_ref().is_some_and(|c| {
+                let now = self.clock.now();
+                c.tiles.iter().any(|t| t.kb.moving(now))
+            })
     }
 
     fn video_paused(&self) -> bool {
@@ -2192,6 +2209,9 @@ impl<P: VideoPlayer> crate::app::Slideshow for Pipeline<P> {
     fn is_animating(&self) -> bool {
         Pipeline::is_animating(self)
     }
+    fn ken_burns_moving(&self) -> bool {
+        Pipeline::ken_burns_moving(self)
+    }
     fn recompose_pending(&self) -> bool {
         Pipeline::recompose_pending(self)
     }
@@ -2203,6 +2223,16 @@ impl<P: VideoPlayer> crate::app::Slideshow for Pipeline<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ken_burns_moves_until_its_duration_runs_and_a_still_never_does() {
+        let born = Duration::from_secs(100);
+        let kb = KenBurns::new(Some((0.5, 0.5)), 1, born, Duration::from_secs(10));
+        assert!(kb.moving(born));
+        assert!(kb.moving(born + Duration::from_secs(9)));
+        assert!(!kb.moving(born + Duration::from_secs(10)));
+        assert!(!KenBurns::still(born).moving(born));
+    }
 
     fn photo(w: u32, h: u32, bytes: usize) -> Photo {
         Photo {

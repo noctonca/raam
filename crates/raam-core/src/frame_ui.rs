@@ -15,6 +15,7 @@
 use crate::icons;
 use crate::kit::{self, ButtonKind, DialogResult, ListItem, Tone, ToolItem, Trailing};
 use crate::network::{self, JoinStage, LinkKind, NetCommand, NetSnapshot, Security, Ssid, Wifi};
+use crate::schedule;
 use crate::theme::{self, Type, scheme, size, space};
 use egui::{Align, CornerRadius, Ui, UiBuilder};
 use raam_model::limits::{
@@ -1229,7 +1230,7 @@ fn status_line(st: &AppState) -> String {
         parts.push(st.status.weather.clone());
     }
     if s.sleep_enabled {
-        parts.push(format!("sleeps at {}", kit::fmt_hm(s.sleep_min)));
+        parts.push(format!("sleeps at {}", schedule::fmt_hm(s.sleep_min)));
     }
     parts.join("  ·  ")
 }
@@ -2098,7 +2099,7 @@ fn sleep_page(ui: &mut Ui, st: &mut AppState) {
             .supporting("A tap on the screen wakes it for a while")
             .trailing(Trailing::Switch(&mut s.sleep_enabled)),
     );
-    let (sleep, wake) = (kit::fmt_hm(s.sleep_min), kit::fmt_hm(s.wake_min));
+    let (sleep, wake) = (schedule::fmt_hm(s.sleep_min), schedule::fmt_hm(s.wake_min));
     // The dialog a tap opens, and the time it starts on.
     let mut open = None;
     ui.add_enabled_ui(s.sleep_enabled, |ui| {

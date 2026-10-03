@@ -26,6 +26,7 @@ impl Schedule {
     }
 }
 
+/// Minutes after midnight as HH:MM.
 pub fn fmt_hm(min: u32) -> String {
     format!("{:02}:{:02}", min / 60, min % 60)
 }
@@ -103,6 +104,20 @@ mod tests {
         assert_eq!(parse_hm(" 5:07 "), Some(5 * 60 + 7));
         assert_eq!(parse_hm("24:00"), None);
         assert_eq!(fmt_hm(23 * 60 + 5), "23:05");
+    }
+
+    #[test]
+    fn minutes_after_midnight_read_as_hh_mm() {
+        let cases = [
+            (0, "00:00"),
+            (5, "00:05"),
+            (60, "01:00"),
+            (1380, "23:00"),
+            (1439, "23:59"),
+        ];
+        for (min, want) in cases {
+            assert_eq!(fmt_hm(min), want, "{min}");
+        }
     }
 
     #[test]

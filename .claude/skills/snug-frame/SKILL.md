@@ -46,7 +46,7 @@ then any `product:SNFRM` device. If neither is there, the address is
 in local memory (`frame-recovery-paths`) or the brain (search "frame
 IP wireless adb"); `adb connect <ip>:5555`. The DHCP lease drifts, so a
 dead address may only mean it moved: look up the frame's address on
-the router (ask the owner) before assuming Wi-Fi is down.
+the router (ask the maintainer) before assuming Wi-Fi is down.
 
 Start any session that will touch the frame with `$S status`. The
 frame's state changes between sessions (factory resets, restores,
@@ -69,14 +69,14 @@ accordingly.
    uninstalling. Say what you're about to do and why first. If it's a
    setup or debug aid that stays on the frame, record it in
    `docs/FRAME-SETUP.md` in the same change (what, why, undo). That's
-   the owner's standing rule: a fresh frame must be rebuildable from
+   the maintainer's standing rule: a fresh frame must be rebuildable from
    that file.
 4. **Below Android.** Writing `/system`, `dd` onto a block device,
    anything with `rkdeveloptool wl`, a factory reset, `reboot recovery`.
-   Needs the owner's explicit yes for this specific action, a fresh
+   Needs the maintainer's explicit yes for this specific action, a fresh
    verified backup, and a way back. Claude Code's auto-mode classifier
    blocks these even after a yes, so write the steps as a script (with
-   `set -e`, checks and a read-back) and have the owner run it as
+   `set -e`, checks and a read-back) and have the maintainer run it as
    `! sh <script>`. **Never write `uboot`**: it holds the flash mode
    that every other recovery depends on.
 
@@ -130,7 +130,7 @@ What the commands take care of, and why:
 - **`install DIR` restores before the first launch.** Raam missing from
   a frame where it used to be usually means a factory reset or a
   restore (the brain's latest hand-off normally says which). If the
-  owner wants their old Raam back, pass the backups folder's newest
+  maintainer wants their old Raam back, pass the backups folder's newest
   `app-data-*`. The command checks it first (`raam.db` checkpointed and
   passing `integrity_check`), pushes `Frame/` to `/sdcard/Pictures/Frame`
   and `frame-curation.json` beside it, installs, grants, copies the
@@ -139,7 +139,7 @@ What the commands take care of, and why:
   restored settings. On the first launch the startup sweep drops every
   cache row whose file isn't there (all of them, after a restore), and
   Raam fetches those photos again. Without DIR, Raam starts empty and
-  the owner re-enters the server and albums.
+  the maintainer re-enters the server and albums.
 - **`backup DIR` stops Raam and copies in one root script**, because a
   home Raam is relaunched about 2 s after a stop. It checkpoints the
   copy locally, so the folder holds `raam.db` alone (the shape `install
@@ -152,7 +152,7 @@ What the commands take care of, and why:
 first. An update never needs it (`deploy` keeps the data). Uninstalling
 deletes Raam's data folder, `raam.db` with it (settings, server key,
 albums, curation), so the command backs up into DIR first; pass
-`--no-backup` only on the owner's word that the data can go. It then
+`--no-backup` only on the maintainer's word that the data can go. It then
 clears the props, gives the home back to Frameo if it's disabled (a
 plain uninstall while Raam is home leaves the frame with no home app),
 uninstalls, reboots, and proves Raam is gone and Frameo is in front.
@@ -160,7 +160,7 @@ uninstalls, reboots, and proves Raam is gone and Frameo is in front.
 It keeps `/sdcard/Pictures/Frame`, the curation export and the
 development changes in FRAME-SETUP §3 (wireless adb, the disabled
 updaters, the boot hook): they're the way back in. Delete the photos
-folder and the export only on the owner's word.
+folder and the export only on the maintainer's word.
 
 ### Seeing and touching it
 
@@ -210,7 +210,7 @@ loop pass, so most take effect live. `$S props` lists what's set, and
 | `audio_extra_ms` | ms | override the audio delay calibration |
 
 Clear every prop you set before you finish. A forgotten `sleep`/`wake`
-override silently replaces the owner's schedule until the next reboot.
+override silently replaces the maintainer's schedule until the next reboot.
 
 ### Deeper checks
 
@@ -280,7 +280,7 @@ $S frameo enable    # the undo
 **Frameo is disabled, never uninstalled.** The factory Frameo
 (1.13.4) lives in `/system/priv-app`, so removing it means writing
 `/system`, which is tier 4. Disabling gets the same result and can be
-undone. Don't go further unless the owner asks for it.
+undone. Don't go further unless the maintainer asks for it.
 
 **Undoing Frameo's self-update** (untested on this frame): `pm
 uninstall net.frameo.frame` should remove only the 1.32.x update in
@@ -309,7 +309,7 @@ answers, report what you found and answer the question you were
 asked: why it was unreachable, and why the screen looks the way it
 does. Other things you notice, like Raam missing, the boot hook gone
 or a stale APK, go in one short "also noticed" list as offers. Don't
-fold reinstalling or reconfiguring into the recovery plan: the owner
+fold reinstalling or reconfiguring into the recovery plan: the maintainer
 asked for the frame back, not a rebuild.
 
 ## After a session on the frame

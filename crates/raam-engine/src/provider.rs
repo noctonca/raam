@@ -343,7 +343,7 @@ fn describe(path: &str, stamp: (i64, i64)) -> Result<MediaRef, String> {
     dec.read_info().map_err(|e| format!("jpeg header: {e}"))?;
     let info = dec.info().ok_or("no jpeg info")?;
     let (orientation, taken) = read_exif(Path::new(path));
-    let (w, h) = (info.width as u32, info.height as u32);
+    let (w, h) = (u32::from(info.width), u32::from(info.height));
     let (width, height) = if (5..=8).contains(&orientation) {
         (h, w)
     } else {
@@ -453,7 +453,7 @@ fn make_preview(path: &Path, short_side: u32) -> Result<Preview, String> {
     let mut dec = jpeg_decoder::Decoder::new(std::io::BufReader::new(file));
     dec.read_info().map_err(|e| format!("jpeg header: {e}"))?;
     let info = dec.info().ok_or("no jpeg info")?;
-    let (src_w, src_h) = (info.width as u32, info.height as u32);
+    let (src_w, src_h) = (u32::from(info.width), u32::from(info.height));
     let short = src_w.min(src_h).max(1);
     let (req_w, req_h) = if short > short_side {
         (
@@ -468,7 +468,7 @@ fn make_preview(path: &Path, short_side: u32) -> Result<Preview, String> {
         .map_err(|e| format!("jpeg scale: {e}"))?;
     let pixels = dec.decode().map_err(|e| format!("jpeg decode: {e}"))?;
     let info = dec.info().ok_or("no jpeg info")?;
-    let (w, h) = (w as u32, h as u32);
+    let (w, h) = (u32::from(w), u32::from(h));
     let rgb = match info.pixel_format {
         jpeg_decoder::PixelFormat::RGB24 => pixels,
         jpeg_decoder::PixelFormat::L8 => pixels.iter().flat_map(|&l| [l, l, l]).collect(),
@@ -533,7 +533,9 @@ fn read_exif(path: &Path) -> (u8, Option<i64>) {
     let orientation = exif
         .get_field(exif::Tag::Orientation, exif::In::PRIMARY)
         .and_then(|f| f.value.get_uint(0))
-        .unwrap_or(1) as u8;
+        // Out of range is as unknown as missing: upright.
+        .and_then(|o| u8::try_from(o).ok())
+        .unwrap_or(1);
     let taken = exif
         .get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY)
         .and_then(|f| match &f.value {
@@ -541,14 +543,18 @@ fn read_exif(path: &Path) -> (u8, Option<i64>) {
             _ => None,
         });
     let taken_ms = taken.and_then(|d| {
+        // SAFETY: `tm` is plain integers plus, on some libcs, a `tm_zone`
+        // pointer, for which null is valid; all-zero is a valid `tm`.
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        tm.tm_year = d.year as i32 - 1900;
-        tm.tm_mon = d.month as i32 - 1;
-        tm.tm_mday = d.day as i32;
-        tm.tm_hour = d.hour as i32;
-        tm.tm_min = d.minute as i32;
-        tm.tm_sec = d.second as i32;
+        tm.tm_year = i32::from(d.year) - 1900;
+        tm.tm_mon = i32::from(d.month) - 1;
+        tm.tm_mday = i32::from(d.day);
+        tm.tm_hour = i32::from(d.hour);
+        tm.tm_min = i32::from(d.minute);
+        tm.tm_sec = i32::from(d.second);
         tm.tm_isdst = -1;
+        // SAFETY: `tm` is a valid, exclusively borrowed `tm` for the call;
+        // mktime only normalises it in place and reads the zone.
         let t = unsafe { libc::mktime(&mut tm) };
         (t != -1).then_some(t as i64 * 1000)
     });

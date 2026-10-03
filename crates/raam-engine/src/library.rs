@@ -252,7 +252,10 @@ fn free_bytes(path: &Path) -> u64 {
     let Ok(c) = std::ffi::CString::new(path.to_string_lossy().as_bytes()) else {
         return 0;
     };
+    // SAFETY: `statvfs` is plain integers; all-zero is a valid value.
     let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c` is a NUL-terminated string that outlives the call, and
+    // `st` is a valid, exclusively borrowed `statvfs` for it to fill.
     if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
         return 0;
     }

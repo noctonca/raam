@@ -606,7 +606,7 @@ fn decode_jpeg_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let mut dec = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
     let pixels = dec.decode().map_err(|err| format!("jpeg decode: {err}"))?;
     let info = dec.info().ok_or("no jpeg info")?;
-    let (w, h) = (info.width as u32, info.height as u32);
+    let (w, h) = (u32::from(info.width), u32::from(info.height));
     let rgba = match info.pixel_format {
         jpeg_decoder::PixelFormat::RGB24 => pixels
             .as_chunks::<3>()

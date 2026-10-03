@@ -382,11 +382,57 @@ pub fn content(style: ClockStyle, h24: bool, t: &LocalTime, weather: Option<Weat
             ClockStyle::Simple | ClockStyle::Off => format!("{h}:{:02}", t.min),
         }
     };
-    let mon = MONTHS[t.mon.clamp(0, 11) as usize];
+    // A month or weekday out of range is a clock bug, not a time to show.
+    assert!(
+        (0..12).contains(&t.mon),
+        "LocalTime month {} out of range",
+        t.mon
+    );
+    assert!(
+        (0..7).contains(&t.wday),
+        "LocalTime weekday {} out of range",
+        t.wday
+    );
+    let mon = MONTHS[t.mon as usize];
     Content {
         time,
         short_date: format!("{mon} {}", t.mday),
-        long_date: format!("{}, {mon} {}", DAYS[t.wday.clamp(0, 6) as usize], t.mday),
+        long_date: format!("{}, {mon} {}", DAYS[t.wday as usize], t.mday),
         weather,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(mon: i32, wday: i32) -> LocalTime {
+        LocalTime {
+            hour: 9,
+            min: 5,
+            sec: 0,
+            mday: 3,
+            mon,
+            wday,
+        }
+    }
+
+    #[test]
+    fn content_names_the_month_and_day() {
+        let c = content(ClockStyle::Detailed, true, &at(9, 6), None);
+        assert_eq!(c.time, "09:05");
+        assert_eq!(c.long_date, "Sat, Oct 3");
+    }
+
+    #[test]
+    #[should_panic(expected = "month 12 out of range")]
+    fn a_month_out_of_range_is_a_bug() {
+        content(ClockStyle::Detailed, true, &at(12, 0), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "weekday -1 out of range")]
+    fn a_weekday_out_of_range_is_a_bug() {
+        content(ClockStyle::Detailed, true, &at(0, -1), None);
     }
 }

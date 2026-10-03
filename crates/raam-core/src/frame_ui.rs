@@ -22,8 +22,8 @@ use raam_model::limits::{
     INTERVAL_RANGE_SECS, LARGEST_LAYOUT,
 };
 use raam_model::{
-    AlbumRow, ClockStyle, Corner, FitBackground, GapColour, Prefetch, ScaleMode, Settings, Stats,
-    TransitionChoice, VideoPlayback,
+    AlbumRow, ClockStyle, Corner, FitBackground, GapColour, Prefetch, ScaleMode, Settings,
+    SourceKind, Stats, TransitionChoice, VideoPlayback,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -513,14 +513,17 @@ pub fn sample_stats() -> Stats {
             raam_model::HiddenItem {
                 key: "local:IMG_2041".into(),
                 label: "Folder: IMG_2041.jpg".into(),
+                source: Some(SourceKind::Local),
             },
             raam_model::HiddenItem {
                 key: "immich:a1b2c3d4".into(),
                 label: "Immich, taken 12 Mar 2023 (a1b2c3d4)".into(),
+                source: Some(SourceKind::Immich),
             },
             raam_model::HiddenItem {
                 key: "gone:9f8e7d6c".into(),
                 label: "not in any source now (9f8e7d6c)".into(),
+                source: None,
             },
         ],
         export_note: "exported to /sdcard/Pictures/frame-curation.json".into(),
@@ -1754,12 +1757,10 @@ fn hidden_page(ui: &mut Ui, st: &mut AppState) {
     }
     kit::section_header(ui, "Most recently hidden first");
     for item in lib.hidden.iter().take(HIDDEN_LIST_MAX) {
-        let icon = if item.label.starts_with("Folder") {
-            icons::FOLDER
-        } else if item.label.starts_with("Immich") {
-            icons::CLOUD
-        } else {
-            icons::IMAGE
+        let icon = match item.source {
+            Some(SourceKind::Local) => icons::FOLDER,
+            Some(SourceKind::Immich) => icons::CLOUD,
+            None => icons::IMAGE,
         };
         let label = sentence(&item.label);
         if kit::list_item(

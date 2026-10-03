@@ -740,7 +740,8 @@ pub fn hidden_list(conn: &Connection) -> Vec<HiddenItem> {
                 ),
                 (None, _) => format!("not in any source now ({short})"),
             };
-            out.push(HiddenItem { key, label });
+            let source = kind.as_deref().map(SourceKind::parse);
+            out.push(HiddenItem { key, label, source });
         }
     }
     out
@@ -1383,6 +1384,29 @@ mod tests {
             params![id, kind, playable.map(|p| p.0), playable.map(|p| p.1)],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_hidden_photo_says_which_source_has_it() {
+        install_clock();
+        let db = open(Path::new(":memory:"), "").unwrap();
+        let conn = db.lock().unwrap();
+        set_immich_server(&conn, "http://immich.local:2283", "key").unwrap();
+        asset(&conn, "a1", "image", None);
+        set_hidden(&conn, "immich:a1", true).unwrap();
+        set_hidden(&conn, "gone", true).unwrap();
+        let mut seen: Vec<(String, Option<SourceKind>)> = hidden_list(&conn)
+            .into_iter()
+            .map(|h| (h.key, h.source))
+            .collect();
+        seen.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            seen,
+            [
+                ("gone".to_string(), None),
+                ("immich:a1".to_string(), Some(SourceKind::Immich)),
+            ]
+        );
     }
 
     #[test]

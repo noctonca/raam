@@ -1,6 +1,8 @@
 //! What the settings panel shows about the library, refreshed after each
 //! library step and published behind a version counter.
 
+use crate::SourceKind;
+
 /// An album as the picker shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AlbumRow {
@@ -19,6 +21,9 @@ pub struct AlbumRow {
 pub struct HiddenItem {
     pub key: String,
     pub label: String,
+    /// Where the photo is now; `None` when no source the frame syncs has
+    /// it (gone, or one of the web demo's own samples).
+    pub source: Option<SourceKind>,
 }
 
 /// Where the Immich prefetch stands: the engine sets it, the Cache row

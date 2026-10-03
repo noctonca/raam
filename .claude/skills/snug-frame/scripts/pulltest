@@ -247,10 +247,13 @@ check() {
     done
     [ -n "$id" ] && [ "$id" != "$old" ] || die "no new boot in 6 min"
     ok "booted, up $(sh_ cut -d. -f1 /proc/uptime) s"
+    # su answers only once its daemon is up, some seconds into the boot.
+    for i in $(seq 1 30); do
+        sh_ su -c id 2>/dev/null | grep -q 'uid=0' && break
+        sleep 2
+    done
+    sh_ su -c id 2>/dev/null | grep -q 'uid=0' || die "su isn't answering 60 s after the boot"
     stop_local
-    # The watcher died with the old boot; its script may still be there.
-    sh_ "su -c 'rm -f $WATCH $WATCH_PID $MARKER'"
-
     if [ -n "$grace" ]; then
         # Stopping Raam would restart the grace timer: follow it untouched.
         step "follow the log ${GRACE_S} s, untouched"
@@ -265,7 +268,11 @@ check() {
     sh_ "date '+%Y-%m-%d %H:%M:%S'" > "$run/checked-at.txt"
 
     step "copy raam.db and the cache listings with Raam stopped"
+    # The watcher died with the old boot, but its files are still there.
+    # They go here rather than right after the boot: su isn't ready for
+    # the first seconds, and a failed rm left them to block the next arm.
     root "copy" <<EOF
+rm -f $WATCH $WATCH_PID $MARKER
 am force-stop $PKG
 rm -rf $SCRATCH
 mkdir -p $SCRATCH

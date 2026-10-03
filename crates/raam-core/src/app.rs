@@ -116,8 +116,10 @@ pub trait Slideshow {
 
 /// The library's numbers for the status line and settings panel.
 pub trait LibraryInfo {
-    /// A change counter and the stats snapshot.
-    fn stats(&self) -> (u64, Stats);
+    /// Bumped whenever the stats change.
+    fn version(&self) -> u64;
+    /// A copy of the stats, taken only when `version` moved.
+    fn stats(&self) -> Stats;
     fn online(&self) -> bool;
 }
 
@@ -738,7 +740,7 @@ impl App {
                 .undo
                 .as_ref()
                 .map(|u| UNDO_HIDE.saturating_sub(clock::elapsed(u.1)).as_secs() + 1);
-            let (version, lib_stats) = stage.library.stats();
+            let version = stage.library.version();
             let layout = stage.slideshow.shown_layout();
             self.state.has_weather = stage.weather.is_some();
             // A join under way, or the network list filling in, is being
@@ -808,8 +810,13 @@ impl App {
                 || version != self.stats_version
                 || net_moved;
             if need_run {
-                self.stats_version = version;
-                self.state.library = lib_stats;
+                // The copy follows the version read: a change between the
+                // two lands here early and moves the version once more,
+                // which costs one extra run, never a missed one.
+                if version != self.stats_version {
+                    self.stats_version = version;
+                    self.state.library = stage.library.stats();
+                }
                 let t = clock::now();
                 let state = &mut self.state;
                 let mut full_output = self.ctx.run_ui(raw_input, |ui| frame_ui::draw(ui, state));
@@ -1359,10 +1366,18 @@ mod tests {
         fn set_skip_videos(&self, _skip: bool) {}
     }
 
-    struct FakeLib;
+    struct FakeLib {
+        version: Cell<u64>,
+        /// How many times the stats were copied out.
+        fetches: Cell<u32>,
+    }
     impl LibraryInfo for FakeLib {
-        fn stats(&self) -> (u64, Stats) {
-            (1, Stats::default())
+        fn version(&self) -> u64 {
+            self.version.get()
+        }
+        fn stats(&self) -> Stats {
+            self.fetches.set(self.fetches.get() + 1);
+            Stats::default()
         }
         fn online(&self) -> bool {
             true
@@ -1481,7 +1496,10 @@ mod tests {
                 app,
                 show: FakeShow::new(),
                 source: FakeSource,
-                lib: FakeLib,
+                lib: FakeLib {
+                    version: Cell::new(1),
+                    fetches: Cell::new(0),
+                },
                 weather: Some(FakeWeather::default()),
                 power,
                 net: None,
@@ -1569,6 +1587,20 @@ mod tests {
             self.key(egui::Key::Enter);
             self.frame(&[]);
         }
+    }
+
+    #[test]
+    fn the_library_stats_are_copied_only_when_they_moved() {
+        let mut rig = Rig::new(None);
+        rig.tap(640.0, 400.0);
+        assert!(rig.app.overlay_open());
+        for _ in 0..5 {
+            rig.frame(&[]);
+        }
+        assert_eq!(rig.lib.fetches.get(), 1, "one copy while nothing moved");
+        rig.lib.version.set(2);
+        rig.frame(&[]);
+        assert_eq!(rig.lib.fetches.get(), 2, "a new copy once it moved");
     }
 
     #[test]

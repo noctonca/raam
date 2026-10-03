@@ -100,17 +100,9 @@ adb -s $T shell rm -f /sdcard/raam.db /sdcard/raam.db-wal /sdcard/raam.db-shm
   app's ownership. A guessed uid once made the database unreadable to
   Raam. If it happens, `ls -n` the files dir for the real uid and
   `chown <uid>:<uid>`.
-- **Restoring onto a fresh install** is the one case with no existing
-  file to copy over. Install, grant, and don't launch. Then create the
-  folder, copy the database in and give it the app's own uid, read from
-  the app's data folder rather than guessed (it changes with every
-  install):
-  ```sh
-  adb -s $T push raam.db /sdcard/raam.db
-  adb -s $T shell "su -c 'D=/data/data/io.github.noctonca.raam; U=\$(stat -c %u \$D); mkdir -p \$D/files && cp /sdcard/raam.db \$D/files/raam.db && chown -R \$U:\$U \$D/files && chmod 600 \$D/files/raam.db && rm /sdcard/raam.db'"
-  ```
-  The database must be checkpointed (no `-wal`/`-shm` beside it). The
-  backups' `app-data-*` copies are.
+- **Restoring onto a fresh install** is `frame install DIR` (SKILL.md):
+  there's no existing file to copy over, so the database has to go in
+  owned by the app's uid, before the first launch.
 - **The double force-stop is required.** When Raam is home, the system
   relaunches it about 2 s after the first stop, and that process opens
   the database mid-copy. The second stop kills it. Expect the pid to

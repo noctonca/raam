@@ -60,6 +60,9 @@ if command -v adb >/dev/null 2>&1; then
     if [ -n "${RAAM_FRAME_SERIAL:-}" ]; then
         if adb devices | grep -q "^${RAAM_FRAME_SERIAL}[[:space:]]"; then
             ok frame
+        elif adb devices -l | grep -q ' device .*product:SNFRM'; then
+            # Over wireless adb the frame is <ip>:5555, not its serial.
+            ok "frame (wireless adb)"
         else
             warn frame "$RAAM_FRAME_SERIAL not in 'adb devices' (adb connect, or USB)"
         fi

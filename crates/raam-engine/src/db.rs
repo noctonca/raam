@@ -1559,7 +1559,7 @@ mod tests {
         all.extend(VideoPlayback::ALL.map(|v| with(&|s| s.video_playback = v)));
         for s in &all {
             let rows = raam_core::store::settings_rows(s);
-            save_settings(&conn, &rows, (false, 60, 420)).unwrap();
+            save_settings(&conn, &rows, OFF_1_TO_7).unwrap();
             let mut loaded = Settings::defaults("", "");
             load_settings(&conn, &mut loaded);
             assert_eq!(raam_core::store::settings_rows(&loaded), rows);

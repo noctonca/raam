@@ -281,6 +281,7 @@ impl Live {
                         stats.hidden.push(HiddenItem {
                             label: self.source.title(&key).unwrap_or_else(|| key.clone()),
                             key,
+                            source: None,
                         });
                     }
                     self.library.version.set(self.library.version.get() + 1);

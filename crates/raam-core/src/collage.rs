@@ -350,9 +350,11 @@ impl Choice {
     }
 }
 
-/// Frameo's layout pick for the group at the front of `queue`.
+/// Frameo's layout pick for the group at the front of `queue`, which
+/// must not be empty (a pick for nothing is a caller bug).
 /// `rand_below(n)` must return a uniform integer in `0..n`.
 pub fn pick(queue: &[Orientation], max: usize, mut rand_below: impl FnMut(u32) -> u32) -> Choice {
+    assert!(!queue.is_empty(), "collage pick on an empty queue");
     let mut n = max.min(LARGEST_LAYOUT).min(queue.len());
     loop {
         if n <= 1 {
@@ -381,6 +383,9 @@ pub fn pick(queue: &[Orientation], max: usize, mut rand_below: impl FnMut(u32) -
             let r = rand_below(total);
             let mut cumulative = 0;
             let mut chosen = candidates.len() - 1;
+            // `>=`, not `>`, as Frameo has it (CollageLayoutPickerStrategy:
+            // `do { sum += weight } while (sum < r)`): the first candidate
+            // wins one draw more than its weight. Kept for fidelity.
             for (k, (_, layout, _)) in candidates.iter().enumerate() {
                 cumulative += layout.weight();
                 if cumulative >= r {
@@ -525,7 +530,8 @@ mod tests {
 
     #[test]
     fn three_landscape_two_portrait_one_weights() {
-        // (2L, 1P) at n = 3: 3_1 (weight 1) and 3_2 (weight 4).
+        // (2L, 1P) at n = 3: 3_1 (weight 1) and 3_2 (weight 4); 3_1 wins
+        // 2 of 5 draws, one more than its weight, as on Frameo.
         let group = [Ls, Pt, Ls];
         let names: Vec<_> = (0..5)
             .map(|r| {
@@ -551,6 +557,12 @@ mod tests {
             0
         });
         assert_eq!(LAYOUTS[c.layout.unwrap()].name, "3_1");
+    }
+
+    #[test]
+    #[should_panic(expected = "empty queue")]
+    fn a_pick_for_nothing_is_a_bug() {
+        pick(&[], 3, |_| 0);
     }
 
     #[test]

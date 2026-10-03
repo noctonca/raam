@@ -236,6 +236,9 @@ EOF
     check_backup "$dir"
 }
 
+# Sourced by another script (pulltest) for the helpers above.
+[ -z "${FRAME_LIB:-}" ] || return 0
+
 case "${1:-status}" in
 target)
     echo "$T"

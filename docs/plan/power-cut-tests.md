@@ -43,6 +43,8 @@ The trigger runs on the frame, not over adb: a root script pushed to
 `/data/local/tmp` follows `logcat -s raam` and writes to
 `sysrq-trigger` when the marker line appears, after an optional delay.
 Over Wi-Fi adb, the round trip alone is tens of milliseconds and varies.
+It runs inside an adb session the Mac holds open, because on the frame
+nothing started in the background outlives its adb session.
 
 ## A known photo on screen
 
@@ -88,8 +90,8 @@ stalls. The props table in the snug-frame skill gets the new row.
 
 ## The check after each boot
 
-A `frame pullcheck` command in the snug-frame skill, from the method
-used on 2026-10-03:
+`pulltest check` in the snug-frame skill, from the method used on
+2026-10-03:
 
 1. wait for a new `boot_id`, then save `logcat -s raam` from the boot
    (the ring holds only a few minutes);
@@ -109,9 +111,9 @@ NTP fixed it, and whether the screen slept.
 
 1. **PR 1, the stall points:** `debug.video.stall` in `raam-engine`, the
    limit, the test, the skill's props table.
-2. **PR 2, the harness:** `frame pulltest setup|arm|teardown` and
-   `frame pullcheck`, with a section in
-   `references/raam-checks.md`. `teardown` removes the test photos and
+2. **PR 2, the harness:** `scripts/pulltest` in the snug-frame skill
+   (`setup`, `arm`, `curate`, `evict`, `check`, `teardown`), with a
+   section in `references/raam-checks.md`. `teardown` removes the test photos and
    the scratch, clears the props, and reverts any curation the run made.
    Nothing stays on the frame, so `docs/FRAME-SETUP.md` doesn't change.
 3. **The runs:** C1 to C6 with sysrq, then the real pulls. The results

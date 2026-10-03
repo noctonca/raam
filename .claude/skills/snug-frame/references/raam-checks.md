@@ -12,6 +12,7 @@ prefix.
 - [A sleep or wake the log has lost](#a-sleep-or-wake-the-log-has-lost)
 - [Fault injection](#fault-injection)
 - [Editing raam.db](#editing-raamdb)
+- [Power cuts](#power-cuts)
 - [A clip with sound](#a-clip-with-sound)
 - [Memory](#memory)
 - [Baselines](#baselines)
@@ -112,6 +113,57 @@ adb -s $T shell rm -f /sdcard/raam.db /sdcard/raam.db-wal /sdcard/raam.db-shm
   `video.sound` = `true` turns clip sound on.
 - Keep a copy of the pulled original until you've seen Raam start
   cleanly on the edited one.
+
+## Power cuts
+
+`scripts/pulltest` aims a power cut at a write window and checks what
+survived ([docs/plan/power-cut-tests.md](../../../../docs/plan/power-cut-tests.md)
+has the cases). It reboots the frame on every run: tier 3, so say so
+first. Runs and their files go to `target/pulltest/`, one folder each,
+and every result row is appended to `target/pulltest/results.tsv`.
+
+```sh
+P=.claude/skills/snug-frame/scripts/pulltest
+$P setup                                   # 8 test photos, only_path, restart
+$P arm C2 'Fill/Fit override' --delay 50   # cut 50 ms after the commit's line
+$P curate fit                              # menu, then Fit to frame
+$P check                                   # new boot, copy, check, result row
+# a preview's rename, held 30 s, cut 1 s into the hold:
+adb -s $T shell setprop debug.video.stall rename@prefetch:30
+$P arm C3 'debug.video.stall: rename' --delay 1000
+$P evict 1
+$P check
+$P teardown                                # always, at the end
+```
+
+- **Every reboot clears the props**, `only_path` and `stall` with them.
+  After a check, set `only_path=pulltest` again (or run `setup` again)
+  before the next curation run.
+- **The cut is `echo b > /proc/sysrq-trigger`**, fired by a watcher on
+  the frame that follows `logcat`. It runs inside an adb session the
+  Mac holds open: on this frame nothing started in the background
+  outlives its adb session, not even with `nohup` or `setsid`. If the
+  Mac lets go, the watcher dies with it, and it gives up by itself after
+  `--for` seconds (300 by default). `disarm` stops it.
+- **`--real`** says "pull now" on the Mac instead, for a pull by hand.
+  Use it with a stall of 20 s or more and `--delay` of a second or two.
+- **`check --grace`** follows the log for 11 minutes before copying
+  anything, because stopping Raam would restart the sleep grace timer.
+- **The row:** `integrity` and `rows` (each `cached_file` row against
+  its file's size) must be `ok` and all matching, `strays` (files with no
+  row, or empty) 0, and the new Raam `ready`. `change` is the aimed
+  curation change, `kept` or `lost` in the database; `export` is whether
+  the export matches the database; `asset` is the stalled preview's
+  fate. `boot_clock` is the first log line's time: a cut boots in May
+  2021 until NTP.
+- **`teardown`** removes the test photos, clears the props, and deletes
+  the test photos' curation rows from `raam.db` (the edit cycle above,
+  for those rows only). The export keeps them until the next curation
+  change rewrites it.
+- **The taps** are measured for the menu over local photos. The tap
+  that opens the menu also picks the middle tile of a collage, and the
+  change goes to that tile. `PULLTEST_TAP_FIT` and `PULLTEST_TAP_HIDE`
+  override the positions if the menu changes.
 
 ## A clip with sound
 

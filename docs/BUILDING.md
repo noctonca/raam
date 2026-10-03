@@ -141,7 +141,10 @@ Mac the file's header names, and CI doesn't run them. For a shot that
 differs, the check draws it at the last blessed commit (built in a
 worktree under `target/goldens/`) and now, with a diff that marks the
 changed pixels in magenta. A change meant to move pixels re-blesses in
-a commit of its own.
+a commit of its own: `scripts/goldens-own-commit.sh` fails any commit
+since `origin/main` (or the base it's given) that touches
+`tests/goldens.txt` and anything else, and CI runs it over every pull
+request.
 
 The web build draws the same shots in headless Chromium through its
 `?page=` mode, and `scripts/web-diff.py` compares them with the

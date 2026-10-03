@@ -283,6 +283,11 @@ pub struct TransitionProgram {
 }
 
 impl TransitionProgram {
+    /// Links one transition shader and binds its two texture units;
+    /// `extra` sets the shader's own fixed uniforms.
+    ///
+    /// # Safety
+    /// Requires a current GL context.
     unsafe fn new(name: &'static str, body: &str, extra: impl FnOnce(GlUint)) -> Self {
         unsafe {
             let src = wrap(body);
@@ -345,10 +350,12 @@ impl TransitionProgram {
     /// (scale, offset) UV-window transform - the outgoing slide keeps
     /// animating on its own clock right up until this draw finishes it
     /// off, it does not freeze the moment the transition began.
-    #[allow(clippy::too_many_arguments)]
     ///
     /// # Safety
-    /// Requires a current GL context and the quad buffers it is given.
+    /// Requires a current GL context, `quad_vbo` holding the four
+    /// pos+uv vertices and `quad_ibo` the six u16 indices the draw reads
+    /// (the pipeline's quad), and both textures live.
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn draw(
         &self,
         quad_vbo: GlUint,

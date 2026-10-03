@@ -341,6 +341,23 @@ const FLIP_V: [f32; 16] = [
 ];
 
 /// Column-major `a * b`.
+/// The photo's GL size, after checking its pixels are exactly that size:
+/// the upload hands GL a bare pointer, and a short buffer would have the
+/// driver read past it.
+fn upload_size(photo: &Photo) -> (GlSizei, GlSizei) {
+    let (w, h) = (photo.width as usize, photo.height as usize);
+    assert_eq!(
+        photo.rgba.len(),
+        w * h * 4,
+        "photo {} is {w}x{h}: wrong byte count",
+        photo.asset_id
+    );
+    (
+        GlSizei::try_from(w).expect("photo width fits GL"),
+        GlSizei::try_from(h).expect("photo height fits GL"),
+    )
+}
+
 fn mat_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     let mut out = [0.0; 16];
     for c in 0..4 {
@@ -361,6 +378,10 @@ struct OesProgram {
 }
 
 impl OesProgram {
+    /// Links the program that draws a decoded video frame.
+    ///
+    /// # Safety
+    /// Requires a current GL context.
     unsafe fn new() -> Self {
         unsafe {
             let program = link_program("oes", VS_OES_SRC, FS_OES_SRC);
@@ -380,6 +401,10 @@ impl OesProgram {
     /// (`FLIP_V`) to draw it the right way up in the framebuffer. Without
     /// it the frame lands with row 0 = its top, which is the convention of
     /// an uploaded photo (and of a tile's `source`).
+    ///
+    /// # Safety
+    /// Requires a current GL context, the pipeline's quad buffers (four
+    /// pos+uv vertices, six u16 indices), and `frame.texture` live.
     unsafe fn draw(
         &self,
         quad_vbo: GlUint,
@@ -406,6 +431,7 @@ impl OesProgram {
             glBindTexture(GL_TEXTURE_EXTERNAL_OES, frame.texture);
             glUniform1i(self.u_tex, 0);
             glUniform2f(self.u_scale, scale.0, scale.1);
+            // SAFETY: one 4x4 matrix is 16 floats, and `m` is 16.
             glUniformMatrix4fv(self.u_matrix, 1, 0, m.as_ptr());
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, std::ptr::null());
         }
@@ -425,6 +451,10 @@ struct QuadProgram {
 }
 
 impl QuadProgram {
+    /// Links one of the textured-quad programs (copy, blur, composite).
+    ///
+    /// # Safety
+    /// Requires a current GL context.
     unsafe fn new(label: &str, fs_src: &str) -> Self {
         unsafe {
             let program = link_program(label, VS_SRC, fs_src);
@@ -442,6 +472,11 @@ impl QuadProgram {
         }
     }
 
+    /// Makes this the current program over the quad, for `draw`s to follow.
+    ///
+    /// # Safety
+    /// Requires a current GL context and the pipeline's quad buffers (four
+    /// pos+uv vertices, six u16 indices).
     unsafe fn bind(&self, quad_vbo: GlUint, quad_ibo: GlUint) {
         unsafe {
             glUseProgram(self.program);
@@ -456,6 +491,11 @@ impl QuadProgram {
         }
     }
 
+    /// Draws `texture` over the quad through the UV window `uv`.
+    ///
+    /// # Safety
+    /// Requires a current GL context, this program bound (`bind`) since
+    /// another was used, and `texture` live.
     unsafe fn draw(
         &self,
         texture: GlUint,
@@ -507,6 +547,10 @@ struct Tile {
 }
 
 impl Tile {
+    /// Frees the tile's render targets.
+    ///
+    /// # Safety
+    /// Requires a current GL context; nothing may draw from the tile after.
     unsafe fn destroy(self) {
         unsafe {
             self.source.destroy();
@@ -534,6 +578,11 @@ struct Collage {
 }
 
 impl Collage {
+    /// Frees every tile's render targets.
+    ///
+    /// # Safety
+    /// Requires a current GL context; nothing may draw from the collage
+    /// after.
     unsafe fn destroy(self) {
         for t in self.tiles {
             unsafe { t.destroy() };
@@ -643,6 +692,8 @@ pub struct Pipeline<P: VideoPlayer> {
 }
 
 impl<P: VideoPlayer> Pipeline<P> {
+    /// Makes the shared quad, the photo texture, the blur chain's targets
+    /// and every program.
     ///
     /// # Safety
     /// Requires a current GL context (it creates buffers, textures and programs).
@@ -658,6 +709,8 @@ impl<P: VideoPlayer> Pipeline<P> {
             let mut vbo = 0;
             glGenBuffers(1, &mut vbo);
             glBindBuffer(GL_ARRAY_BUFFER, vbo);
+            // SAFETY: both sizes are their static arrays' lengths in bytes
+            // (f32 and u16 elements); GL copies the data.
             glBufferData(
                 GL_ARRAY_BUFFER,
                 (QUAD.len() * 4) as isize,
@@ -1133,6 +1186,10 @@ impl<P: VideoPlayer> Pipeline<P> {
         self.finish_building(source);
     }
 
+    /// Frees the tiles composed so far for the plan being built.
+    ///
+    /// # Safety
+    /// Requires a current GL context.
     unsafe fn destroy_building_tiles(b: &mut Building<P>) {
         for t in b.tiles.iter_mut().filter_map(Option::take) {
             unsafe { t.destroy() };
@@ -1674,6 +1731,9 @@ impl<P: VideoPlayer> Pipeline<P> {
     }
 
     fn upload_photo(&self, photo: &Photo) {
+        let (w, h) = upload_size(photo);
+        // SAFETY: `rgba` is w * h * 4 bytes (upload_size asserts it), what
+        // GL reads for a w x h RGBA/UNSIGNED_BYTE upload; GL copies it.
         unsafe {
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, self.photo_tex);
@@ -1681,8 +1741,8 @@ impl<P: VideoPlayer> Pipeline<P> {
                 GL_TEXTURE_2D,
                 0,
                 GL_RGBA as i32,
-                photo.width as i32,
-                photo.height as i32,
+                w,
+                h,
                 0,
                 GL_RGBA,
                 GL_UNSIGNED_BYTE,
@@ -1694,6 +1754,8 @@ impl<P: VideoPlayer> Pipeline<P> {
     /// Shrinks `photo_tex` to 1x1 once `source` has been drawn from it, so
     /// the last preview (about 6 MB) isn't held until the next upload.
     fn release_photo(&self) {
+        let texel = [0u8; 4];
+        // SAFETY: one RGBA texel is the 4 bytes of `texel`; GL copies it.
         unsafe {
             glBindTexture(GL_TEXTURE_2D, self.photo_tex);
             glTexImage2D(
@@ -1705,7 +1767,7 @@ impl<P: VideoPlayer> Pipeline<P> {
                 0,
                 GL_RGBA,
                 GL_UNSIGNED_BYTE,
-                [0u8; 4].as_ptr() as *const c_void,
+                texel.as_ptr() as *const c_void,
             );
         }
     }
@@ -1805,6 +1867,9 @@ impl<P: VideoPlayer> Pipeline<P> {
     /// Draws a collage into the bound framebuffer (the screen or a scratch
     /// target, both screen-sized): a clear in the gap colour, then each tile
     /// through its Ken Burns window with the viewport set to its rect.
+    ///
+    /// # Safety
+    /// Requires a current GL context and `c`'s tiles not yet destroyed.
     unsafe fn draw_collage(&self, c: &Collage, highlight: Option<usize>) {
         unsafe {
             glViewport(0, 0, self.screen_w, self.screen_h);
@@ -2131,5 +2196,35 @@ impl<P: VideoPlayer> crate::app::Slideshow for Pipeline<P> {
     }
     fn next_deadline(&self) -> Option<Duration> {
         Pipeline::next_deadline(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn photo(w: u32, h: u32, bytes: usize) -> Photo {
+        Photo {
+            asset_id: 7,
+            key: "k".into(),
+            width: w,
+            height: h,
+            rgba: vec![0; bytes],
+            face_focal: None,
+            fill_centre: (0.5, 0.5),
+            video: None,
+        }
+    }
+
+    #[test]
+    fn a_whole_photo_uploads_at_its_size() {
+        assert_eq!(upload_size(&photo(3, 2, 24)), (3, 2));
+    }
+
+    #[test]
+    #[should_panic(expected = "wrong byte count")]
+    fn a_photo_short_of_its_size_is_refused() {
+        // GL would read 24 bytes from a 20-byte buffer.
+        upload_size(&photo(3, 2, 20));
     }
 }

@@ -10,6 +10,11 @@
 //!
 //! The context is the host's to make (its attributes are the web host's
 //! EGL config): `make_current` hands it over once, before any GL call.
+//!
+//! Each entry point's safety contract is its GL function's, as on the
+//! other linkages (hence no `# Safety` section on each): a pointer
+//! argument must be valid for what GL reads or writes through it. The
+//! blocks that dereference one say which argument sizes it.
 #![allow(non_snake_case, clippy::missing_safety_doc, clippy::too_many_arguments)]
 
 use super::table::Table;
@@ -77,18 +82,31 @@ fn bpp(format: GlEnum) -> usize {
 }
 
 /// `len` bytes at `ptr`, or none for a null pointer.
+///
+/// # Safety
+/// A non-null `ptr` must be valid for reading `len` bytes for as long as
+/// the slice is used (the GL call's duration).
 unsafe fn bytes<'a>(ptr: *const c_void, len: usize) -> Option<&'a [u8]> {
     if ptr.is_null() {
         None
     } else {
+        // SAFETY: non-null, and valid for `len` bytes by the caller's
+        // contract; u8 has no alignment or validity requirement.
         Some(unsafe { std::slice::from_raw_parts(ptr as *const u8, len) })
     }
 }
 
 /// Copies `log` into a caller's GL info-log buffer, NUL-terminated and
 /// truncated to `max_len`, as GL does.
+///
+/// # Safety
+/// `out` must be valid for writing `max_len` bytes (at least one), and
+/// `len` null or valid for one write, as glGet*InfoLog require.
 unsafe fn write_log(log: &str, max_len: GlSizei, len: *mut GlSizei, out: *mut c_char) {
     let n = log.len().min((max_len.max(1) - 1) as usize);
+    // SAFETY: `n` + 1 <= max(max_len, 1) bytes go to `out`, which holds
+    // `max_len`; `log` can't overlap the caller's buffer, and `len` is
+    // written only when non-null.
     unsafe {
         std::ptr::copy_nonoverlapping(log.as_ptr(), out as *mut u8, n);
         *out.add(n) = 0;
@@ -145,6 +163,8 @@ pub unsafe fn glGetIntegerv(pname: GlEnum, params: *mut GlInt) {
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0)
     });
+    // SAFETY: the names this shim answers are single-valued, and `params`
+    // is valid for one GlInt by GL's contract.
     unsafe { *params = v as GlInt };
 }
 
@@ -165,6 +185,8 @@ pub unsafe fn glShaderSource(
     _length: *const GlInt,
 ) {
     assert_eq!(count, 1, "glShaderSource: one string only");
+    // SAFETY: `string` points at one pointer (count is 1), to a
+    // NUL-terminated string valid for the call, by GL's contract.
     let src = unsafe { CStr::from_ptr(*string) }.to_string_lossy();
     with(|s| {
         if let Some(sh) = s.shaders.get(shader) {
@@ -198,6 +220,8 @@ pub unsafe fn glGetShaderiv(shader: GlUint, pname: GlEnum, params: *mut GlInt) {
             }
         }
     });
+    // SAFETY: every shader parameter is one GlInt, which `params` is
+    // valid for by GL's contract.
     unsafe { *params = v };
 }
 
@@ -213,6 +237,8 @@ pub unsafe fn glGetShaderInfoLog(
             .and_then(|sh| s.gl.get_shader_info_log(&sh))
             .unwrap_or_default()
     });
+    // SAFETY: `log` holds `max_len` bytes and `len` is null or one
+    // GlSizei, by GL's contract, which is write_log's.
     unsafe { write_log(&text, max_len, len, log) };
 }
 
@@ -256,6 +282,8 @@ pub unsafe fn glGetProgramiv(program: GlUint, pname: GlEnum, params: *mut GlInt)
             }
         }
     });
+    // SAFETY: every program parameter the core asks for is one GlInt,
+    // which `params` is valid for by GL's contract.
     unsafe { *params = v };
 }
 
@@ -271,6 +299,8 @@ pub unsafe fn glGetProgramInfoLog(
             .and_then(|p| s.gl.get_program_info_log(&p))
             .unwrap_or_default()
     });
+    // SAFETY: `log` holds `max_len` bytes and `len` is null or one
+    // GlSizei, by GL's contract, which is write_log's.
     unsafe { write_log(&text, max_len, len, log) };
 }
 
@@ -279,6 +309,8 @@ pub unsafe fn glUseProgram(program: GlUint) {
 }
 
 pub unsafe fn glGetAttribLocation(program: GlUint, name: *const c_char) -> GlInt {
+    // SAFETY: `name` is NUL-terminated and valid for the call, by GL's
+    // contract.
     let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
     with(|s| {
         s.programs
@@ -290,6 +322,8 @@ pub unsafe fn glGetAttribLocation(program: GlUint, name: *const c_char) -> GlInt
 /// -1 for a uniform the program doesn't have (or optimised out), as in GL;
 /// the glUniform calls ignore -1.
 pub unsafe fn glGetUniformLocation(program: GlUint, name: *const c_char) -> GlInt {
+    // SAFETY: `name` is NUL-terminated and valid for the call, by GL's
+    // contract.
     let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
     with(|s| {
         match s
@@ -340,6 +374,8 @@ pub unsafe fn glUniformMatrix4fv(
     transpose: u8,
     value: *const f32,
 ) {
+    // SAFETY: `value` holds `count` 4x4 matrices, 16 floats each, by GL's
+    // contract; a negative count reads none.
     let m = unsafe { std::slice::from_raw_parts(value, 16 * count.max(0) as usize) };
     uniform(location, |gl, u| {
         gl.uniform_matrix4fv_with_f32_array(Some(u), transpose != 0, m)
@@ -351,6 +387,7 @@ pub unsafe fn glUniformMatrix4fv(
 pub unsafe fn glGenBuffers(n: GlSizei, buffers: *mut GlUint) {
     for i in 0..n.max(0) as usize {
         let id = with(|s| s.gl.create_buffer().map_or(0, |b| s.buffers.add(b)));
+        // SAFETY: `buffers` holds `n` GlUints by GL's contract, and i < n.
         unsafe { *buffers.add(i) = id };
     }
 }
@@ -360,6 +397,7 @@ pub unsafe fn glBindBuffer(target: GlEnum, buffer: GlUint) {
 }
 
 pub unsafe fn glBufferData(target: GlEnum, size: isize, data: *const c_void, usage: GlEnum) {
+    // SAFETY: non-null `data` holds `size` bytes, by GL's contract.
     match unsafe { bytes(data, size as usize) } {
         Some(b) => with(|s| s.gl.buffer_data_with_u8_array(target, b, usage)),
         None => with(|s| s.gl.buffer_data_with_i32(target, size as i32, usage)),
@@ -429,6 +467,7 @@ pub unsafe fn glDrawElements(mode: GlEnum, count: GlSizei, type_: GlEnum, indice
 pub unsafe fn glGenTextures(n: GlSizei, textures: *mut GlUint) {
     for i in 0..n.max(0) as usize {
         let id = with(|s| s.gl.create_texture().map_or(0, |t| s.textures.add(t)));
+        // SAFETY: `textures` holds `n` GlUints by GL's contract, and i < n.
         unsafe { *textures.add(i) = id };
     }
 }
@@ -458,6 +497,9 @@ pub unsafe fn glTexImage2D(
     type_: GlEnum,
     pixels: *const c_void,
 ) {
+    // SAFETY: non-null `pixels` holds a width x height image in `format`
+    // by GL's contract, at least width * height * bpp bytes (row padding
+    // only adds to it).
     let data = unsafe { bytes(pixels, width as usize * height as usize * bpp(format)) };
     with(|s| {
         let r =
@@ -489,6 +531,7 @@ pub unsafe fn glTexSubImage2D(
     type_: GlEnum,
     pixels: *const c_void,
 ) {
+    // SAFETY: as glTexImage2D's: at least width * height * bpp bytes.
     let data = unsafe { bytes(pixels, width as usize * height as usize * bpp(format)) };
     with(|s| {
         let r =
@@ -503,6 +546,7 @@ pub unsafe fn glTexSubImage2D(
 
 pub unsafe fn glDeleteTextures(n: GlSizei, textures: *const GlUint) {
     for i in 0..n.max(0) as usize {
+        // SAFETY: `textures` holds `n` GlUints by GL's contract, and i < n.
         let id = unsafe { *textures.add(i) };
         with(|s| {
             if let Some(t) = s.textures.remove(id) {
@@ -518,6 +562,8 @@ pub unsafe fn glGenFramebuffers(n: GlSizei, framebuffers: *mut GlUint) {
             s.gl.create_framebuffer()
                 .map_or(0, |f| s.framebuffers.add(f))
         });
+        // SAFETY: `framebuffers` holds `n` GlUints by GL's contract, and
+        // i < n.
         unsafe { *framebuffers.add(i) = id };
     }
 }
@@ -552,6 +598,8 @@ pub unsafe fn glCheckFramebufferStatus(target: GlEnum) -> GlEnum {
 
 pub unsafe fn glDeleteFramebuffers(n: GlSizei, framebuffers: *const GlUint) {
     for i in 0..n.max(0) as usize {
+        // SAFETY: `framebuffers` holds `n` GlUints by GL's contract, and
+        // i < n.
         let id = unsafe { *framebuffers.add(i) };
         with(|s| {
             if let Some(f) = s.framebuffers.remove(id) {

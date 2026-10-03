@@ -106,6 +106,7 @@ struct DrawCmd {
 }
 
 impl Painter {
+    /// Makes the vertex and index buffers and links egui's two programs.
     ///
     /// # Safety
     /// Requires a current GL context.
@@ -139,6 +140,9 @@ impl Painter {
                 t
             });
             glBindTexture(GL_TEXTURE_2D, tex);
+            // SAFETY: `rgba` is w * h * 4 bytes (image_to_rgba_bytes asserts
+            // it), what GL reads for a w x h RGBA/UNSIGNED_BYTE upload, and
+            // it outlives the call; GL copies it before returning.
             match delta.pos {
                 None => glTexImage2D(
                     GL_TEXTURE_2D,
@@ -194,6 +198,8 @@ impl Painter {
             &mut indices,
             &mut self.cmds,
         );
+        // SAFETY: each size is its Vec's length in bytes, and both Vecs
+        // outlive the calls; GL copies the data before returning.
         unsafe {
             glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
             glBufferData(
@@ -273,6 +279,9 @@ impl Painter {
                 let (x, y, w, h) = cmd.scissor;
                 glScissor(x, y, w, h);
                 glBindTexture(GL_TEXTURE_2D, tex);
+                // SAFETY: the offsets are into the buffers `upload` filled
+                // from the same `cmds`, and each part's indices point only
+                // at its own vertices (`tessellated`), so GL reads in bounds.
                 glDrawElements(
                     GL_TRIANGLES,
                     cmd.idx_count,
@@ -351,14 +360,23 @@ fn tessellated(
     }
 }
 
+/// The image as GL's RGBA bytes, exactly `w * h * 4` of them: the upload
+/// hands GL a bare pointer and the size, and the driver reads that many.
 fn image_to_rgba_bytes(image: &egui::ImageData) -> Vec<u8> {
-    match image {
+    let [w, h] = image.size();
+    let rgba: Vec<u8> = match image {
         egui::ImageData::Color(color_image) => color_image
             .pixels
             .iter()
             .flat_map(|c| c.to_array())
             .collect(),
-    }
+    };
+    assert_eq!(
+        rgba.len(),
+        w * h * 4,
+        "egui image {w}x{h}: wrong byte count"
+    );
+    rgba
 }
 
 #[cfg(test)]
@@ -425,5 +443,28 @@ mod tests {
             6 * std::mem::size_of::<GpuVertex>()
         );
         assert_eq!((cmds[1].idx_byte_offset, cmds[1].idx_count), (12, 3));
+    }
+
+    #[test]
+    fn an_image_uploads_four_bytes_a_texel() {
+        let image = egui::ColorImage {
+            size: [3, 2],
+            source_size: egui::vec2(3.0, 2.0),
+            pixels: vec![egui::Color32::RED; 6],
+        };
+        let rgba = image_to_rgba_bytes(&egui::ImageData::Color(image.into()));
+        assert_eq!(rgba.len(), 24);
+    }
+
+    #[test]
+    #[should_panic(expected = "wrong byte count")]
+    fn an_image_short_of_its_size_is_refused() {
+        // GL would read 24 bytes from a 20-byte buffer.
+        let image = egui::ColorImage {
+            size: [3, 2],
+            source_size: egui::vec2(3.0, 2.0),
+            pixels: vec![egui::Color32::RED; 5],
+        };
+        image_to_rgba_bytes(&egui::ImageData::Color(image.into()));
     }
 }

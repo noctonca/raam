@@ -14,6 +14,11 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 
 use raam_model::limits::ATLAS_WIDTH;
+
+// GL's default unpack alignment is 4: a row width that isn't a multiple of
+// it would make the upload read past `pixels`.
+const _: () = assert!(ATLAS_WIDTH.is_multiple_of(4));
+
 /// Printable ASCII and the Latin-1 Supplement (NBSP to ÿ, the degree sign
 /// among them), so a weather city such as "Malmö" or "São Paulo" reads as
 /// given; anything else draws as '?'.
@@ -277,13 +282,23 @@ fn pack(font: &fontdue::Font, px: f32, shadow: Shadow, extra: Vec<Raster>) -> Pa
 }
 
 impl FontAtlas {
-    pub fn build(font: &fontdue::Font, px: f32, shadow: Shadow, extra: Vec<Raster>) -> Self {
+    /// Rasterises the charset (plus `extra`, the weather icons) at `px`,
+    /// with each glyph's blurred shadow, packs both into one alpha atlas
+    /// and uploads it.
+    ///
+    /// # Safety
+    /// Requires a current GL context (it makes and fills a texture).
+    pub unsafe fn build(font: &fontdue::Font, px: f32, shadow: Shadow, extra: Vec<Raster>) -> Self {
         let Packed {
             pixels,
             height: atlas_h,
             glyphs,
         } = pack(font, px, shadow, extra);
+        assert_eq!(pixels.len(), ATLAS_WIDTH * atlas_h, "atlas pixels short");
         let mut texture = 0;
+        // SAFETY: `pixels` is ATLAS_WIDTH * atlas_h bytes (asserted above),
+        // what GL reads for that ALPHA/UNSIGNED_BYTE upload at an unpack
+        // alignment of 4 (ATLAS_WIDTH is a multiple of 4); GL copies it.
         unsafe {
             glActiveTexture(GL_TEXTURE0);
             glGenTextures(1, &mut texture);

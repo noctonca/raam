@@ -51,7 +51,19 @@ pub trait TileSource {
 /// frame's CPU.) Fill needs the cover scale; Fit is smaller, so it is
 /// enough for both. Every source runs it, so a tile reaches the GPU the
 /// same size whichever host fetched it.
+///
+/// # Panics
+///
+/// If `rect` is empty. A 0x0 tile's cover size is 0x0, which every
+/// halving still covers, so the loop would never end; a tile empty in one
+/// direction only means the screen or layout is broken.
 pub fn shrink_to_cover(photo: &mut Photo, rect: collage::Rect) -> Duration {
+    assert!(
+        rect.w > 0 && rect.h > 0,
+        "shrink_to_cover into an empty tile {}x{}",
+        rect.w,
+        rect.h
+    );
     let start = clock::now();
     let (tw, th) = (rect.w as u32, rect.h as u32);
     let s = (tw as f32 / photo.width as f32).max(th as f32 / photo.height as f32);
@@ -140,5 +152,20 @@ mod tests {
         let at = |x: usize, y: usize, k: usize| src[4 * (y * 4 + x) + k] as u16;
         let want = ((at(0, 0, 0) + at(1, 0, 0) + at(0, 1, 0) + at(1, 1, 0) + 2) / 4) as u8;
         assert_eq!(p.rgba[0], want);
+    }
+
+    #[test]
+    #[should_panic(expected = "empty tile")]
+    fn an_empty_tile_is_refused() {
+        clock::fake::install();
+        // A 0x0 tile covers at 0x0, which halving never drops below.
+        let mut p = photo(4, 2);
+        let empty = collage::Rect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        };
+        shrink_to_cover(&mut p, empty);
     }
 }

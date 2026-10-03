@@ -794,14 +794,16 @@ impl App {
                 layout,
                 weather: self.weather_status.clone(),
                 online: stage.library.online(),
+                sleeps_after: in_sleep.then_some(self.manual_idle),
             };
             // What the menu shows that egui can't see change by itself:
             // a run is due whenever any of it moved.
             let status = format!(
-                "{:?}|{}|{}|{:?}|{:?}|{}|{}",
+                "{:?}|{}|{}|{:?}|{:?}|{:?}|{}|{}",
                 self.state.status.layout,
                 self.state.status.weather,
                 self.state.status.online,
+                self.state.status.sleeps_after,
                 self.state.shown_scale,
                 self.state.undo_secs,
                 self.state.shown_video,
@@ -2228,6 +2230,22 @@ mod tests {
         assert_eq!(p.slept, 1, "crossed the boundary in front: sleeps");
         // The alarm aims at wake time: 05:00 tomorrow.
         assert_eq!(p.alarms, vec![((24 + 5) * 3600) * 1000]);
+    }
+
+    #[test]
+    fn the_menu_in_sleep_hours_says_when_the_frame_sleeps_again() {
+        let mut rig = Rig::new(Some(FakePower::default()));
+        rig.app.state.settings.sleep_enabled = true;
+        rig.app.state.settings.sleep_min = 23 * 60;
+        rig.app.state.settings.wake_min = 5 * 60;
+        set_wall_hm(22, 30);
+        rig.frame(&[]);
+        rig.tap(640.0, 400.0);
+        assert_eq!(rig.app.state.status.sleeps_after, None);
+        // Awake at 01:13 (started, or woken by hand): not "sleeps at 23:00".
+        set_wall_hm(1, 13);
+        rig.frame(&[]);
+        assert_eq!(rig.app.state.status.sleeps_after, Some(DEFAULT_MANUAL_IDLE));
     }
 
     #[test]

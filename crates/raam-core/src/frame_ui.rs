@@ -266,6 +266,9 @@ pub struct Status {
     /// The weather worker's line ("Lisbon 18°C"); empty while waiting.
     pub weather: String,
     pub online: bool,
+    /// Inside sleep hours, awake: the untouched time after which the frame
+    /// sleeps again, which the menu says in place of the sleep time.
+    pub sleeps_after: Option<Duration>,
 }
 
 pub struct AppState {
@@ -659,12 +662,14 @@ pub fn preset(name: &str) -> Option<AppState> {
             layout: None,
             weather: String::new(),
             online: false,
+            sleeps_after: None,
         }
     } else {
         Status {
             layout: Some("single photo".into()),
             weather: "Lisbon 18°C".into(),
             online: true,
+            sleeps_after: None,
         }
     };
     st.shown_scale = (!first_run).then_some(ScaleMode::Fill);
@@ -940,6 +945,17 @@ fn interval_step(v: f32, dir: i32) -> f32 {
 /// An audio delay: "+180 ms".
 fn fmt_delay(v: f32) -> String {
     format!("{:+.0} ms", v)
+}
+
+/// The idle time before a hand-woken frame sleeps again: "10 min", or
+/// "30 s" under a test override shorter than a minute.
+fn fmt_idle(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs} s")
+    } else {
+        format!("{} min", secs.div_ceil(60))
+    }
 }
 
 fn photos(n: i64) -> String {
@@ -1230,7 +1246,10 @@ fn status_line(st: &AppState) -> String {
         parts.push(st.status.weather.clone());
     }
     if s.sleep_enabled {
-        parts.push(format!("sleeps at {}", schedule::fmt_hm(s.sleep_min)));
+        parts.push(match st.status.sleeps_after {
+            Some(idle) => format!("sleeps after {} untouched", fmt_idle(idle)),
+            None => format!("sleeps at {}", schedule::fmt_hm(s.sleep_min)),
+        });
     }
     parts.join("  ·  ")
 }
@@ -3303,6 +3322,16 @@ mod tests {
             status_line(&st),
             "No photos yet  ·  pick albums in Settings  ·  Lisbon 18°C  ·  sleeps at 23:00"
         );
+
+        // Awake in sleep hours, it sleeps again once left alone.
+        let mut st = preset("menu").expect("menu");
+        st.status.sleeps_after = Some(Duration::from_secs(10 * 60));
+        assert_eq!(
+            status_line(&st),
+            "Digital Frame + 2 more  ·  417 photos  ·  Lisbon 18°C  ·  sleeps after 10 min untouched"
+        );
+        st.status.sleeps_after = Some(Duration::from_secs(30));
+        assert!(status_line(&st).ends_with("sleeps after 30 s untouched"));
     }
 
     #[test]

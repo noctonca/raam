@@ -12,6 +12,7 @@
 //! EGL config): `make_current` hands it over once, before any GL call.
 #![allow(non_snake_case, clippy::missing_safety_doc, clippy::too_many_arguments)]
 
+use super::table::Table;
 use super::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -20,31 +21,6 @@ use web_sys::{
     WebGlBuffer, WebGlFramebuffer, WebGlProgram, WebGlRenderingContext as Wgl, WebGlShader,
     WebGlTexture, WebGlUniformLocation,
 };
-
-/// A table of WebGL objects named by GL-style integers.
-struct Table<T>(Vec<Option<T>>);
-
-impl<T: Clone> Table<T> {
-    const fn new() -> Self {
-        Self(Vec::new())
-    }
-
-    fn add(&mut self, v: T) -> GlUint {
-        if self.0.is_empty() {
-            self.0.push(None); // 0 is "none"
-        }
-        self.0.push(Some(v));
-        (self.0.len() - 1) as GlUint
-    }
-
-    fn get(&self, id: GlUint) -> Option<T> {
-        self.0.get(id as usize).cloned().flatten()
-    }
-
-    fn remove(&mut self, id: GlUint) -> Option<T> {
-        self.0.get_mut(id as usize).and_then(Option::take)
-    }
-}
 
 struct State {
     gl: Wgl,

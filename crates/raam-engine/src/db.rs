@@ -1152,6 +1152,69 @@ pub fn remove_files(paths: &[PathBuf]) {
     }
 }
 
+/// Drops every cached Immich file's row, and lets the clips found
+/// unplayable be tried again (the server may have transcoded them since).
+/// Returns how many rows went and their files, for `remove_files`.
+pub fn clear_immich_cache(conn: &Connection) -> rusqlite::Result<(usize, Vec<PathBuf>)> {
+    conn.execute(
+        "UPDATE asset SET playable = NULL, unplayable_reason = NULL
+         WHERE source_id = (SELECT id FROM source WHERE kind = 'immich')",
+        [],
+    )?;
+    let ids: Vec<i64> = conn
+        .prepare(
+            "SELECT c.asset_id FROM cached_file c JOIN asset a ON a.id = c.asset_id
+             JOIN source s ON s.id = a.source_id WHERE s.kind = 'immich'",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let files = ids.iter().flat_map(|&id| drop_cached(conn, id)).collect();
+    Ok((ids.len(), files))
+}
+
+/// An asset whose preview (or, for an Immich clip, playback transcode)
+/// isn't on disk yet.
+pub struct ToMake {
+    pub asset: i64,
+    pub kind: SourceKind,
+    pub remote_id: String,
+    pub location: Option<String>,
+    pub faces_checked: bool,
+    pub is_video: bool,
+}
+
+/// The next asset to make a file for, skipping `failed`: local photos
+/// first (when `local_on`), then Immich photos, then Immich clips (when
+/// `immich_on`). A local clip plays from where it is and needs nothing
+/// made. Rows are read only until one is found.
+pub fn next_to_make(
+    conn: &Connection,
+    local_on: bool,
+    immich_on: bool,
+    failed: &std::collections::HashSet<i64>,
+) -> rusqlite::Result<Option<ToMake>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT a.id, s.kind, a.remote_id, a.location, a.faces_checked, a.kind = 'video'
+         FROM asset a JOIN source s ON s.id = a.source_id
+         LEFT JOIN cached_file c ON c.asset_id = a.id AND c.variant = {VARIANT_SQL}
+         WHERE c.asset_id IS NULL AND COALESCE(a.playable, 1) = 1
+           AND ((s.kind = 'local' AND ?1 AND a.kind != 'video') OR (s.kind = 'immich' AND ?2))
+         ORDER BY s.kind = 'immich', a.kind = 'video', a.id"
+    ))?;
+    let mut rows = stmt.query_map(params![local_on, immich_on], |r| {
+        Ok(ToMake {
+            asset: r.get(0)?,
+            kind: SourceKind::parse(&r.get::<_, String>(1)?),
+            remote_id: r.get(2)?,
+            location: r.get(3)?,
+            faces_checked: r.get(4)?,
+            is_video: r.get(5)?,
+        })
+    })?;
+    rows.find(|r| r.as_ref().map_or(true, |r| !failed.contains(&r.asset)))
+        .transpose()
+}
+
 /// Least recently used Immich previews, oldest first, never `except`.
 pub fn lru_immich(conn: &Connection, except: i64, limit: usize) -> Vec<(i64, i64)> {
     let mut out = Vec::new();
@@ -1516,6 +1579,63 @@ mod tests {
         conn.execute_batch("ALTER TABLE curation RENAME TO unreadable;")
             .unwrap();
         assert!(curation_json(&conn).is_err());
+    }
+
+    /// Photos before clips, a failed one passed over, a cached one done.
+    #[test]
+    fn the_next_preview_to_make_skips_the_failed_and_the_made() {
+        install_clock();
+        let db = open(Path::new(":memory:"), "").unwrap();
+        let conn = db.lock().unwrap();
+        asset(&conn, "clip", "video", None);
+        let mut ids = vec![conn.last_insert_rowid()];
+        for name in ["made", "failed", "next"] {
+            asset(&conn, name, "image", None);
+            ids.push(conn.last_insert_rowid());
+        }
+        insert_cached(&conn, ids[1], Path::new("/cache/made.jpg"), 1, 0).unwrap();
+        let next = |failed: &[i64]| {
+            next_to_make(&conn, true, true, &failed.iter().copied().collect())
+                .unwrap()
+                .map(|m| m.remote_id)
+        };
+        assert_eq!(next(&[]).as_deref(), Some("failed"));
+        assert_eq!(next(&[ids[2]]).as_deref(), Some("next"));
+        assert_eq!(next(&[ids[2], ids[3]]).as_deref(), Some("clip"));
+        assert_eq!(next(&ids), None);
+        assert!(
+            next_to_make(&conn, true, false, &Default::default())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// A clear drops every Immich file's row and gives a clip found
+    /// unplayable another try.
+    #[test]
+    fn clearing_the_cache_drops_its_rows_and_retries_clips() {
+        install_clock();
+        let db = open(Path::new(":memory:"), "").unwrap();
+        let conn = db.lock().unwrap();
+        asset(&conn, "photo", "image", None);
+        let photo = conn.last_insert_rowid();
+        insert_cached(&conn, photo, Path::new("/cache/photo.jpg"), 1, 0).unwrap();
+        asset(&conn, "big", "video", Some((false, "too big")));
+
+        let (cleared, files) = clear_immich_cache(&conn).unwrap();
+        assert_eq!(
+            (cleared, files),
+            (1, vec![PathBuf::from("/cache/photo.jpg")])
+        );
+        assert!(cached_paths(&conn, photo).is_empty());
+        let playable: Option<bool> = conn
+            .query_row(
+                "SELECT playable FROM asset WHERE remote_id = 'big'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(playable, None);
     }
 
     #[test]

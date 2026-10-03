@@ -67,19 +67,35 @@ pub struct Actions {
 
 impl Actions {
     pub fn any(&self) -> bool {
-        self.next
-            || self.prev
-            || self.close
-            || self.toggle_scale
-            || self.clear_cache
-            || self.rescan
-            || self.sync_now
-            || self.hide
-            || self.undo_hide
-            || self.unhide.is_some()
-            || self.export
-            || !self.select_album.is_empty()
-            || !self.net.is_empty()
+        // Destructured, so a new field can't be left out unseen.
+        let Actions {
+            next,
+            prev,
+            close,
+            toggle_scale,
+            clear_cache,
+            rescan,
+            sync_now,
+            hide,
+            undo_hide,
+            unhide,
+            export,
+            select_album,
+            net,
+        } = self;
+        *next
+            || *prev
+            || *close
+            || *toggle_scale
+            || *clear_cache
+            || *rescan
+            || *sync_now
+            || *hide
+            || *undo_hide
+            || unhide.is_some()
+            || *export
+            || !select_album.is_empty()
+            || !net.is_empty()
     }
 }
 
@@ -158,15 +174,15 @@ impl Sub {
     fn parent(self) -> Sub {
         match self {
             Sub::Join => Sub::Networks,
-            _ => Sub::None,
+            Sub::None | Sub::Albums | Sub::Hidden | Sub::Networks => Sub::None,
         }
     }
 
     fn depth(self) -> usize {
         match self {
             Sub::None => 0,
+            Sub::Albums | Sub::Hidden | Sub::Networks => 1,
             Sub::Join => 2,
-            _ => 1,
         }
     }
 }

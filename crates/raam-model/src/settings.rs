@@ -246,3 +246,48 @@ impl Settings {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each `ALL` must list every variant once: the settings pages pick
+    /// by `ALL[i]` and find the current choice by its position there. A
+    /// new variant breaks a match below, which names where it goes.
+    #[test]
+    fn every_all_lists_every_variant() {
+        fn check<T: Copy + PartialEq + std::fmt::Debug>(all: &[T], slot: fn(T) -> usize) {
+            for (i, v) in all.iter().enumerate() {
+                assert_eq!(slot(*v), i, "{v:?} is out of place in ALL");
+            }
+        }
+        check(&VideoPlayback::ALL, |v| match v {
+            VideoPlayback::Continue => 0,
+            VideoPlayback::Loop => 1,
+            VideoPlayback::Wait => 2,
+        });
+        assert_eq!(VideoPlayback::ALL.len(), 3);
+        check(&ClockStyle::ALL, |v| match v {
+            ClockStyle::Off => 0,
+            ClockStyle::Simple => 1,
+            ClockStyle::Detailed => 2,
+        });
+        assert_eq!(ClockStyle::ALL.len(), 3);
+        check(&Corner::ALL, |v| match v {
+            Corner::TopLeft => 0,
+            Corner::TopRight => 1,
+            Corner::BottomLeft => 2,
+            Corner::BottomRight => 3,
+        });
+        assert_eq!(Corner::ALL.len(), 4);
+        check(&TransitionChoice::ALL, |v| match v {
+            TransitionChoice::Rotate => 0,
+            TransitionChoice::Fade => 1,
+            TransitionChoice::DirectionalWipe => 2,
+            TransitionChoice::Cube => 3,
+            TransitionChoice::Crosswarp => 4,
+            TransitionChoice::Swap => 5,
+        });
+        assert_eq!(TransitionChoice::ALL.len(), 6);
+    }
+}

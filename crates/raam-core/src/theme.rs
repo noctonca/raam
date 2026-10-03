@@ -367,7 +367,7 @@ impl TextMode {
             (TextMode::EguiDefault, Theme::Dark) => FontColorTransferFunction::DARK_MODE_DEFAULT,
             (TextMode::EguiDefault, Theme::Light) => FontColorTransferFunction::LIGHT_MODE_DEFAULT,
             (TextMode::Boost, _) => FontColorTransferFunction::TwoCoverageMinusCoverageSq,
-            _ => FontColorTransferFunction::Off,
+            (TextMode::Off | TextMode::Shader, _) => FontColorTransferFunction::Off,
         }
     }
 }

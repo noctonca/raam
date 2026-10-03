@@ -737,17 +737,19 @@ pub fn hidden_list(conn: &Connection) -> Vec<HiddenItem> {
 }
 
 /// The whole overlay as JSON, with where each photo is, for `adb pull`:
-/// the frame has no backup path for app data.
-pub fn curation_json(conn: &Connection) -> String {
+/// the frame has no backup path for app data. An error, never a partial
+/// list: the export is the only copy of the curation off the DB, and a
+/// short one written over it would lose the rest.
+pub fn curation_json(conn: &Connection) -> rusqlite::Result<String> {
     let sql = format!(
         "SELECT c.key, c.hidden, c.scale_mode, c.focus_x, c.focus_y, c.updated_at_ms,
                 (SELECT json_group_array(json_object('source', s.kind, 'id', a.remote_id, 'location', a.location))
                  FROM asset a JOIN source s ON s.id = a.source_id WHERE {KEY_SQL} = c.key)
          FROM curation c ORDER BY c.key"
     );
-    let mut items = Vec::new();
-    if let Ok(mut stmt) = conn.prepare(&sql)
-        && let Ok(iter) = stmt.query_map([], |r| {
+    let items: Vec<serde_json::Value> = conn
+        .prepare(&sql)?
+        .query_map([], |r| {
             Ok(serde_json::json!({
                 "sha1": r.get::<_, String>(0)?,
                 "hidden": r.get::<_, bool>(1)?,
@@ -756,16 +758,14 @@ pub fn curation_json(conn: &Connection) -> String {
                 "updated_at_ms": r.get::<_, i64>(5)?,
                 "copies": serde_json::from_str::<serde_json::Value>(&r.get::<_, String>(6)?).unwrap_or_default(),
             }))
-        })
-    {
-        items.extend(iter.flatten());
-    }
-    serde_json::to_string_pretty(&serde_json::json!({
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
         "format": "raam curation v1",
         "exported_at_ms": now_ms(),
         "items": items,
     }))
-    .unwrap_or_default()
+    .expect("a serde_json::Value always serialises"))
 }
 
 /// The import of a curation export: it seeds `curation` once, when the
@@ -1197,24 +1197,40 @@ pub fn insert_cached_variant(
 /// the row recorded (cut short by a power cut, raam#17), lose the row;
 /// files no row points at are deleted, those included, so the asset is
 /// fetched or made again. Returns (rows dropped, files deleted).
+///
+/// A file is an orphan only against the whole table: if the rows can't
+/// all be read, nothing is deleted (the sweep is skipped, and the next
+/// start tries again), since a short list would take files rows still
+/// point at.
 pub fn sweep(conn: &Connection, dirs: &[&Path]) -> (usize, usize) {
+    let rows: rusqlite::Result<Vec<(String, i64)>> = conn
+        .prepare("SELECT path, bytes FROM cached_file")
+        .and_then(|mut s| s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect());
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(e) => {
+            log::error!("db: startup sweep skipped, cached_file unreadable: {e}");
+            return (0, 0);
+        }
+    };
     let mut known = std::collections::HashSet::new();
     let mut missing = Vec::new();
-    if let Ok(mut stmt) = conn.prepare("SELECT path, bytes FROM cached_file")
-        && let Ok(iter) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
-    {
-        for (path, bytes) in iter.flatten() {
-            let whole = std::fs::metadata(&path)
-                .is_ok_and(|m| m.is_file() && i64::try_from(m.len()) == Ok(bytes));
-            if whole {
-                known.insert(PathBuf::from(path));
-            } else {
-                missing.push(path);
-            }
+    for (path, bytes) in rows {
+        let whole = std::fs::metadata(&path)
+            .is_ok_and(|m| m.is_file() && i64::try_from(m.len()) == Ok(bytes));
+        if whole {
+            known.insert(PathBuf::from(path));
+        } else {
+            missing.push(path);
         }
     }
     for path in &missing {
-        let _ = conn.execute("DELETE FROM cached_file WHERE path = ?1", [path]);
+        // A row left behind points at a file that is gone or short; the
+        // fetch drops a row whose file is missing, and this sweep removes
+        // the file below, so the asset is fetched again either way.
+        if let Err(e) = conn.execute("DELETE FROM cached_file WHERE path = ?1", [path]) {
+            log::error!("db: dropping the row of {path}: {e}");
+        }
     }
     let mut orphans = 0;
     for dir in dirs {
@@ -1461,6 +1477,45 @@ mod tests {
         assert!(!paths[1].exists() && !paths[2].exists() && !stray.exists());
         assert_eq!(sweep(&conn, &[&dir]), (0, 0));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// With the rows unreadable, every file is left where it is: against an
+    /// empty list each would look like an orphan.
+    #[test]
+    fn the_sweep_deletes_nothing_when_the_rows_cant_be_read() {
+        install_clock();
+        let dir = std::env::temp_dir().join(format!("raam-sweep-err-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = open(Path::new(":memory:"), "").unwrap();
+        let conn = db.lock().unwrap();
+        set_immich_server(&conn, "http://immich.local:2283", "key").unwrap();
+        asset(&conn, "kept", "image", None);
+        let path = dir.join("kept.jpg");
+        std::fs::write(&path, [0xff; 100]).unwrap();
+        insert_cached(&conn, conn.last_insert_rowid(), &path, 100, 0).unwrap();
+        conn.execute_batch("ALTER TABLE cached_file RENAME TO unreadable;")
+            .unwrap();
+
+        assert_eq!(sweep(&conn, &[&dir]), (0, 0));
+        assert!(path.is_file());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An export that can't list the curation is an error, never an empty
+    /// export to write over the good one.
+    #[test]
+    fn the_curation_export_fails_rather_than_comes_out_short() {
+        install_clock();
+        let db = open(Path::new(":memory:"), "").unwrap();
+        let conn = db.lock().unwrap();
+        set_hidden(&conn, "k", true).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&curation_json(&conn).unwrap()).unwrap();
+        assert_eq!(json["items"][0]["sha1"], "k");
+
+        conn.execute_batch("ALTER TABLE curation RENAME TO unreadable;")
+            .unwrap();
+        assert!(curation_json(&conn).is_err());
     }
 
     #[test]

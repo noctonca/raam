@@ -22,7 +22,7 @@ use raam_model::limits::{
     LARGEST_LAYOUT,
 };
 use raam_model::{
-    AlbumRow, ClockStyle, Corner, FitBackground, GapColour, ScaleMode, Settings, Stats,
+    AlbumRow, ClockStyle, Corner, FitBackground, GapColour, Prefetch, ScaleMode, Settings, Stats,
     TransitionChoice, VideoPlayback,
 };
 use std::collections::HashMap;
@@ -501,7 +501,7 @@ pub fn sample_stats() -> Stats {
         local_dir: "/sdcard/Pictures/Frame".into(),
         local_note: "scanned 17:34".into(),
         immich_note: "synced 17:34".into(),
-        prefetch_note: "running".into(),
+        prefetch: Prefetch::Running,
         free_bytes: 12_400_000_000,
         hidden: vec![
             raam_model::HiddenItem {
@@ -2202,12 +2202,11 @@ fn server_page(ui: &mut Ui, st: &mut AppState) {
     }
     // Downloading only means something once there's a server.
     if !no_server(&st.settings) {
-        let prefetch = match lib.prefetch_note.as_str() {
-            "" => None,
-            "running" => Some("downloading"),
-            "complete" => Some("all downloaded"),
-            "stopped at the cap" => Some("full"),
-            other => Some(other),
+        let prefetch = match lib.prefetch {
+            Prefetch::Idle => None,
+            Prefetch::Running => Some("downloading"),
+            Prefetch::Complete => Some("all downloaded"),
+            Prefetch::Full => Some("full"),
         };
         usage.extend(prefetch.map(str::to_owned));
     }

@@ -41,7 +41,7 @@ import time
 
 from PIL import Image, ImageChops
 
-DESKTOP = "target/release/raam"
+DESKTOP = "target/quick/raam"
 
 
 def dist(a, b):

@@ -158,7 +158,10 @@ scripts/goldens.sh show 'menu-*'    # before and after, and their diff
 ```
 
 Pixels are exact per GPU and driver, so the hashes hold on the kind of
-Mac the file's header names, and CI doesn't run them. For a shot that
+Mac the file's header names, and CI doesn't run them. The shots come
+from the `quick` profile (release without LTO: the same pixels, and
+about 7 s to relink after an edit where release takes about a minute),
+one per core at a time; a whole check takes about 30 s. For a shot that
 differs, the check draws it at the last blessed commit (built in a
 worktree under `target/goldens/`) and now, with a diff that marks the
 changed pixels in magenta. A change meant to move pixels re-blesses in

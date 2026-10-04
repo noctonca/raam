@@ -85,3 +85,11 @@ inherits = "release"
 opt-level = "s"
 codegen-units = 1
 strip = true
+
+# Release speed without LTO, for the goldens (scripts/goldens.sh) and any
+# optimised desktop run: after an edit it relinks in ~7 s where release
+# takes ~60 s, and every golden shot hashes the same (LTO doesn't change
+# float results).
+[profile.quick]
+inherits = "release"
+lto = false

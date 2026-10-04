@@ -329,8 +329,8 @@ fn base64_to_hex(s: &str) -> Option<String> {
             b'+' => 62,
             b'/' => 63,
             _ => return None,
-        } as u32;
-        bits = (bits << 6) | v;
+        };
+        bits = (bits << 6) | u32::from(v);
         n += 6;
         if n >= 8 {
             n -= 8;

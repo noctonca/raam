@@ -50,7 +50,7 @@ pub fn until(target_min: u32, now_sod: u32) -> Duration {
     debug_assert!(target_min < raam_model::limits::MINUTES_PER_DAY);
     let target = target_min * 60;
     let secs = (target + 86_400 - now_sod) % 86_400;
-    Duration::from_secs(if secs == 0 { 86_400 } else { secs as u64 })
+    Duration::from_secs(if secs == 0 { 86_400 } else { u64::from(secs) })
 }
 
 #[cfg(test)]

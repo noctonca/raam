@@ -370,7 +370,7 @@ impl WebSource {
             .map_err(|e| format!("drawImage: {e:?}"))?;
         let data = self
             .decoder
-            .get_image_data(0.0, 0.0, w as f64, h as f64)
+            .get_image_data(0.0, 0.0, f64::from(w), f64::from(h))
             .map_err(|e| format!("getImageData: {e:?}"))?;
         // Release the decode canvas's backing store until the next tile.
         canvas.set_width(0);
@@ -536,5 +536,5 @@ fn pseudo_random_below(n: u32, counter: u64) -> u32 {
     x ^= x << 13;
     x ^= x >> 7;
     x ^= x << 17;
-    (x % n.max(1) as u64) as u32
+    (x % u64::from(n.max(1))) as u32
 }

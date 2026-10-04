@@ -85,10 +85,10 @@ pub fn shrink_to_cover(photo: &mut Photo, rect: collage::Rect) -> Duration {
             for x in 0..w as usize {
                 let (c, o) = (8 * x, 4 * (y * w as usize + x));
                 for k in 0..4 {
-                    let sum = src[r0 + c + k] as u16
-                        + src[r0 + c + 4 + k] as u16
-                        + src[r1 + c + k] as u16
-                        + src[r1 + c + 4 + k] as u16;
+                    let sum = u16::from(src[r0 + c + k])
+                        + u16::from(src[r0 + c + 4 + k])
+                        + u16::from(src[r1 + c + k])
+                        + u16::from(src[r1 + c + 4 + k]);
                     out[o + k] = ((sum + 2) / 4) as u8;
                 }
             }
@@ -152,7 +152,7 @@ mod tests {
         shrink_to_cover(&mut p, full);
         // 4x2 -> 2x1 (then 1x0 would not cover a 1x1 tile).
         assert_eq!((p.width, p.height), (2, 1));
-        let at = |x: usize, y: usize, k: usize| src[4 * (y * 4 + x) + k] as u16;
+        let at = |x: usize, y: usize, k: usize| u16::from(src[4 * (y * 4 + x) + k]);
         let want = ((at(0, 0, 0) + at(1, 0, 0) + at(0, 1, 0) + at(1, 1, 0) + 2) / 4) as u8;
         assert_eq!(p.rgba[0], want);
     }

@@ -613,7 +613,7 @@ impl Live {
         if since >= Duration::from_secs(10) {
             log::info!(
                 "stats fps={:.1} passes={} overlay={} layout={}",
-                self.frames as f64 / since.as_secs_f64(),
+                f64::from(self.frames) / since.as_secs_f64(),
                 self.passes,
                 self.controller.overlay_open(),
                 run.pipeline.shown_layout().as_deref().unwrap_or("-"),

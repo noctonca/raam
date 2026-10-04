@@ -145,7 +145,7 @@ fn ms(d: Duration, n: u32) -> f64 {
     if n == 0 {
         0.0
     } else {
-        d.as_secs_f64() * 1000.0 / n as f64
+        d.as_secs_f64() * 1000.0 / f64::from(n)
     }
 }
 
@@ -664,7 +664,7 @@ fn android_main(app: AndroidApp) {
                  ms/frame: advance={:.2} slide={:.2} swap={:.2} total={:.2} | ms/egui_run: run_ui={:.2} tess={:.2} \
                  upload={:.2} | ms/egui_frame: draw={:.2} | verts/run={} | clock: draw={:.3}ms/frame rebuilds={} \
                  rebuild={:.2}ms MemFree={:?}KB",
-                n as f64 / since.as_secs_f64(),
+                f64::from(n) / since.as_secs_f64(),
                 controller.state.keyboard.last_rect().is_some(),
                 controller.state.paused,
                 stats.trans_frames,
@@ -713,8 +713,8 @@ fn read_touches(app: &AndroidApp) -> Vec<Touch> {
                         out.push(Touch {
                             phase,
                             pos: egui::pos2(p.x(), p.y()),
-                            device_id: motion.device_id() as u32 as u64,
-                            touch_id: p.pointer_id() as u32 as u64,
+                            device_id: u64::from(motion.device_id() as u32),
+                            touch_id: u64::from(p.pointer_id() as u32),
                             force: p.pressure().clamp(0.0, 1.0),
                         });
                     }

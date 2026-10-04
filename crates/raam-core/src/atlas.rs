@@ -128,19 +128,19 @@ fn box_blur(src: &[u8], w: usize, h: usize, r: usize) -> Vec<u8> {
                 let mut sum = 0u32;
                 let mut n = 0u32;
                 for i in 0..=r.min(len as i32 - 1) {
-                    sum += src[at(line, i as usize)] as u32;
+                    sum += u32::from(src[at(line, i as usize)]);
                     n += 1;
                 }
                 for i in 0..len as i32 {
                     out[at(line, i as usize)] = (sum / n.max(1)) as u8;
                     let add = i + r + 1;
                     if add < len as i32 {
-                        sum += src[at(line, add as usize)] as u32;
+                        sum += u32::from(src[at(line, add as usize)]);
                         n += 1;
                     }
                     let sub = i - r;
                     if sub >= 0 {
-                        sum -= src[at(line, sub as usize)] as u32;
+                        sum -= u32::from(src[at(line, sub as usize)]);
                         n -= 1;
                     }
                 }
@@ -199,7 +199,7 @@ fn pack(font: &fontdue::Font, px: f32, shadow: Shadow, extra: Vec<Raster>) -> Pa
             let mut b = box_blur(&padded, pw, ph, shadow.radius);
             if shadow.gain != 1.0 {
                 b.iter_mut()
-                    .for_each(|v| *v = (*v as f32 * shadow.gain).min(255.0) as u8);
+                    .for_each(|v| *v = (f32::from(*v) * shadow.gain).min(255.0) as u8);
             }
             (b, pw, ph)
         })

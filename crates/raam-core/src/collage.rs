@@ -203,7 +203,7 @@ pub fn screen_default_max(width_px: i32, height_px: i32, density_dpi: u32) -> us
 }
 
 pub fn screen_diagonal_inches(width_px: i32, height_px: i32, density_dpi: u32) -> f64 {
-    ((width_px as f64).powi(2) + (height_px as f64).powi(2)).sqrt() / density_dpi as f64
+    (f64::from(width_px).powi(2) + f64::from(height_px).powi(2)).sqrt() / f64::from(density_dpi)
 }
 
 /// A tile's rectangle in screen pixels, top-left origin.

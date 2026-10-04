@@ -504,7 +504,7 @@ pub fn sample_stats() -> Stats {
         immich_assets: 347,
         immich_cached: 280,
         cache_bytes: 84 * MB,
-        cap_bytes: DEFAULT_CAP_MB as i64 * MB,
+        cap_bytes: i64::from(DEFAULT_CAP_MB) * MB,
         local_assets: 6,
         local_ready: 6,
         shared: 2,
@@ -552,7 +552,7 @@ pub fn sample_stats() -> Stats {
 /// A first run: nothing synced, scanned or hidden, and no server yet.
 pub fn first_run_stats() -> Stats {
     Stats {
-        cap_bytes: DEFAULT_CAP_MB as i64 * MB,
+        cap_bytes: i64::from(DEFAULT_CAP_MB) * MB,
         local_dir: "/sdcard/Pictures/Frame".into(),
         immich_note: "not synced yet".into(),
         albums_note: "saved list, not refreshed yet".into(),
@@ -3043,7 +3043,7 @@ fn dialogs(ctx: &egui::Context, st: &mut AppState) {
                 DialogResult::Dismissed => st.dialog = Dialog::None,
                 DialogResult::Done(i) => {
                     st.settings.cache_cap_mb = CAP_CHOICES_MB[i];
-                    st.library.cap_bytes = CAP_CHOICES_MB[i] as i64 * MB;
+                    st.library.cap_bytes = i64::from(CAP_CHOICES_MB[i]) * MB;
                     st.dialog = Dialog::None;
                 }
             }

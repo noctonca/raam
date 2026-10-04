@@ -77,6 +77,9 @@ undocumented_unsafe_blocks = "warn"
 # A widening that can't lose a value says so with `From`, so every `as`
 # left over is a cast that can truncate, wrap or round, worth a look.
 cast_lossless = "warn"
+# A cast that can turn a big unsigned value negative says why it can't,
+# or wraps on purpose under an `expect` with its reason.
+cast_possible_wrap = "warn"
 
 # Profiles live at the workspace root only (Cargo ignores them in
 # members). Release: LTO earns its keep on the frame (binary size and the

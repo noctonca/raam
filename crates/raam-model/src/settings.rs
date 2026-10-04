@@ -385,4 +385,70 @@ mod tests {
         check(&ClockStyle::ALL, ClockStyle::as_str, ClockStyle::parse);
         check(&Corner::ALL, Corner::as_str, Corner::parse);
     }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Every stored name, so the text below lands on and near them.
+        fn names() -> Vec<&'static str> {
+            let mut all = Vec::new();
+            all.extend(FitBackground::ALL.map(FitBackground::as_str));
+            all.extend(VideoPlayback::ALL.map(VideoPlayback::as_str));
+            all.extend(GapColour::ALL.map(GapColour::as_str));
+            all.extend(ClockStyle::ALL.map(ClockStyle::as_str));
+            all.extend(Corner::ALL.map(Corner::as_str));
+            all
+        }
+
+        /// A stored name as a row might hold it: exact, cased or padded
+        /// differently, cut short, or any text at all.
+        fn row_text() -> impl Strategy<Value = String> {
+            let near = (
+                prop::sample::select(names()),
+                0..5u8,
+                any::<prop::sample::Index>(),
+            )
+                .prop_map(|(name, edit, at)| match edit {
+                    0 => name.to_string(),
+                    1 => name.to_uppercase(),
+                    2 => format!(" {name}"),
+                    3 => format!("{name}\0"),
+                    _ => name[..at.index(name.len())].to_string(),
+                });
+            prop_oneof![near, any::<String>()]
+        }
+
+        /// `parse` takes a row back only to the value that writes exactly
+        /// that text, and `as_str` of what it found is the row: a name
+        /// near another's never loads as a different setting.
+        fn parses_only_its_own_name<T: Copy + std::fmt::Debug>(
+            text: &str,
+            as_str: fn(T) -> &'static str,
+            parse: fn(&str) -> Option<T>,
+            all: &[T],
+        ) -> Result<(), TestCaseError> {
+            match parse(text) {
+                Some(v) => prop_assert_eq!(as_str(v), text),
+                None => prop_assert!(all.iter().all(|v| as_str(*v) != text), "{text:?}"),
+            }
+            Ok(())
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+
+            #[test]
+            fn any_row_text_parses_only_to_its_own_value(text in row_text()) {
+                parses_only_its_own_name(
+                    &text, FitBackground::as_str, FitBackground::parse, &FitBackground::ALL)?;
+                parses_only_its_own_name(
+                    &text, VideoPlayback::as_str, VideoPlayback::parse, &VideoPlayback::ALL)?;
+                parses_only_its_own_name(&text, GapColour::as_str, GapColour::parse, &GapColour::ALL)?;
+                parses_only_its_own_name(
+                    &text, ClockStyle::as_str, ClockStyle::parse, &ClockStyle::ALL)?;
+                parses_only_its_own_name(&text, Corner::as_str, Corner::parse, &Corner::ALL)?;
+            }
+        }
+    }
 }

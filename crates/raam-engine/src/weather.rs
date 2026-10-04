@@ -94,19 +94,63 @@ impl WeatherShared {
     }
 }
 
+/// Why a location lookup or a weather call failed. The worker retries
+/// every one with backoff; the variant says what went wrong, for the log.
+#[derive(Debug)]
+enum WeatherError {
+    /// The request didn't complete (DNS, connect, TLS, timeout).
+    Transport { host: String, source: ureq::Error },
+    /// The service answered with an error status.
+    Status {
+        host: String,
+        status: ureq::http::StatusCode,
+    },
+    /// The answer's body didn't read as JSON.
+    Body { host: String, source: ureq::Error },
+    /// ipwho.is answered but couldn't place the IP, in its words.
+    NotPlaced(String),
+    /// The JSON has no such field, or not of the expected type.
+    Missing(&'static str),
+}
+
+impl std::fmt::Display for WeatherError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WeatherError::Transport { host, source } => write!(f, "GET {host}: {source}"),
+            WeatherError::Status { host, status } => write!(f, "{host} returned {status}"),
+            WeatherError::Body { host, source } => write!(f, "{host} body: {source}"),
+            WeatherError::NotPlaced(why) => write!(f, "ipwho.is: {why}"),
+            WeatherError::Missing(field) => write!(f, "no {field}"),
+        }
+    }
+}
+
+impl std::error::Error for WeatherError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            WeatherError::Transport { source, .. } | WeatherError::Body { source, .. } => {
+                Some(source)
+            }
+            WeatherError::Status { .. } | WeatherError::NotPlaced(_) | WeatherError::Missing(_) => {
+                None
+            }
+        }
+    }
+}
+
 /// The worker's two calls; a test counts them through a fake.
 trait Api: Send + 'static {
-    fn locate(&self) -> Result<Location, String>;
-    fn current(&self, loc: &Location) -> Result<Current, String>;
+    fn locate(&self) -> Result<Location, WeatherError>;
+    fn current(&self, loc: &Location) -> Result<Current, WeatherError>;
 }
 
 struct Http(ureq::Agent);
 
 impl Api for Http {
-    fn locate(&self) -> Result<Location, String> {
+    fn locate(&self) -> Result<Location, WeatherError> {
         locate(&self.0)
     }
-    fn current(&self, loc: &Location) -> Result<Current, String> {
+    fn current(&self, loc: &Location) -> Result<Current, WeatherError> {
         current_weather(&self.0, loc)
     }
 }
@@ -193,18 +237,28 @@ fn weather_loop(shared: Arc<WeatherShared>, waker: Arc<dyn Waker>, api: impl Api
     }
 }
 
-fn get_json(client: &ureq::Agent, url: &str) -> Result<serde_json::Value, String> {
+fn get_json(client: &ureq::Agent, url: &str) -> Result<serde_json::Value, WeatherError> {
+    let host = || host_of(url).to_string();
     let mut resp = client
         .get(url)
         .call()
-        .map_err(|e| format!("GET {}: {e}", host_of(url)))?;
+        .map_err(|source| WeatherError::Transport {
+            host: host(),
+            source,
+        })?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(format!("{} returned {status}", host_of(url)));
+        return Err(WeatherError::Status {
+            host: host(),
+            status,
+        });
     }
     resp.body_mut()
         .read_json()
-        .map_err(|e| format!("{} body: {e}", host_of(url)))
+        .map_err(|source| WeatherError::Body {
+            host: host(),
+            source,
+        })
 }
 
 fn host_of(url: &str) -> &str {
@@ -214,12 +268,11 @@ fn host_of(url: &str) -> &str {
         .unwrap_or(url)
 }
 
-fn locate(client: &ureq::Agent) -> Result<Location, String> {
+fn locate(client: &ureq::Agent) -> Result<Location, WeatherError> {
     let primary = get_json(client, "https://ipwho.is/").and_then(|v| {
         if v["success"].as_bool() != Some(true) {
-            return Err(format!(
-                "ipwho.is: {}",
-                v["message"].as_str().unwrap_or("success=false")
+            return Err(WeatherError::NotPlaced(
+                v["message"].as_str().unwrap_or("success=false").to_string(),
             ));
         }
         parse_location(&v, "city", "latitude", "longitude")
@@ -239,24 +292,35 @@ fn parse_location(
     city: &str,
     lat: &str,
     lon: &str,
-) -> Result<Location, String> {
+) -> Result<Location, WeatherError> {
     Ok(Location {
-        city: v[city].as_str().ok_or("no city")?.to_string(),
-        lat: v[lat].as_f64().ok_or("no latitude")?,
-        lon: v[lon].as_f64().ok_or("no longitude")?,
+        city: v[city]
+            .as_str()
+            .ok_or(WeatherError::Missing("city"))?
+            .to_string(),
+        lat: v[lat].as_f64().ok_or(WeatherError::Missing("latitude"))?,
+        lon: v[lon].as_f64().ok_or(WeatherError::Missing("longitude"))?,
     })
 }
 
-fn current_weather(client: &ureq::Agent, loc: &Location) -> Result<Current, String> {
+fn current_weather(client: &ureq::Agent, loc: &Location) -> Result<Current, WeatherError> {
     let url = format!(
         "https://api.open-meteo.com/v1/forecast?latitude={:.3}&longitude={:.3}&current=temperature_2m,weather_code,is_day",
         loc.lat, loc.lon
     );
-    let v = get_json(client, &url)?;
+    parse_current(&get_json(client, &url)?)
+}
+
+/// Open-Meteo's `current` block; a missing `is_day` counts as day.
+fn parse_current(v: &serde_json::Value) -> Result<Current, WeatherError> {
     let c = &v["current"];
     Ok(Current {
-        temp_c: c["temperature_2m"].as_f64().ok_or("no temperature_2m")?,
-        code: c["weather_code"].as_i64().ok_or("no weather_code")?,
+        temp_c: c["temperature_2m"]
+            .as_f64()
+            .ok_or(WeatherError::Missing("temperature_2m"))?,
+        code: c["weather_code"]
+            .as_i64()
+            .ok_or(WeatherError::Missing("weather_code"))?,
         is_day: c["is_day"].as_i64().unwrap_or(1) != 0,
     })
 }
@@ -302,7 +366,7 @@ mod tests {
     struct Fake(Arc<Calls>);
 
     impl Api for Fake {
-        fn locate(&self) -> Result<Location, String> {
+        fn locate(&self) -> Result<Location, WeatherError> {
             self.0.locate.fetch_add(1, Ordering::SeqCst);
             Ok(Location {
                 city: "Lisbon".into(),
@@ -310,7 +374,7 @@ mod tests {
                 lon: -9.1,
             })
         }
-        fn current(&self, _loc: &Location) -> Result<Current, String> {
+        fn current(&self, _loc: &Location) -> Result<Current, WeatherError> {
             self.0.current.fetch_add(1, Ordering::SeqCst);
             Ok(Current {
                 temp_c: 18.0,
@@ -357,5 +421,33 @@ mod tests {
         w.set_enabled(true);
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(calls.get(), (1, 1));
+    }
+
+    /// A payload short of a field names it; a whole one parses.
+    #[test]
+    fn a_payload_missing_a_field_says_which() {
+        let v = serde_json::json!({"city": "Lisbon", "latitude": 38.7});
+        assert!(matches!(
+            parse_location(&v, "city", "latitude", "longitude"),
+            Err(WeatherError::Missing("longitude"))
+        ));
+        let v = serde_json::json!({"city": "Lisbon", "latitude": 38.7, "longitude": -9.1});
+        let loc = parse_location(&v, "city", "latitude", "longitude").unwrap();
+        assert_eq!(
+            (loc.city.as_str(), loc.lat, loc.lon),
+            ("Lisbon", 38.7, -9.1)
+        );
+
+        let v = serde_json::json!({"current": {"temperature_2m": 18.5}});
+        assert!(matches!(
+            parse_current(&v),
+            Err(WeatherError::Missing("weather_code"))
+        ));
+        let v = serde_json::json!({"current": {"temperature_2m": 18.5, "weather_code": 3}});
+        let c = parse_current(&v).unwrap();
+        assert_eq!((c.temp_c, c.code, c.is_day), (18.5, 3, true));
+        let v =
+            serde_json::json!({"current": {"temperature_2m": 1.0, "weather_code": 0, "is_day": 0}});
+        assert!(!parse_current(&v).unwrap().is_day);
     }
 }

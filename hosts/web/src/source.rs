@@ -18,7 +18,9 @@
 use raam_core::collage::{self, Orientation, Rect};
 use raam_core::source::{TileSource, shrink_to_cover};
 use raam_core::{clock, collage::LARGEST_LAYOUT};
-use raam_model::{Focus, MediaItem, Photo, Plan, SourceKind, TilePhoto};
+use raam_model::{
+    AssetId, CurationKey, Focus, MediaItem, Photo, Plan, RemoteId, SourceKind, TilePhoto,
+};
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::time::Duration;
@@ -234,7 +236,7 @@ impl WebSource {
         s.seq += 1;
         plan.seq = s.seq;
         for a in &plan.assets {
-            let i = (a.asset - 1) as usize;
+            let i = (a.asset.get() - 1) as usize;
             if matches!(s.images[i], Image::Idle) {
                 s.images[i] = Image::Loading(load(&s.samples[i].file));
             }
@@ -287,7 +289,7 @@ impl WebSource {
         }
         let (slot, rect, is_request) = (b.next, b.rects[b.next], b.is_request);
         let entry = b.plan.assets[slot].clone();
-        let i = (entry.asset - 1) as usize;
+        let i = (entry.asset.get() - 1) as usize;
         let Image::Loading(img) = &s.images[i] else {
             // Parking the plan asks for every photo in it; this one was
             // decoded for an earlier plan since, so ask again.
@@ -478,10 +480,10 @@ fn plan_next(s: &mut State) -> Option<Plan> {
             let i = window[w];
             let p = &s.samples[i];
             MediaItem {
-                asset: i as i64 + 1,
-                key: p.key.clone(),
+                asset: AssetId::new(i as i64 + 1),
+                key: CurationKey::new(p.key.clone()),
                 source: SourceKind::Local,
-                remote_id: p.file.clone(),
+                remote_id: RemoteId::new(p.file.clone()),
                 width: p.width,
                 height: p.height,
                 video: false,

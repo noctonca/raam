@@ -1,12 +1,12 @@
 //! What the settings panel shows about the library, refreshed after each
 //! library step and published behind a version counter.
 
-use crate::SourceKind;
+use crate::{AlbumId, CurationKey, SourceKind};
 
 /// An album as the picker shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AlbumRow {
-    pub remote_id: String,
+    pub remote_id: AlbumId,
     pub name: String,
     /// The server's count (videos included).
     pub asset_count: i64,
@@ -19,7 +19,7 @@ pub struct AlbumRow {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct HiddenItem {
-    pub key: String,
+    pub key: CurationKey,
     pub label: String,
     /// Where the photo is now; `None` when no source the frame syncs has
     /// it (gone, or one of the web demo's own samples).

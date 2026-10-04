@@ -32,7 +32,12 @@ impl Decoders {
 impl VideoPlayer for Decoders {
     type Clip = Player;
 
-    fn open(&self, clip: &VideoClip, asset_id: i64, role: Role) -> Result<Player, String> {
+    fn open(
+        &self,
+        clip: &VideoClip,
+        asset_id: raam_model::AssetId,
+        role: Role,
+    ) -> Result<Player, String> {
         // Test-only: `debug.video.fail=open`.
         if switches::fail() == Fail::Open {
             return Err("test failure (debug.video.fail=Open)".into());

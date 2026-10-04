@@ -31,7 +31,7 @@ use raam_core::video::NoVideo;
 use raam_core::{clock, collage, switches};
 use raam_engine::{db, fetch, library, weather};
 use raam_model::limits::LARGEST_LAYOUT;
-use raam_model::{ClipInfo, FitBackground, GapColour, ScaleMode, SourceKind};
+use raam_model::{ClipInfo, CurationKey, FitBackground, GapColour, ScaleMode, SourceKind};
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -121,7 +121,7 @@ pub struct Live {
     /// screen's default.
     saved_keys: Vec<String>,
     /// The saved Fill/Fit choices, for the pipeline once it exists.
-    overrides: Option<HashMap<String, ScaleMode>>,
+    overrides: Option<HashMap<CurationKey, ScaleMode>>,
     controller: App,
     /// A full-screen window whose size hasn't held still yet, and when it
     /// will have if nothing resizes it before.

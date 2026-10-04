@@ -36,7 +36,7 @@ use crate::source::{Photo, Plan, TileSource, VideoClip};
 use crate::transitions::TransitionProgram;
 use crate::video::{ClipFrame, LiveCue, ProbePlayer, ProbeStatus, Tick, Video, VideoPlayer};
 use raam_model::limits::{BLUR_WIDTH_PX, GPU_RETRY, HISTORY_LEN, TRANSITION_DURATION};
-use raam_model::{FitBackground, GapColour, ScaleMode, VideoPlayback};
+use raam_model::{AssetId, CurationKey, FitBackground, GapColour, ScaleMode, VideoPlayback};
 use std::cell::OnceCell;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
@@ -125,9 +125,9 @@ enum Composition {
 /// `photo_tex` (the RGBA buffer is dropped after upload).
 #[derive(Clone)]
 struct PhotoMeta {
-    asset_id: i64,
+    asset_id: AssetId,
     /// The curation key (the photo's SHA-1).
-    key: String,
+    key: CurationKey,
     width: u32,
     height: u32,
     face_focal: Option<(f32, f32)>,
@@ -658,7 +658,7 @@ enum State {
 
 enum Skip {
     Next,
-    Prev(Vec<i64>),
+    Prev(Vec<AssetId>),
 }
 
 pub struct Pipeline<P: VideoPlayer> {
@@ -692,7 +692,7 @@ pub struct Pipeline<P: VideoPlayer> {
     /// Per-photo Fill/Fit choices from the menu, by curation key (SHA-1).
     /// Loaded from and saved to `curation` by the host; a photo with no
     /// entry follows "Fill frame by default".
-    overrides: HashMap<String, ScaleMode>,
+    overrides: HashMap<CurationKey, ScaleMode>,
     /// Earlier collages' plans, oldest first. Going back pops from here and
     /// does not push the collage it leaves.
     history: VecDeque<Plan>,
@@ -704,7 +704,7 @@ pub struct Pipeline<P: VideoPlayer> {
     menu_open: bool,
     kb_seed: u64,
     /// Hidden this session; plans still holding them are dropped.
-    hidden: std::collections::HashSet<String>,
+    hidden: std::collections::HashSet<CurationKey>,
     state: State,
     pub clock: SlideClock,
     pub settings: SlideshowSettings,
@@ -839,18 +839,18 @@ impl<P: VideoPlayer> Pipeline<P> {
         }
     }
 
-    fn scale_mode(&self, key: &str) -> ScaleMode {
+    fn scale_mode(&self, key: &CurationKey) -> ScaleMode {
         self.overrides
             .get(key)
             .copied()
             .unwrap_or(self.default_scale())
     }
 
-    pub fn set_overrides(&mut self, overrides: HashMap<String, ScaleMode>) {
+    pub fn set_overrides(&mut self, overrides: HashMap<CurationKey, ScaleMode>) {
         self.overrides = overrides;
     }
 
-    fn wanted_comp(&self, key: &str) -> Composition {
+    fn wanted_comp(&self, key: &CurationKey) -> Composition {
         match self.scale_mode(key) {
             ScaleMode::Fill => Composition::Fill,
             ScaleMode::Fit => Composition::Fit(self.settings.fit_background),
@@ -951,7 +951,7 @@ impl<P: VideoPlayer> Pipeline<P> {
     /// default drops the override (NULL in `curation`), so the photo
     /// follows the default again if it changes. Returns what to persist.
     #[must_use = "save the new scale, or it is lost at the next restart"]
-    pub fn toggle_shown_scale(&mut self) -> Option<(String, Option<ScaleMode>)> {
+    pub fn toggle_shown_scale(&mut self) -> Option<(CurationKey, Option<ScaleMode>)> {
         let (key, id) = self
             .selected_tile()
             .filter(|t| t.video.is_none())
@@ -970,7 +970,7 @@ impl<P: VideoPlayer> Pipeline<P> {
     }
 
     /// The selected tile's photo: (curation key, asset id).
-    pub fn shown_photo(&self) -> Option<(String, i64)> {
+    pub fn shown_photo(&self) -> Option<(CurationKey, AssetId)> {
         self.selected_tile()
             .map(|t| (t.meta.key.clone(), t.meta.asset_id))
     }
@@ -979,13 +979,13 @@ impl<P: VideoPlayer> Pipeline<P> {
     /// but unshown collage, and move on from the one on screen. The
     /// source's queue reload keeps it out of every plan after this; until
     /// that lands, a plan holding it is dropped as soon as it's built.
-    pub fn forget(&mut self, key: &str, source: &dyn TileSource) {
+    pub fn forget(&mut self, key: &CurationKey, source: &dyn TileSource) {
         let before = self.history.len();
         self.history
-            .retain(|p| p.assets.iter().all(|a| a.key != key));
+            .retain(|p| p.assets.iter().all(|a| &a.key != key));
         if let Some(r) = self
             .ready
-            .take_if(|r| r.plan.assets.iter().any(|a| a.key == key))
+            .take_if(|r| r.plan.assets.iter().any(|a| &a.key == key))
         {
             log::info!(
                 "dropping built plan {} (it holds the hidden photo)",
@@ -999,14 +999,14 @@ impl<P: VideoPlayer> Pipeline<P> {
         }
         // A plan still being built is dropped once it's ready (see `pull`):
         // the source is waiting to hand over its tiles.
-        self.hidden.insert(key.to_string());
+        self.hidden.insert(key.clone());
         log::info!(
             "forgot hidden photo {key}: history {before} -> {}",
             self.history.len()
         );
         if self
             .displayed()
-            .is_some_and(|c| c.plan.assets.iter().any(|a| a.key == key))
+            .is_some_and(|c| c.plan.assets.iter().any(|a| &a.key == key))
         {
             self.request_next();
         }
@@ -1364,7 +1364,7 @@ impl<P: VideoPlayer> Pipeline<P> {
     }
 
     /// Undo of a hide.
-    pub fn unforget(&mut self, key: &str) {
+    pub fn unforget(&mut self, key: &CurationKey) {
         self.hidden.remove(key);
     }
 
@@ -2292,16 +2292,16 @@ impl<P: VideoPlayer> crate::app::Slideshow for Pipeline<P> {
     fn request_prev(&mut self, source: &dyn TileSource) {
         Pipeline::request_prev(self, source);
     }
-    fn toggle_shown_scale(&mut self) -> Option<(String, Option<ScaleMode>)> {
+    fn toggle_shown_scale(&mut self) -> Option<(CurationKey, Option<ScaleMode>)> {
         Pipeline::toggle_shown_scale(self)
     }
-    fn shown_photo(&self) -> Option<(String, i64)> {
+    fn shown_photo(&self) -> Option<(CurationKey, AssetId)> {
         Pipeline::shown_photo(self)
     }
-    fn forget(&mut self, key: &str, source: &dyn TileSource) {
+    fn forget(&mut self, key: &CurationKey, source: &dyn TileSource) {
         Pipeline::forget(self, key, source);
     }
-    fn unforget(&mut self, key: &str) {
+    fn unforget(&mut self, key: &CurationKey) {
         Pipeline::unforget(self, key);
     }
     fn shown_scale_mode(&self) -> Option<ScaleMode> {
@@ -2343,7 +2343,7 @@ mod tests {
 
     fn photo(w: u32, h: u32, bytes: usize) -> Photo {
         Photo {
-            asset_id: 7,
+            asset_id: AssetId::new(7),
             key: "k".into(),
             width: w,
             height: h,

@@ -18,7 +18,7 @@ use raam_model::limits::{
     AUDIO_PREROLL_WAIT, DECODER_BACKOFF_BASE_SECS, DECODER_BACKOFF_CAP_SECS, DECODER_RELEASE_POLL,
     DECODER_RELEASE_TIMEOUT, FIRST_FRAME_TIMEOUT, LIVE_DECODER_WAIT,
 };
-use raam_model::{VideoClip, VideoPlayback};
+use raam_model::{AssetId, VideoClip, VideoPlayback};
 use std::fmt;
 use std::time::Duration;
 
@@ -75,7 +75,7 @@ pub trait VideoPlayer {
     /// Opens a clip onto a new external texture and starts decoding: frame
     /// 0 is rendered as soon as it's decoded, then held for `play`. On the
     /// GL thread. The error is only logged.
-    fn open(&self, clip: &VideoClip, asset_id: i64, role: Role) -> Result<Self::Clip, String>;
+    fn open(&self, clip: &VideoClip, asset_id: AssetId, role: Role) -> Result<Self::Clip, String>;
     /// Video decoders created and not yet released, anywhere in the
     /// process: open clips, and stopped ones still being torn down. On the
     /// frame's VPU a second decoder beside another's buffers has run ion
@@ -131,7 +131,7 @@ pub enum NoClip {}
 impl VideoPlayer for NoVideo {
     type Clip = NoClip;
 
-    fn open(&self, _: &VideoClip, _: i64, _: Role) -> Result<NoClip, String> {
+    fn open(&self, _: &VideoClip, _: AssetId, _: Role) -> Result<NoClip, String> {
         Err("no video on this host".into())
     }
 
@@ -208,7 +208,7 @@ impl ClipFrame {
 /// clip (if it is one) and the sound and playback settings.
 pub struct LiveCue<'a> {
     /// The clip and its asset id.
-    pub clip: Option<(&'a VideoClip, i64)>,
+    pub clip: Option<(&'a VideoClip, AssetId)>,
     /// The volume, or `None` for no audio decoding.
     pub sound: Option<f32>,
     pub playback: VideoPlayback,
@@ -287,7 +287,7 @@ pub struct Video<P: VideoPlayer> {
     /// The clip on screen has finished (or couldn't play): its still holds.
     done: bool,
     /// Clips the decoder refused, for the host to mark (asset id, why).
-    unplayable: Vec<(i64, String)>,
+    unplayable: Vec<(AssetId, String)>,
     /// The clip on screen is to start once no other decoder is open (since).
     live_wanted: Option<Duration>,
     /// Decoder failures in a row, and until when clips are passed over
@@ -338,7 +338,7 @@ impl<P: VideoPlayer> Video<P> {
 
     /// Clips the decoder refused since the last call.
     #[must_use = "a refused clip not recorded is planned again"]
-    pub fn take_unplayable(&mut self) -> Vec<(i64, String)> {
+    pub fn take_unplayable(&mut self) -> Vec<(AssetId, String)> {
         std::mem::take(&mut self.unplayable)
     }
 
@@ -381,7 +381,7 @@ impl<P: VideoPlayer> Video<P> {
     pub fn open_probe(
         &self,
         clip: &VideoClip,
-        asset_id: i64,
+        asset_id: AssetId,
     ) -> Result<ProbePlayer<P::Clip>, String> {
         let clip = self.player.open(clip, asset_id, Role::Probe)?;
         Ok(ProbePlayer {
@@ -393,7 +393,11 @@ impl<P: VideoPlayer> Video<P> {
     /// Polls a probing decoder. A failure is logged and recorded here (the
     /// refused clip, the backoff) as a live failure would be; the caller
     /// drops the plan being built.
-    pub fn poll_probe(&mut self, probe: &mut ProbePlayer<P::Clip>, asset_id: i64) -> ProbeStatus {
+    pub fn poll_probe(
+        &mut self,
+        probe: &mut ProbePlayer<P::Clip>,
+        asset_id: AssetId,
+    ) -> ProbeStatus {
         probe.clip.latch();
         let phase = probe.clip.phase();
         if let Phase::Failed(e) = &phase {
@@ -638,7 +642,7 @@ mod tests {
         hold_release: bool,
         /// Every `open` is refused (no decoder created).
         fail_open: bool,
-        opens: Vec<(i64, Role)>,
+        opens: Vec<(AssetId, Role)>,
         plays: u32,
         looping: bool,
     }
@@ -676,7 +680,7 @@ mod tests {
     impl VideoPlayer for Fake {
         type Clip = FakeClip;
 
-        fn open(&self, _: &VideoClip, asset_id: i64, role: Role) -> Result<FakeClip, String> {
+        fn open(&self, _: &VideoClip, asset_id: AssetId, role: Role) -> Result<FakeClip, String> {
             let refused = self.with(|s| {
                 s.opens.push((asset_id, role));
                 if !s.fail_open {
@@ -764,7 +768,7 @@ mod tests {
 
     fn cue(clip: &VideoClip) -> LiveCue<'_> {
         LiveCue {
-            clip: Some((clip, 42)),
+            clip: Some((clip, AssetId::new(42))),
             sound: None,
             playback: VideoPlayback::Continue,
         }
@@ -786,7 +790,7 @@ mod tests {
         let fake = Fake::new();
         let mut video = Video::new(fake.clone());
         let clip = clip();
-        let probe = video.open_probe(&clip, 42).unwrap();
+        let probe = video.open_probe(&clip, AssetId::new(42)).unwrap();
         fake.with(|s| s.hold_release = true);
         probe.stop();
         assert!(video.decoder_busy());
@@ -801,7 +805,10 @@ mod tests {
         assert_eq!(video.tick(&cue(&clip), false, false), Tick::Running);
         assert_eq!(
             fake.with(|s| s.opens.clone()),
-            vec![(42, Role::Probe), (42, Role::Live { sound: None })]
+            vec![
+                (AssetId::new(42), Role::Probe),
+                (AssetId::new(42), Role::Live { sound: None })
+            ]
         );
         assert!(video.decoder_busy() && !video.done());
     }
@@ -909,11 +916,17 @@ mod tests {
     fn a_probe_the_decoder_refuses_marks_the_clip_and_backs_off() {
         let fake = Fake::new();
         let mut video = Video::new(fake.clone());
-        let mut probe = video.open_probe(&clip(), 42).unwrap();
+        let mut probe = video.open_probe(&clip(), AssetId::new(42)).unwrap();
         fake.with(|s| s.probe_phase = Phase::Failed(PlayerError::Decoder("refused".into())));
-        assert_eq!(video.poll_probe(&mut probe, 42), ProbeStatus::Failed);
+        assert_eq!(
+            video.poll_probe(&mut probe, AssetId::new(42)),
+            ProbeStatus::Failed
+        );
         probe.stop();
-        assert_eq!(video.take_unplayable(), vec![(42, "refused".to_string())]);
+        assert_eq!(
+            video.take_unplayable(),
+            vec![(AssetId::new(42), "refused".to_string())]
+        );
         assert!(video.backing_off());
     }
 
@@ -921,9 +934,12 @@ mod tests {
     fn a_probe_whose_file_is_gone_neither_marks_nor_backs_off() {
         let fake = Fake::new();
         let mut video = Video::new(fake.clone());
-        let mut probe = video.open_probe(&clip(), 42).unwrap();
+        let mut probe = video.open_probe(&clip(), AssetId::new(42)).unwrap();
         fake.with(|s| s.probe_phase = Phase::Failed(PlayerError::File("open: gone".into())));
-        assert_eq!(video.poll_probe(&mut probe, 42), ProbeStatus::Failed);
+        assert_eq!(
+            video.poll_probe(&mut probe, AssetId::new(42)),
+            ProbeStatus::Failed
+        );
         assert!(video.take_unplayable().is_empty());
         assert!(!video.backing_off());
     }
@@ -934,9 +950,12 @@ mod tests {
         let mut video = Video::new(fake.clone());
         let clip = clip();
         video.start(&cue(&clip));
-        let mut probe = video.open_probe(&clip, 43).unwrap();
+        let mut probe = video.open_probe(&clip, AssetId::new(43)).unwrap();
         fake.with(|s| s.probe_phase = Phase::Failed(PlayerError::Decoder("ion".into())));
-        assert_eq!(video.poll_probe(&mut probe, 43), ProbeStatus::Failed);
+        assert_eq!(
+            video.poll_probe(&mut probe, AssetId::new(43)),
+            ProbeStatus::Failed
+        );
         assert!(video.take_unplayable().is_empty(), "maybe contention");
         assert!(video.backing_off());
     }
@@ -945,18 +964,27 @@ mod tests {
     fn a_probe_without_a_first_frame_times_out() {
         let fake = Fake::new();
         let mut video = Video::new(fake.clone());
-        let mut probe = video.open_probe(&clip(), 42).unwrap();
-        assert_eq!(video.poll_probe(&mut probe, 42), ProbeStatus::Waiting);
+        let mut probe = video.open_probe(&clip(), AssetId::new(42)).unwrap();
+        assert_eq!(
+            video.poll_probe(&mut probe, AssetId::new(42)),
+            ProbeStatus::Waiting
+        );
         advance(FIRST_FRAME_TIMEOUT + ms(1));
-        assert_eq!(video.poll_probe(&mut probe, 42), ProbeStatus::Failed);
+        assert_eq!(
+            video.poll_probe(&mut probe, AssetId::new(42)),
+            ProbeStatus::Failed
+        );
         assert!(video.take_unplayable().is_empty());
         assert!(video.backing_off());
 
         let fake = Fake::new();
         let mut video = Video::new(fake.clone());
-        let mut probe = video.open_probe(&clip(), 42).unwrap();
+        let mut probe = video.open_probe(&clip(), AssetId::new(42)).unwrap();
         fake.with(|s| s.probe_phase = Phase::FirstFrame);
-        assert_eq!(video.poll_probe(&mut probe, 42), ProbeStatus::Ready);
+        assert_eq!(
+            video.poll_probe(&mut probe, AssetId::new(42)),
+            ProbeStatus::Ready
+        );
         assert_eq!(video.probe_frame(&probe).texture, 7);
     }
 
@@ -1022,7 +1050,7 @@ mod tests {
     fn no_video_never_opens() {
         install();
         let video = Video::new(NoVideo);
-        assert!(video.open_probe(&clip(), 42).is_err());
+        assert!(video.open_probe(&clip(), AssetId::new(42)).is_err());
         assert!(!video.decoder_busy());
         assert_eq!(video.deadline(), None);
     }

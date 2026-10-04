@@ -285,12 +285,15 @@ impl Live {
             match effect {
                 Effect::SetMaxGroup(max) => self.source.set_max_group(max),
                 Effect::SetHidden(key, hidden) => {
-                    self.source.set_hidden(&key, hidden);
+                    self.source.set_hidden(key.as_str(), hidden);
                     let mut stats = self.library.stats.borrow_mut();
                     stats.hidden.retain(|h| h.key != key);
                     if hidden {
                         stats.hidden.push(HiddenItem {
-                            label: self.source.title(&key).unwrap_or_else(|| key.clone()),
+                            label: self
+                                .source
+                                .title(key.as_str())
+                                .unwrap_or_else(|| key.to_string()),
                             key,
                             source: None,
                         });
@@ -317,7 +320,7 @@ impl Live {
             "overlay": self.controller.overlay_open(),
             "transitioning": self.pipeline.is_transitioning(),
             "paused": self.controller.state.paused,
-            "shown": self.pipeline.shown_photo().map(|(key, _)| key),
+            "shown": self.pipeline.shown_photo().map(|(key, _)| key.into_string()),
         })
         .to_string()
     }

@@ -23,7 +23,7 @@ use raam_model::limits::{
     ALARM_RETRY, AUTO_DISMISS, DEFAULT_MANUAL_IDLE, MAX_EGUI_WAIT, MAX_QUEUED_KEYS, SAVE_DEBOUNCE,
     SLEEP_CONFIRM, TAP_SLOP_PX, UNDO_HIDE, WIFI_RESCAN,
 };
-use raam_model::{ClockStyle, Corner, ScaleMode, SourceKind, Stats};
+use raam_model::{AlbumId, AssetId, ClockStyle, Corner, CurationKey, ScaleMode, SourceKind, Stats};
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -103,10 +103,10 @@ pub trait Slideshow {
     fn request_next(&mut self);
     fn request_prev(&mut self, source: &dyn TileSource);
     #[must_use = "save the new scale, or it is lost at the next restart"]
-    fn toggle_shown_scale(&mut self) -> Option<(String, Option<ScaleMode>)>;
-    fn shown_photo(&self) -> Option<(String, i64)>;
-    fn forget(&mut self, key: &str, source: &dyn TileSource);
-    fn unforget(&mut self, key: &str);
+    fn toggle_shown_scale(&mut self) -> Option<(CurationKey, Option<ScaleMode>)>;
+    fn shown_photo(&self) -> Option<(CurationKey, AssetId)>;
+    fn forget(&mut self, key: &CurationKey, source: &dyn TileSource);
+    fn unforget(&mut self, key: &CurationKey);
     fn shown_scale_mode(&self) -> Option<ScaleMode>;
     fn shown_is_video(&self) -> bool;
     fn shown_layout(&self) -> Option<String>;
@@ -168,8 +168,8 @@ pub enum Effect {
         rows: Vec<(&'static str, serde_json::Value)>,
         sleep: Schedule,
     },
-    SetScale(String, Option<ScaleMode>),
-    SetHidden(String, bool),
+    SetScale(CurationKey, Option<ScaleMode>),
+    SetHidden(CurationKey, bool),
     SetSourceEnabled(SourceKind, bool),
     /// The server and key apply when the menu closes, not per keystroke.
     /// An empty `url` removes the server.
@@ -178,7 +178,7 @@ pub enum Effect {
         key: String,
     },
     ExportCuration,
-    SelectAlbum(String, bool),
+    SelectAlbum(AlbumId, bool),
     SetCap(u32),
     ClearCache,
     Rescan,
@@ -251,7 +251,7 @@ pub struct App {
     keys: VecDeque<Keyed>,
     last_input: Duration,
     last_touch: Duration,
-    undo: Option<(String, Duration)>,
+    undo: Option<(CurationKey, Duration)>,
     stats_version: u64,
     net_version: u64,
     /// When the open network list last asked for a scan.
@@ -1349,14 +1349,14 @@ mod tests {
         fn request_prev(&mut self, _source: &dyn TileSource) {
             self.prevs += 1;
         }
-        fn toggle_shown_scale(&mut self) -> Option<(String, Option<ScaleMode>)> {
+        fn toggle_shown_scale(&mut self) -> Option<(CurationKey, Option<ScaleMode>)> {
             None
         }
-        fn shown_photo(&self) -> Option<(String, i64)> {
+        fn shown_photo(&self) -> Option<(CurationKey, AssetId)> {
             None
         }
-        fn forget(&mut self, _key: &str, _source: &dyn TileSource) {}
-        fn unforget(&mut self, _key: &str) {}
+        fn forget(&mut self, _key: &CurationKey, _source: &dyn TileSource) {}
+        fn unforget(&mut self, _key: &CurationKey) {}
         fn shown_scale_mode(&self) -> Option<ScaleMode> {
             None
         }

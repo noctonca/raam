@@ -26,8 +26,9 @@ use raam_core::schedule::Schedule;
 use raam_core::store::transition_str;
 use raam_model::limits;
 use raam_model::{
-    AlbumRow, ClockStyle, Corner, FitBackground, Focus, GapColour, HiddenItem, MediaItem,
-    MediaKind, MediaRef, ScaleMode, Settings, SourceKind, TransitionChoice, VideoPlayback,
+    AlbumId, AlbumRow, AssetId, ClockStyle, Corner, CurationKey, FitBackground, Focus, GapColour,
+    HiddenItem, MediaItem, MediaKind, MediaRef, RemoteId, ScaleMode, Settings, SourceKind,
+    TransitionChoice, UserId, VideoPlayback,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashMap;
@@ -35,6 +36,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub type Db = Arc<Mutex<Connection>>;
+
+/// Column `i` of a row, read as an asset row's id.
+fn asset_id(r: &rusqlite::Row<'_>, i: usize) -> rusqlite::Result<AssetId> {
+    r.get(i).map(AssetId::new)
+}
 
 /// Schema versions, applied in order and recorded in `PRAGMA
 /// user_version`.
@@ -443,7 +449,7 @@ const ALBUMS_SEEDED: &str = "immich.albums_seeded";
 pub fn update_albums(
     conn: &Connection,
     albums: &[crate::immich::RemoteAlbum],
-) -> rusqlite::Result<Vec<String>> {
+) -> rusqlite::Result<Vec<AlbumId>> {
     let source = source_id(conn, SourceKind::Immich).ok_or(rusqlite::Error::QueryReturnedNoRows)?;
     let now = now_ms();
     let seeded = conn
@@ -460,7 +466,7 @@ pub fn update_albums(
             "INSERT INTO collection (source_id, remote_id, name, asset_count, listed_at_ms) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT (source_id, remote_id) DO UPDATE SET name = excluded.name,
                asset_count = excluded.asset_count, listed_at_ms = excluded.listed_at_ms, missing_since_ms = NULL",
-            params![source, a.id, a.name, a.asset_count, now],
+            params![source, a.id.as_str(), a.name, a.asset_count, now],
         )?;
     }
     // Everything not listed just now is gone from the server.
@@ -491,12 +497,15 @@ pub fn update_albums(
 }
 
 /// The picked albums that are on the server (as last listed).
-pub fn selected_albums(conn: &Connection) -> Vec<String> {
+pub fn selected_albums(conn: &Connection) -> Vec<AlbumId> {
     conn.prepare(
         "SELECT c.remote_id FROM collection c JOIN source s ON s.id = c.source_id
          WHERE s.kind = 'immich' AND c.selected = 1 AND c.missing_since_ms IS NULL ORDER BY c.name",
     )
-    .and_then(|mut s| s.query_map([], |r| r.get(0))?.collect())
+    .and_then(|mut s| {
+        s.query_map([], |r| r.get::<_, String>(0).map(AlbumId::new))?
+            .collect()
+    })
     .unwrap_or_default()
 }
 
@@ -510,7 +519,7 @@ pub fn albums(conn: &Connection) -> Vec<AlbumRow> {
     .and_then(|mut s| {
         s.query_map([], |r| {
             Ok(AlbumRow {
-                remote_id: r.get(0)?,
+                remote_id: AlbumId::new(r.get::<_, String>(0)?),
                 name: r.get(1)?,
                 asset_count: r.get(2)?,
                 selected: r.get(3)?,
@@ -529,14 +538,14 @@ pub fn albums(conn: &Connection) -> Vec<AlbumRow> {
 /// is let go.
 pub fn select_album(
     conn: &Connection,
-    remote_id: &str,
+    remote_id: &AlbumId,
     on: bool,
 ) -> rusqlite::Result<(usize, Vec<PathBuf>)> {
     let tx = conn.unchecked_transaction()?;
     let changed = tx.execute(
         "UPDATE collection SET selected = ?2 WHERE remote_id = ?1
            AND source_id = (SELECT id FROM source WHERE kind = 'immich')",
-        params![remote_id, on],
+        params![remote_id.as_str(), on],
     )?;
     let mut dropped = (0, Vec::new());
     if changed > 0 && !on {
@@ -544,14 +553,14 @@ pub fn select_album(
             "DELETE FROM collection_asset WHERE collection_id =
                (SELECT c.id FROM collection c JOIN source s ON s.id = c.source_id
                 WHERE s.kind = 'immich' AND c.remote_id = ?1)",
-            [remote_id],
+            [remote_id.as_str()],
         )?;
-        let orphans: Vec<i64> = tx
+        let orphans: Vec<AssetId> = tx
             .prepare(
                 "SELECT a.id FROM asset a JOIN source s ON s.id = a.source_id WHERE s.kind = 'immich'
                    AND NOT EXISTS (SELECT 1 FROM collection_asset m WHERE m.asset_id = a.id)",
             )?
-            .query_map([], |r| r.get(0))?
+            .query_map([], |r| asset_id(r, 0))?
             .collect::<rusqlite::Result<_>>()?;
         dropped = (orphans.len(), delete_assets(&tx, &orphans)?);
     }
@@ -570,7 +579,10 @@ const LIBRARY_USER: &str = "immich.user_id";
 /// new library holds the same photos). The same server under a new URL
 /// keeps everything. The first check only records the id. Returns `None`
 /// if nothing changed, else the dropped assets' files to remove.
-pub fn check_library(conn: &Connection, user_id: &str) -> rusqlite::Result<Option<Vec<PathBuf>>> {
+pub fn check_library(
+    conn: &Connection,
+    user_id: &UserId,
+) -> rusqlite::Result<Option<Vec<PathBuf>>> {
     let value = serde_json::Value::String(user_id.to_string()).to_string();
     let known: Option<String> = conn
         .query_row(
@@ -585,9 +597,9 @@ pub fn check_library(conn: &Connection, user_id: &str) -> rusqlite::Result<Optio
     let tx = conn.unchecked_transaction()?;
     let mut files = None;
     if known.is_some() {
-        let ids: Vec<i64> = tx
+        let ids: Vec<AssetId> = tx
             .prepare("SELECT a.id FROM asset a JOIN source s ON s.id = a.source_id WHERE s.kind = 'immich'")?
-            .query_map([], |r| r.get(0))?
+            .query_map([], |r| asset_id(r, 0))?
             .collect::<rusqlite::Result<_>>()?;
         files = Some(delete_assets(&tx, &ids)?);
         tx.execute("DELETE FROM collection WHERE source_id = (SELECT id FROM source WHERE kind = 'immich')", [])?;
@@ -612,9 +624,11 @@ pub fn set_memberships(conn: &Connection, source: i64, items: &[MediaRef]) -> ru
         "DELETE FROM collection_asset WHERE asset_id IN (SELECT id FROM asset WHERE source_id = ?1)",
         [source],
     )?;
-    let collections: HashMap<String, i64> = conn
+    let collections: HashMap<AlbumId, i64> = conn
         .prepare("SELECT remote_id, id FROM collection WHERE source_id = ?1")?
-        .query_map([source], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map([source], |r| {
+            Ok((AlbumId::new(r.get::<_, String>(0)?), r.get(1)?))
+        })?
         .collect::<rusqlite::Result<_>>()?;
     let mut stmt = conn.prepare(
         "INSERT OR IGNORE INTO collection_asset (collection_id, asset_id)
@@ -623,7 +637,7 @@ pub fn set_memberships(conn: &Connection, source: i64, items: &[MediaRef]) -> ru
     for m in items {
         for c in &m.collections {
             if let Some(cid) = collections.get(c) {
-                stmt.execute(params![cid, source, m.id])?;
+                stmt.execute(params![cid, source, m.id.as_str()])?;
             }
         }
     }
@@ -635,7 +649,7 @@ pub fn set_memberships(conn: &Connection, source: i64, items: &[MediaRef]) -> ru
 /// The curation key of an asset row: its hash, else source and id.
 pub const KEY_SQL: &str = "COALESCE(a.hash, s.kind || ':' || a.remote_id)";
 
-pub fn load_overrides(conn: &Connection) -> HashMap<String, ScaleMode> {
+pub fn load_overrides(conn: &Connection) -> HashMap<CurationKey, ScaleMode> {
     let mut out = HashMap::new();
     if let Ok(mut stmt) =
         conn.prepare("SELECT key, scale_mode FROM curation WHERE scale_mode IS NOT NULL")
@@ -644,7 +658,7 @@ pub fn load_overrides(conn: &Connection) -> HashMap<String, ScaleMode> {
     {
         for (key, mode) in iter.flatten() {
             out.insert(
-                key,
+                CurationKey::new(key),
                 if mode == "fit" {
                     ScaleMode::Fit
                 } else {
@@ -673,7 +687,11 @@ fn durable<T>(
     Ok(out)
 }
 
-pub fn set_scale(conn: &Connection, key: &str, mode: Option<ScaleMode>) -> rusqlite::Result<usize> {
+pub fn set_scale(
+    conn: &Connection,
+    key: &CurationKey,
+    mode: Option<ScaleMode>,
+) -> rusqlite::Result<usize> {
     let mode = mode.map(|m| match m {
         ScaleMode::Fill => "fill",
         ScaleMode::Fit => "fit",
@@ -682,17 +700,17 @@ pub fn set_scale(conn: &Connection, key: &str, mode: Option<ScaleMode>) -> rusql
         conn.execute(
             "INSERT INTO curation (key, scale_mode, updated_at_ms) VALUES (?1, ?2, ?3)
              ON CONFLICT (key) DO UPDATE SET scale_mode = excluded.scale_mode, updated_at_ms = excluded.updated_at_ms",
-            params![key, mode, now_ms()],
+            params![key.as_str(), mode, now_ms()],
         )
     })
 }
 
-pub fn set_hidden(conn: &Connection, key: &str, hidden: bool) -> rusqlite::Result<usize> {
+pub fn set_hidden(conn: &Connection, key: &CurationKey, hidden: bool) -> rusqlite::Result<usize> {
     durable(conn, |conn| {
         conn.execute(
             "INSERT INTO curation (key, hidden, updated_at_ms) VALUES (?1, ?2, ?3)
              ON CONFLICT (key) DO UPDATE SET hidden = excluded.hidden, updated_at_ms = excluded.updated_at_ms",
-            params![key, hidden, now_ms()],
+            params![key.as_str(), hidden, now_ms()],
         )
     })
 }
@@ -717,7 +735,8 @@ pub fn hidden_list(conn: &Connection) -> Vec<HiddenItem> {
         })
     {
         for (key, kind, location, taken) in iter.flatten() {
-            let short = &key[..key.len().min(8)];
+            let key = CurationKey::new(key);
+            let short = key.short();
             let label = match (kind.as_deref(), location) {
                 (Some("local"), Some(loc)) => {
                     format!("Folder: {}", loc.rsplit('/').next().unwrap_or(&loc))
@@ -845,13 +864,13 @@ fn fmt_date(ms: i64) -> String {
 
 // ---- playback ------------------------------------------------------------
 
-pub fn load_playback(conn: &Connection) -> Option<(Option<i64>, u64)> {
+pub fn load_playback(conn: &Connection) -> Option<(Option<AssetId>, u64)> {
     conn.query_row(
         "SELECT current_asset, shuffle_seed FROM playback WHERE id = 1",
         [],
         |r| {
             Ok((
-                r.get::<_, Option<i64>>(0)?,
+                r.get::<_, Option<i64>>(0)?.map(AssetId::new),
                 r.get::<_, Option<i64>>(1)?.unwrap_or(0) as u64,
             ))
         },
@@ -861,12 +880,12 @@ pub fn load_playback(conn: &Connection) -> Option<(Option<i64>, u64)> {
     .flatten()
 }
 
-pub fn save_playback(conn: &Connection, current: i64, seed: u64) -> rusqlite::Result<usize> {
+pub fn save_playback(conn: &Connection, current: AssetId, seed: u64) -> rusqlite::Result<usize> {
     conn.execute(
         "INSERT INTO playback (id, current_asset, shuffle_seed, updated_at_ms) VALUES (1, ?1, ?2, ?3)
          ON CONFLICT (id) DO UPDATE SET current_asset = excluded.current_asset,
            shuffle_seed = excluded.shuffle_seed, updated_at_ms = excluded.updated_at_ms",
-        params![current, seed as i64, now_ms()],
+        params![current.get(), seed as i64, now_ms()],
     )
 }
 
@@ -907,10 +926,10 @@ pub fn eligible(conn: &Connection, immich_cached_only: bool) -> Vec<MediaItem> {
             Ok((
                 pref,
                 MediaItem {
-                    asset: r.get(0)?,
-                    key: r.get(1)?,
+                    asset: asset_id(r, 0)?,
+                    key: CurationKey::new(r.get::<_, String>(1)?),
                     source,
-                    remote_id: r.get(3)?,
+                    remote_id: RemoteId::new(r.get::<_, String>(3)?),
                     width: r.get(5)?,
                     height: r.get(6)?,
                     video: r.get::<_, String>(8)? == "video",
@@ -938,12 +957,12 @@ pub fn shared_count(conn: &Connection) -> i64 {
 
 /// The asset's focus: (fill centre, largest face, faces looked up). A
 /// curated focus replaces the source's fill centre.
-pub fn focus(conn: &Connection, asset: i64) -> ((f32, f32), Option<(f32, f32)>, bool) {
+pub fn focus(conn: &Connection, asset: AssetId) -> ((f32, f32), Option<(f32, f32)>, bool) {
     let sql = format!(
         "SELECT COALESCE(c.focus_x, a.focus_x), COALESCE(c.focus_y, a.focus_y), a.face_x, a.face_y, a.faces_checked
          FROM asset a JOIN source s ON s.id = a.source_id LEFT JOIN curation c ON c.key = {KEY_SQL} WHERE a.id = ?1"
     );
-    conn.query_row(&sql, [asset], |r| {
+    conn.query_row(&sql, [asset.get()], |r| {
         let fx: Option<f64> = r.get(0)?;
         let fy: Option<f64> = r.get(1)?;
         let hx: Option<f64> = r.get(2)?;
@@ -958,12 +977,16 @@ pub fn focus(conn: &Connection, asset: i64) -> ((f32, f32), Option<(f32, f32)>, 
 }
 
 /// The provider's focus (`None` = centre it); either way it's been asked.
-pub fn set_focus(conn: &Connection, asset: i64, focus: Option<Focus>) -> rusqlite::Result<usize> {
+pub fn set_focus(
+    conn: &Connection,
+    asset: AssetId,
+    focus: Option<Focus>,
+) -> rusqlite::Result<usize> {
     let centre = focus.map(|f| f.centre);
     let face = focus.and_then(|f| f.face);
     conn.execute(
         "UPDATE asset SET focus_x = ?2, focus_y = ?3, face_x = ?4, face_y = ?5, faces_checked = 1 WHERE id = ?1",
-        params![asset, centre.map(|c| c.0), centre.map(|c| c.1), face.map(|f| f.0), face.map(|f| f.1)],
+        params![asset.get(), centre.map(|c| c.0), centre.map(|c| c.1), face.map(|f| f.0), face.map(|f| f.1)],
     )
 }
 
@@ -977,7 +1000,7 @@ pub fn local_known(conn: &Connection) -> Vec<MediaRef> {
     ) && let Ok(iter) = stmt.query_map([], |r| {
         let stamp = r.get::<_, Option<i64>>(6)?.zip(r.get::<_, Option<i64>>(7)?);
         Ok(MediaRef {
-            id: r.get(0)?,
+            id: RemoteId::new(r.get::<_, String>(0)?),
             sha1: r.get(1)?,
             location: r.get(2)?,
             width: r.get(3)?,
@@ -996,10 +1019,10 @@ pub fn local_known(conn: &Connection) -> Vec<MediaRef> {
 
 // ---- files on disk -------------------------------------------------------
 
-pub fn cached_preview(conn: &Connection, asset: i64) -> Option<PathBuf> {
+pub fn cached_preview(conn: &Connection, asset: AssetId) -> Option<PathBuf> {
     conn.query_row(
         "SELECT path FROM cached_file WHERE asset_id = ?1 AND variant = 'preview'",
-        [asset],
+        [asset.get()],
         |r| r.get::<_, String>(0),
     )
     .optional()
@@ -1009,10 +1032,10 @@ pub fn cached_preview(conn: &Connection, asset: i64) -> Option<PathBuf> {
 }
 
 /// An Immich clip's cached playback transcode.
-pub fn cached_video(conn: &Connection, asset: i64) -> Option<PathBuf> {
+pub fn cached_video(conn: &Connection, asset: AssetId) -> Option<PathBuf> {
     conn.query_row(
         "SELECT path FROM cached_file WHERE asset_id = ?1 AND variant = 'video'",
-        [asset],
+        [asset.get()],
         |r| r.get::<_, String>(0),
     )
     .optional()
@@ -1024,10 +1047,10 @@ pub fn cached_video(conn: &Connection, asset: i64) -> Option<PathBuf> {
 /// The frame's decoder can't take this clip: out of the queue for
 /// good (until the cache is cleared), its cached file dropped. Returns the
 /// files to remove.
-pub fn mark_unplayable(conn: &Connection, asset: i64, reason: &str) -> Vec<PathBuf> {
+pub fn mark_unplayable(conn: &Connection, asset: AssetId, reason: &str) -> Vec<PathBuf> {
     let _ = conn.execute(
         "UPDATE asset SET playable = 0, unplayable_reason = ?2 WHERE id = ?1",
-        params![asset, reason],
+        params![asset.get(), reason],
     );
     drop_cached(conn, asset)
 }
@@ -1036,9 +1059,9 @@ pub fn mark_unplayable(conn: &Connection, asset: i64, reason: &str) -> Vec<PathB
 /// marked is marked unplayable for `reason`, without its file. Returns
 /// how many were marked and the files to remove.
 pub fn mark_clips_unplayable(conn: &Connection, reason: &str) -> (usize, Vec<PathBuf>) {
-    let ids: Vec<i64> = conn
+    let ids: Vec<AssetId> = conn
         .prepare("SELECT id FROM asset WHERE kind = 'video' AND COALESCE(playable, 1) = 1")
-        .and_then(|mut s| s.query_map([], |r| r.get(0))?.collect())
+        .and_then(|mut s| s.query_map([], |r| asset_id(r, 0))?.collect())
         .unwrap_or_default();
     let files = ids
         .iter()
@@ -1047,10 +1070,10 @@ pub fn mark_clips_unplayable(conn: &Connection, reason: &str) -> (usize, Vec<Pat
     (ids.len(), files)
 }
 
-pub fn set_playable(conn: &Connection, asset: i64) -> rusqlite::Result<usize> {
+pub fn set_playable(conn: &Connection, asset: AssetId) -> rusqlite::Result<usize> {
     conn.execute(
         "UPDATE asset SET playable = 1, unplayable_reason = NULL WHERE id = ?1",
-        [asset],
+        [asset.get()],
     )
 }
 
@@ -1079,10 +1102,10 @@ pub fn video_counts(conn: &Connection) -> (i64, i64, i64, Vec<String>) {
     (total, ready, bad, reasons)
 }
 
-pub fn touch_cached(conn: &Connection, asset: i64) -> rusqlite::Result<usize> {
+pub fn touch_cached(conn: &Connection, asset: AssetId) -> rusqlite::Result<usize> {
     conn.execute(
         "UPDATE cached_file SET last_used_ms = ?2 WHERE asset_id = ?1",
-        params![asset, now_ms()],
+        params![asset.get(), now_ms()],
     )
 }
 
@@ -1103,9 +1126,9 @@ pub fn cached_bytes(conn: &Connection, kind: SourceKind) -> i64 {
 /// deletes; asset ids are never reused (AUTOINCREMENT), so no new asset can
 /// take such a file for its own first. A failed delete gives back no
 /// paths: the rows still point at their files, so they must stay.
-pub fn drop_cached(conn: &Connection, asset: i64) -> Vec<PathBuf> {
+pub fn drop_cached(conn: &Connection, asset: AssetId) -> Vec<PathBuf> {
     let paths = cached_paths(conn, asset);
-    match conn.execute("DELETE FROM cached_file WHERE asset_id = ?1", [asset]) {
+    match conn.execute("DELETE FROM cached_file WHERE asset_id = ?1", [asset.get()]) {
         Ok(_) => paths,
         Err(e) => {
             log::error!("db: dropping the cached files of asset {asset} failed: {e}");
@@ -1114,10 +1137,10 @@ pub fn drop_cached(conn: &Connection, asset: i64) -> Vec<PathBuf> {
     }
 }
 
-fn cached_paths(conn: &Connection, asset: i64) -> Vec<PathBuf> {
+fn cached_paths(conn: &Connection, asset: AssetId) -> Vec<PathBuf> {
     conn.prepare_cached("SELECT path FROM cached_file WHERE asset_id = ?1")
         .and_then(|mut s| {
-            s.query_map([asset], |r| r.get::<_, String>(0))?
+            s.query_map([asset.get()], |r| r.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()
         })
         .unwrap_or_default()
@@ -1129,12 +1152,12 @@ fn cached_paths(conn: &Connection, asset: i64) -> Vec<PathBuf> {
 /// The single way assets leave: the rows go (the cascade takes
 /// `cached_file` and memberships with them; curation stays, keyed by hash)
 /// and their files' paths come back, as for `drop_cached`.
-pub fn delete_assets(conn: &Connection, assets: &[i64]) -> rusqlite::Result<Vec<PathBuf>> {
+pub fn delete_assets(conn: &Connection, assets: &[AssetId]) -> rusqlite::Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     let mut delete = conn.prepare_cached("DELETE FROM asset WHERE id = ?1")?;
     for &id in assets {
         paths.extend(cached_paths(conn, id));
-        delete.execute([id])?;
+        delete.execute([id.get()])?;
     }
     Ok(paths)
 }
@@ -1160,12 +1183,12 @@ pub fn clear_immich_cache(conn: &Connection) -> rusqlite::Result<(usize, Vec<Pat
          WHERE source_id = (SELECT id FROM source WHERE kind = 'immich')",
         [],
     )?;
-    let ids: Vec<i64> = conn
+    let ids: Vec<AssetId> = conn
         .prepare(
             "SELECT c.asset_id FROM cached_file c JOIN asset a ON a.id = c.asset_id
              JOIN source s ON s.id = a.source_id WHERE s.kind = 'immich'",
         )?
-        .query_map([], |r| r.get(0))?
+        .query_map([], |r| asset_id(r, 0))?
         .collect::<rusqlite::Result<_>>()?;
     let files = ids.iter().flat_map(|&id| drop_cached(conn, id)).collect();
     Ok((ids.len(), files))
@@ -1174,9 +1197,9 @@ pub fn clear_immich_cache(conn: &Connection) -> rusqlite::Result<(usize, Vec<Pat
 /// An asset whose preview (or, for an Immich clip, playback transcode)
 /// isn't on disk yet.
 pub struct ToMake {
-    pub asset: i64,
+    pub asset: AssetId,
     pub kind: SourceKind,
-    pub remote_id: String,
+    pub remote_id: RemoteId,
     pub location: Option<String>,
     pub faces_checked: bool,
     pub is_video: bool,
@@ -1190,7 +1213,7 @@ pub fn next_to_make(
     conn: &Connection,
     local_on: bool,
     immich_on: bool,
-    failed: &std::collections::HashSet<i64>,
+    failed: &std::collections::HashSet<AssetId>,
 ) -> rusqlite::Result<Option<ToMake>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT a.id, s.kind, a.remote_id, a.location, a.faces_checked, a.kind = 'video'
@@ -1202,9 +1225,9 @@ pub fn next_to_make(
     ))?;
     let mut rows = stmt.query_map(params![local_on, immich_on], |r| {
         Ok(ToMake {
-            asset: r.get(0)?,
+            asset: asset_id(r, 0)?,
             kind: SourceKind::parse(&r.get::<_, String>(1)?),
-            remote_id: r.get(2)?,
+            remote_id: RemoteId::new(r.get::<_, String>(2)?),
             location: r.get(3)?,
             faces_checked: r.get(4)?,
             is_video: r.get(5)?,
@@ -1215,14 +1238,14 @@ pub fn next_to_make(
 }
 
 /// Least recently used Immich previews, oldest first, never `except`.
-pub fn lru_immich(conn: &Connection, except: i64, limit: usize) -> Vec<(i64, i64)> {
+pub fn lru_immich(conn: &Connection, except: Option<AssetId>, limit: usize) -> Vec<(AssetId, i64)> {
     let mut out = Vec::new();
     if let Ok(mut stmt) = conn.prepare(
         "SELECT c.asset_id, c.bytes FROM cached_file c JOIN asset a ON a.id = c.asset_id
          JOIN source s ON s.id = a.source_id
-         WHERE s.kind = 'immich' AND c.asset_id != ?1 ORDER BY c.last_used_ms LIMIT ?2",
-    ) && let Ok(iter) = stmt.query_map(params![except, limit as i64], |r| {
-        Ok((r.get(0)?, r.get(1)?))
+         WHERE s.kind = 'immich' AND c.asset_id IS NOT ?1 ORDER BY c.last_used_ms LIMIT ?2",
+    ) && let Ok(iter) = stmt.query_map(params![except.map(AssetId::get), limit as i64], |r| {
+        Ok((asset_id(r, 0)?, r.get(1)?))
     }) {
         out.extend(iter.flatten());
     }
@@ -1231,7 +1254,7 @@ pub fn lru_immich(conn: &Connection, except: i64, limit: usize) -> Vec<(i64, i64
 
 pub fn insert_cached(
     conn: &Connection,
-    asset: i64,
+    asset: AssetId,
     path: &Path,
     bytes: i64,
     used_ms: i64,
@@ -1241,7 +1264,7 @@ pub fn insert_cached(
 
 pub fn insert_cached_variant(
     conn: &Connection,
-    asset: i64,
+    asset: AssetId,
     variant: &str,
     path: &Path,
     bytes: i64,
@@ -1251,7 +1274,7 @@ pub fn insert_cached_variant(
         "INSERT INTO cached_file (asset_id, variant, path, bytes, last_used_ms) VALUES (?1, ?5, ?2, ?3, ?4)
          ON CONFLICT (asset_id, variant) DO UPDATE SET path = excluded.path, bytes = excluded.bytes,
            last_used_ms = excluded.last_used_ms",
-        params![asset, path.to_string_lossy(), bytes, used_ms, variant],
+        params![asset.get(), path.to_string_lossy(), bytes, used_ms, variant],
     )
 }
 
@@ -1354,8 +1377,8 @@ mod tests {
         assert_eq!(synchronous(&conn), NORMAL);
         let seen = durable(&conn, |c| Ok(synchronous(c))).unwrap();
         assert_eq!(seen, FULL);
-        set_scale(&conn, "k", Some(ScaleMode::Fit)).unwrap();
-        set_hidden(&conn, "k", true).unwrap();
+        set_scale(&conn, &"k".into(), Some(ScaleMode::Fit)).unwrap();
+        set_hidden(&conn, &"k".into(), true).unwrap();
         assert_eq!(synchronous(&conn), NORMAL);
         let failed = durable(&conn, |c| {
             c.execute("INSERT INTO no_such_table VALUES (1)", [])
@@ -1388,11 +1411,11 @@ mod tests {
         let conn = db.lock().unwrap();
         set_immich_server(&conn, "http://immich.local:2283", "key").unwrap();
         asset(&conn, "a1", "image", None);
-        set_hidden(&conn, "immich:a1", true).unwrap();
-        set_hidden(&conn, "gone", true).unwrap();
+        set_hidden(&conn, &"immich:a1".into(), true).unwrap();
+        set_hidden(&conn, &"gone".into(), true).unwrap();
         let mut seen: Vec<(String, Option<SourceKind>)> = hidden_list(&conn)
             .into_iter()
-            .map(|h| (h.key, h.source))
+            .map(|h| (h.key.into_string(), h.source))
             .collect();
         seen.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
@@ -1416,7 +1439,7 @@ mod tests {
         let queued = |conn: &Connection| -> Vec<String> {
             let mut ids: Vec<String> = eligible(conn, false)
                 .into_iter()
-                .map(|m| m.remote_id)
+                .map(|m| m.remote_id.into_string())
                 .collect();
             ids.sort();
             ids
@@ -1450,7 +1473,7 @@ mod tests {
         let queued = |conn: &Connection| -> Vec<String> {
             eligible(conn, false)
                 .into_iter()
-                .map(|m| m.remote_id)
+                .map(|m| m.remote_id.into_string())
                 .collect()
         };
         let loaded = |conn: &Connection| -> (String, String) {
@@ -1621,7 +1644,7 @@ mod tests {
         let mut ids = Vec::new();
         for name in ["whole", "empty", "short", "gone"] {
             asset(&conn, name, "image", None);
-            ids.push(conn.last_insert_rowid());
+            ids.push(AssetId::new(conn.last_insert_rowid()));
         }
         let file = |name: &str, len: usize| {
             let p = dir.join(format!("{name}.jpg"));
@@ -1660,7 +1683,7 @@ mod tests {
         asset(&conn, "kept", "image", None);
         let path = dir.join("kept.jpg");
         std::fs::write(&path, [0xff; 100]).unwrap();
-        insert_cached(&conn, conn.last_insert_rowid(), &path, 100, 0).unwrap();
+        insert_cached(&conn, AssetId::new(conn.last_insert_rowid()), &path, 100, 0).unwrap();
         conn.execute_batch("ALTER TABLE cached_file RENAME TO unreadable;")
             .unwrap();
 
@@ -1676,7 +1699,7 @@ mod tests {
         install_clock();
         let db = open(Path::new(":memory:"), "").unwrap();
         let conn = db.lock().unwrap();
-        set_hidden(&conn, "k", true).unwrap();
+        set_hidden(&conn, &"k".into(), true).unwrap();
         let json: serde_json::Value = serde_json::from_str(&curation_json(&conn).unwrap()).unwrap();
         assert_eq!(json["items"][0]["sha1"], "k");
 
@@ -1692,16 +1715,16 @@ mod tests {
         let db = open(Path::new(":memory:"), "").unwrap();
         let conn = db.lock().unwrap();
         asset(&conn, "clip", "video", None);
-        let mut ids = vec![conn.last_insert_rowid()];
+        let mut ids = vec![AssetId::new(conn.last_insert_rowid())];
         for name in ["made", "failed", "next"] {
             asset(&conn, name, "image", None);
-            ids.push(conn.last_insert_rowid());
+            ids.push(AssetId::new(conn.last_insert_rowid()));
         }
         insert_cached(&conn, ids[1], Path::new("/cache/made.jpg"), 1, 0).unwrap();
-        let next = |failed: &[i64]| {
+        let next = |failed: &[AssetId]| {
             next_to_make(&conn, true, true, &failed.iter().copied().collect())
                 .unwrap()
-                .map(|m| m.remote_id)
+                .map(|m| m.remote_id.into_string())
         };
         assert_eq!(next(&[]).as_deref(), Some("failed"));
         assert_eq!(next(&[ids[2]]).as_deref(), Some("next"));
@@ -1722,7 +1745,7 @@ mod tests {
         let db = open(Path::new(":memory:"), "").unwrap();
         let conn = db.lock().unwrap();
         asset(&conn, "photo", "image", None);
-        let photo = conn.last_insert_rowid();
+        let photo = AssetId::new(conn.last_insert_rowid());
         insert_cached(&conn, photo, Path::new("/cache/photo.jpg"), 1, 0).unwrap();
         asset(&conn, "big", "video", Some((false, "too big")));
 
@@ -1742,6 +1765,37 @@ mod tests {
         assert_eq!(playable, None);
     }
 
+    /// Eviction takes the oldest first and never the asset being stored;
+    /// with none being stored (a lowered cap), every file is a candidate.
+    #[test]
+    fn eviction_spares_only_the_asset_it_is_told_to_keep() {
+        install_clock();
+        let db = open(Path::new(":memory:"), "").unwrap();
+        let conn = db.lock().unwrap();
+        let mut ids = Vec::new();
+        for (used, name) in [(3, "newest"), (1, "oldest"), (2, "middle")] {
+            asset(&conn, name, "image", None);
+            let id = AssetId::new(conn.last_insert_rowid());
+            insert_cached(
+                &conn,
+                id,
+                Path::new(&format!("/cache/{name}.jpg")),
+                10,
+                used,
+            )
+            .unwrap();
+            ids.push(id);
+        }
+        let victims = |keep| -> Vec<AssetId> {
+            lru_immich(&conn, keep, 10)
+                .into_iter()
+                .map(|v| v.0)
+                .collect()
+        };
+        assert_eq!(victims(None), [ids[1], ids[2], ids[0]]);
+        assert_eq!(victims(Some(ids[1])), [ids[2], ids[0]]);
+    }
+
     #[test]
     fn a_failed_drop_keeps_its_files() {
         install_clock();
@@ -1749,7 +1803,7 @@ mod tests {
         let conn = db.lock().unwrap();
         set_immich_server(&conn, "http://immich.local:2283", "key").unwrap();
         asset(&conn, "kept", "image", None);
-        let id = conn.last_insert_rowid();
+        let id = AssetId::new(conn.last_insert_rowid());
         insert_cached(&conn, id, Path::new("/cache/kept.jpg"), 100, 0).unwrap();
         // A full disk, say: the delete fails.
         conn.execute_batch(

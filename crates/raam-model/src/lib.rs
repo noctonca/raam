@@ -7,6 +7,7 @@
 //! stays a leaf forever (docs/ARCHITECTURE.md).
 
 mod error;
+mod ids;
 pub mod limits;
 mod media;
 mod settings;
@@ -14,6 +15,7 @@ mod stats;
 mod time;
 
 pub use error::*;
+pub use ids::*;
 pub use media::*;
 pub use settings::*;
 pub use stats::*;

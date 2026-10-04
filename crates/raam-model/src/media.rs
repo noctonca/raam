@@ -2,6 +2,8 @@
 //! works from (`MediaItem`, `Plan`) and what crosses the `TileSource`
 //! seam back to the pipeline (`Photo`, `TilePhoto`, `VideoClip`).
 
+use crate::{AlbumId, AssetId, CurationKey, RemoteId};
+
 /// Where a photo or clip comes from. Stored in the DB by name (`as_str`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SourceKind {
@@ -88,7 +90,7 @@ impl Focus {
 pub struct MediaRef {
     /// The provider's stable id: an Immich asset UUID, or a local file's
     /// content hash.
-    pub id: String,
+    pub id: RemoteId,
     /// SHA-1 of the original file, lowercase hex: the curation key, so a
     /// renamed local file keeps its curation and a photo in both sources
     /// shares one.
@@ -106,12 +108,12 @@ pub struct MediaRef {
     pub stamp: Option<(i64, i64)>,
     /// The provider's collections (Immich album ids) this item was listed
     /// from; empty for the folder.
-    pub collections: Vec<String>,
+    pub collections: Vec<AlbumId>,
 }
 
 impl MediaRef {
     /// What `fetch_preview`/`fetch_focus` need, rebuilt from a DB row.
-    pub fn stored(id: String, location: Option<String>) -> Self {
+    pub fn stored(id: RemoteId, location: Option<String>) -> Self {
         Self {
             id,
             sha1: None,
@@ -160,11 +162,11 @@ impl ClipInfo {
 /// its pixels later (also again, for a Prev-requested plan).
 #[derive(Clone, Debug)]
 pub struct MediaItem {
-    pub asset: i64,
+    pub asset: AssetId,
     /// The curation key (SHA-1 when known).
-    pub key: String,
+    pub key: CurationKey,
     pub source: SourceKind,
-    pub remote_id: String,
+    pub remote_id: RemoteId,
     pub width: u32,
     pub height: u32,
     /// A video clip (always shown alone, never in a collage).
@@ -183,7 +185,7 @@ pub struct Plan {
 }
 
 impl Plan {
-    pub fn ids(&self) -> Vec<i64> {
+    pub fn ids(&self) -> Vec<AssetId> {
         self.assets.iter().map(|a| a.asset).collect()
     }
 }
@@ -195,9 +197,9 @@ pub struct VideoClip {
 }
 
 pub struct Photo {
-    pub asset_id: i64,
+    pub asset_id: AssetId,
     /// The curation key (SHA-1), for Fill/Fit and Hide.
-    pub key: String,
+    pub key: CurationKey,
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,

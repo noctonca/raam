@@ -63,7 +63,9 @@ meet only through traits the core defines. Nothing depends on a host.
 `Settings` (the one settings type), the value enums (`ScaleMode`,
 `FitBackground`, `GapColour`, `VideoPlayback`, `ClockStyle`,
 `TransitionChoice`), the media types (`MediaRef`, `Focus`, `MediaKind`,
-`SourceKind`, `ClipInfo`), `Stats`, `DebugSwitches`, typed error enums,
+`SourceKind`, `ClipInfo`), the identifiers (`AssetId`, `RemoteId`,
+`AlbumId`, `UserId`, `CurationKey`: one type each, so they can't be
+swapped), `Stats`, `DebugSwitches`, typed error enums,
 and `limits.rs` — **every named limit in the product, in one file.** No
 dependencies, no platform types, no I/O.
 

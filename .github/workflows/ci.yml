@@ -66,7 +66,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo miri setup
       - run: cargo miri test -p raam-model
-      - run: cargo miri test -p raam-core --lib gl::
+      - run: "cargo miri test -p raam-core --lib gl::"
 
   # CI can't run the goldens (pixels are exact per GPU), but it can hold
   # the rule's other half: a bless is a commit of its own.

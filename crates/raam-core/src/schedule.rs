@@ -34,7 +34,10 @@ pub fn fmt_hm(min: u32) -> String {
 pub fn parse_hm(s: &str) -> Option<u32> {
     let (h, m) = s.trim().split_once(':')?;
     let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
-    (h < 24 && m < 60).then_some(h * 60 + m)
+    // `then`, not `then_some`: the sum is only computed in range, since
+    // an hour past u32::MAX / 60 would overflow it (a panic in a debug
+    // build) before the range check threw it away.
+    (h < 24 && m < 60).then(|| h * 60 + m)
 }
 
 /// Local seconds after midnight, and the matching unix time (via the Clock).
@@ -104,6 +107,14 @@ mod tests {
         assert_eq!(parse_hm(" 5:07 "), Some(5 * 60 + 7));
         assert_eq!(parse_hm("24:00"), None);
         assert_eq!(fmt_hm(23 * 60 + 5), "23:05");
+    }
+
+    /// An hour too big for `h * 60` is out of range, not an overflow
+    /// panic (found by the property below).
+    #[test]
+    fn a_huge_hour_is_out_of_range() {
+        assert_eq!(parse_hm("71590000:0"), None);
+        assert_eq!(parse_hm(&format!("{}:59", u32::MAX)), None);
     }
 
     #[test]

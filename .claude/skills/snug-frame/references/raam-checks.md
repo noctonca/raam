@@ -108,6 +108,13 @@ adb -s $T shell rm -f /sdcard/raam.db /sdcard/raam.db-wal /sdcard/raam.db-shm
   relaunches it about 2 s after the first stop, and that process opens
   the database mid-copy. The second stop kills it. Expect the pid to
   change twice.
+- **That second stop can wedge the video decoder.** If the relaunched
+  process had already opened a clip, killing it mid-decode leaves
+  mediaserver's decoder stuck (`OMXNodeInstance … failed to enter Idle
+  state … aborting` in the full logcat). Raam then logs `no first frame
+  within 10s` and `a stopped decoder not released after 10s`, and no
+  clip plays again until a reboot. Seen 2026-10-04. With clips in the
+  queue, finish the cycle with `$S reboot` (it also clears test props).
 - Settings are rows in the `setting` table, values in JSON. A default
   is an absent row, so restore a default by deleting the row. Example:
   `video.sound` = `true` turns clip sound on.

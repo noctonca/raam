@@ -83,6 +83,10 @@ cast_possible_wrap = "warn"
 # A cast that can drop a negative value's sign says why the value is
 # never negative, or clamps it first where saturating at 0 is the point.
 cast_sign_loss = "warn"
+# A cast that can drop high bits, a float's fraction or its precision
+# says why the value fits (`try_from` and an `expect`), or saturates or
+# rounds on purpose through `raam_core::num`.
+cast_possible_truncation = "warn"
 
 # Profiles live at the workspace root only (Cargo ignores them in
 # members). Release: LTO earns its keep on the frame (binary size and the

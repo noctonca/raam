@@ -14,7 +14,8 @@
 //!
 //! Every GL entry point, here and in webgl.rs, needs the host's context
 //! current on the calling thread; that is the one invariant behind the
-//! crate's plain GL calls, so they carry no note of their own. The types
+//! crate's plain GL calls, so their `SAFETY:` notes only say where it
+//! comes from (the caller's contract, or the type's). The types
 //! that own GL objects (`Painter`, `ClockOverlay`, `FontAtlas`,
 //! `TransitionProgram`, `Pipeline`, `RenderTarget`) are made only by an
 //! `unsafe` constructor run under that context, and the host keeps it
@@ -257,6 +258,8 @@ mod desktop {
     /// # Safety
     /// Requires a current GL context.
     pub unsafe fn bind_vao() {
+        // SAFETY: the caller's contract: a current GL context; `vao` is a
+        // local GLuint for glGenVertexArrays's one name.
         unsafe {
             let mut vao = 0;
             glGenVertexArrays(1, &mut vao);
@@ -282,6 +285,9 @@ mod desktop {
         type_: GlEnum,
         pixels: *const c_void,
     ) {
+        // SAFETY: the caller's contract: a current GL context, and `pixels`
+        // valid for what glTexImage2D reads. GL_R8 + GL_RED is one byte a
+        // texel, as GL_ALPHA is, so the swap reads no more of it.
         unsafe {
             if format != GL_ALPHA {
                 tex_image_2d(
@@ -332,6 +338,9 @@ mod desktop {
         pixels: *const c_void,
     ) {
         let format = if format == GL_ALPHA { GL_RED } else { format };
+        // SAFETY: the caller's contract: a current GL context, and `pixels`
+        // valid for what glTexSubImage2D reads; GL_RED reads one byte a
+        // texel, as the GL_ALPHA it replaces does.
         unsafe {
             tex_sub_image_2d(
                 target, level, xoffset, yoffset, width, height, format, type_, pixels,
@@ -398,6 +407,8 @@ pub use gles::{bind_vao, glReadPixels};
 /// # Safety
 /// Requires a current GL context with a texture bound to `GL_TEXTURE_2D`.
 pub unsafe fn set_linear_clamp() {
+    // SAFETY: the caller's contract: a current GL context with a texture
+    // bound.
     unsafe {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as GlInt);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as GlInt);
@@ -412,6 +423,8 @@ pub unsafe fn set_linear_clamp() {
 /// # Safety
 /// Requires a current GL context.
 pub unsafe fn gl_string(name: GlEnum) -> String {
+    // SAFETY: the caller's contract: a current GL context; the string read
+    // back has its own note below.
     unsafe {
         let ptr = glGetString(name);
         if ptr.is_null() {
@@ -448,6 +461,8 @@ pub unsafe fn link_program(label: &str, vs_src: &str, fs_src: &str) -> GlUint {
         &desktop::to_150(vs_src, false),
         &desktop::to_150(fs_src, true),
     );
+    // SAFETY: the caller's contract: a current GL context; the info log
+    // read has its own note below.
     unsafe {
         let vs = compile(label, GL_VERTEX_SHADER, vs_src);
         let fs = compile(label, GL_FRAGMENT_SHADER, fs_src);
@@ -480,6 +495,8 @@ pub unsafe fn link_program(label: &str, vs_src: &str, fs_src: &str) -> GlUint {
 /// # Safety
 /// Requires a current GL context.
 unsafe fn compile(label: &str, kind: GlEnum, src: &str) -> GlUint {
+    // SAFETY: the caller's contract: a current GL context; the source and
+    // info log pointers have their own notes below.
     unsafe {
         let shader = glCreateShader(kind);
         let c_src = std::ffi::CString::new(src).unwrap();
@@ -516,6 +533,8 @@ unsafe fn compile(label: &str, kind: GlEnum, src: &str) -> GlUint {
 /// # Safety
 /// Requires a current GL context and a linked `program`.
 pub unsafe fn attrib_loc(program: GlUint, name: &str) -> GlUint {
+    // SAFETY: the caller's contract: a current GL context and a linked
+    // `program`; `c` is NUL-terminated and outlives the call.
     unsafe {
         let c = std::ffi::CString::new(name).unwrap();
         let loc = glGetAttribLocation(program, c.as_ptr());
@@ -534,6 +553,8 @@ pub unsafe fn attrib_loc(program: GlUint, name: &str) -> GlUint {
 /// # Safety
 /// Requires a current GL context and a linked `program`.
 pub unsafe fn uniform_loc(program: GlUint, name: &str) -> GlInt {
+    // SAFETY: the caller's contract: a current GL context and a linked
+    // `program`; `c` is NUL-terminated and outlives the call.
     unsafe {
         let c = std::ffi::CString::new(name).unwrap();
         glGetUniformLocation(program, c.as_ptr())
@@ -563,6 +584,7 @@ impl RenderTarget {
     /// # Safety
     /// Requires a current GL context.
     pub unsafe fn new(width: i32, height: i32) -> Self {
+        // SAFETY: the caller's contract: a current GL context.
         unsafe { Self::alloc(width, height) }.unwrap_or_else(|e| panic!("{e}"))
     }
 
@@ -582,10 +604,14 @@ impl RenderTarget {
                 "{width}x{height} render target: test failure (debug.video.fail=rt)"
             ));
         }
+        // SAFETY: the caller's contract: a current GL context.
         unsafe { Self::alloc(width, height) }
     }
 
     unsafe fn alloc(width: i32, height: i32) -> Result<Self, String> {
+        // SAFETY: `new` and `try_new`, its only callers, pass on their
+        // contract: a current GL context. The null pixels are GL's "storage,
+        // no upload", so the driver reads nothing through them.
         unsafe {
             for _ in 0..8 {
                 if glGetError() == GL_NO_ERROR {
@@ -644,6 +670,7 @@ impl RenderTarget {
     /// # Safety
     /// Requires a current GL context.
     pub unsafe fn bind_and_viewport(&self) {
+        // SAFETY: the caller's contract: a current GL context.
         unsafe {
             glBindFramebuffer(GL_FRAMEBUFFER, self.fbo);
             glViewport(0, 0, self.width, self.height);
@@ -660,6 +687,8 @@ impl RenderTarget {
     /// # Safety
     /// Requires a current GL context; the texture and FBO must not be bound or drawn after this.
     pub unsafe fn destroy(self) {
+        // SAFETY: the caller's contract: a current GL context, and nothing
+        // uses the names after; each delete reads one GLuint from `self`.
         unsafe {
             glDeleteFramebuffers(1, &self.fbo);
             glDeleteTextures(1, &self.texture);

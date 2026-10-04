@@ -45,6 +45,9 @@ impl VideoTexture {
                 )?;
                 let array = env.new_float_array(16)?;
                 let raw_env = env.get_native_interface();
+                // SAFETY: `raw_env` is this thread's own JNIEnv, and
+                // `surface` a live local ref to a Surface, held in this frame
+                // for the call; the window takes its own reference.
                 let Some(window) =
                     (unsafe { NativeWindow::from_surface(raw_env, surface.as_raw()) })
                 else {

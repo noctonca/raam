@@ -44,6 +44,8 @@ pub fn local_time(epoch: i64) -> LocalTime {
 /// Bionic's `localtime_r`, which applies `persist.sys.timezone` itself.
 fn local_tm(t: i64) -> libc::tm {
     let t = t as libc::time_t; // i32 on armv7 (fine until 2038; the frame is 32-bit anyway)
+    // SAFETY: an all-zero `tm` is a valid value (the zone pointer is just
+    // null), and both pointers are to locals that outlive the call.
     unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
         libc::localtime_r(&t, &mut tm);
@@ -54,6 +56,8 @@ fn local_tm(t: i64) -> libc::tm {
 pub fn prop(name: &str) -> String {
     let name = CString::new(name).unwrap();
     let mut buf = [0u8; 92]; // PROP_VALUE_MAX
+    // SAFETY: `name` is a NUL-terminated CString alive for the call, and
+    // `buf` is PROP_VALUE_MAX bytes, the most the call ever writes.
     let n = unsafe {
         libc::__system_property_get(name.as_ptr(), buf.as_mut_ptr() as *mut libc::c_char)
     };

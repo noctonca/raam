@@ -155,6 +155,7 @@ impl ClockOverlay {
             },
             icon_set(32.0, 1.15, 8.0),
         );
+        // SAFETY: the caller's contract: a current GL context.
         unsafe {
             let program = link_program("clock", VS_SRC, FS_SRC);
             let mut vbo = 0;
@@ -321,6 +322,8 @@ impl ClockOverlay {
         if self.draws.is_empty() {
             return;
         }
+        // SAFETY: a ClockOverlay lives on the render thread with its context
+        // current (gl.rs, # Safety); the draw ranges have their own note.
         unsafe {
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             glViewport(0, 0, sw, sh);

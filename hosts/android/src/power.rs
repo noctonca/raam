@@ -38,6 +38,8 @@ fn check(env: &mut JNIEnv, what: &str, e: jni::errors::Error) -> String {
 
 impl Power {
     pub fn new(app: &android_activity::AndroidApp) -> JResult<Self> {
+        // SAFETY: the glue's JavaVM pointer is non-null and lives as long as
+        // the process.
         let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr() as *mut jni::sys::JavaVM) }
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -48,6 +50,8 @@ impl Power {
 
     fn with_env<T>(&self, f: impl FnOnce(&mut JNIEnv, &JObject) -> JResult<T>) -> JResult<T> {
         let mut env = self.vm.attach_current_thread().map_err(|e| e.to_string())?;
+        // SAFETY: `activity` is the glue's global ref to the NativeActivity,
+        // valid for the process's life; it is only borrowed here.
         let activity = unsafe { JObject::from_raw(self.activity) };
         let r = env.with_local_frame(16, |env| -> Result<JResult<T>, jni::errors::Error> {
             Ok(f(env, &activity))

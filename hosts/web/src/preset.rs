@@ -77,9 +77,14 @@ impl Preset {
                 Some(st)
             }
         };
+        // SAFETY: start makes the canvas's context current before making a
+        // Preset, on the page's one thread (without it the WebGL shim
+        // panics rather than misbehaving).
         let mut painter = unsafe { Painter::new() };
         painter.text_boost = opts.text_mode == TextMode::Shader;
         let mut max_tex = 0;
+        // SAFETY: the context is current, as for the painter;
+        // GL_MAX_TEXTURE_SIZE is single-valued, so one GlInt is written.
         unsafe { glGetIntegerv(GL_MAX_TEXTURE_SIZE, &mut max_tex) };
         let info = gallery::ProbeInfo {
             text_mode: Some(opts.text_mode),
@@ -213,6 +218,8 @@ impl Preset {
         // Applied above; epaint asserts on dropping an uncleared delta.
         out.textures_delta.clear();
         self.info.atlas_fill = self.ctx.fonts(|f| f.font_atlas_fill_ratio());
+        // SAFETY: the canvas's context, current since start made it so, on
+        // the page's one thread.
         unsafe {
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             glViewport(0, 0, w, h);

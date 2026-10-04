@@ -325,10 +325,13 @@ impl Live {
             },
             self.lib.clone(),
         );
+        // SAFETY: `gl`'s context was made current in create_gl on this
+        // thread, the event loop's, and stays so for the window's life.
         let mut painter = unsafe { Painter::new() };
         // The theme's text mode is the shader boost
         // (`theme::Options::default`).
         painter.text_boost = true;
+        // SAFETY: `gl`'s context is current, as for the painter.
         let overlay = unsafe { ClockOverlay::new() };
         let weather = weather::spawn(self.host.waker.clone());
         let settings = SlideshowSettings {
@@ -341,6 +344,7 @@ impl Live {
             video_playback: s.video_playback,
             video_sound: false,
         };
+        // SAFETY: `gl`'s context is current, as for the painter.
         let mut pipeline = unsafe { Pipeline::new(w, h, DENSITY_DPI, settings, NoVideo, || None) };
         if let Some(o) = self.overrides.take() {
             pipeline.set_overrides(o);
@@ -555,6 +559,8 @@ impl Live {
         // and overlay draws under them (the controller's opaque lever).
         if !out.chrome_opaque {
             run.pipeline.draw_frame();
+            // SAFETY: the window's context, current on this thread since
+            // create_gl; attribute indices 0..8 are within GLES2's minimum.
             unsafe {
                 for i in 0..8 {
                     glDisableVertexAttribArray(i);

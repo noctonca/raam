@@ -399,10 +399,13 @@ fn parse_args() -> Result<Args, String> {
 }
 
 /// The window and its GL context, current on this thread.
+///
+/// Fields drop in order: the surface and the context hold the window's
+/// raw handle, so the window goes last.
 pub struct Gl {
-    pub window: Window,
     pub surface: Surface<WindowSurface>,
     pub context: PossiblyCurrentContext,
+    pub window: Window,
     pub max_texture: i32,
 }
 
@@ -476,11 +479,15 @@ fn create_gl(
     let ctx_attrs = ContextAttributesBuilder::new()
         .with_context_api(api)
         .build(raw);
+    // SAFETY: `raw` is the handle of `window`, which is alive here; the
+    // returned `Gl` holds the window and drops it after the context.
     let not_current = unsafe { display.create_context(&config, &ctx_attrs) }
         .map_err(|e| format!("create_context: {e}"))?;
     let surf_attrs = window
         .build_surface_attributes(Default::default())
         .map_err(|e| format!("surface attributes: {e}"))?;
+    // SAFETY: the attributes carry `window`'s raw handle, valid here; the
+    // returned `Gl` holds the window and drops it after the surface.
     let surface = unsafe { display.create_window_surface(&config, &surf_attrs) }
         .map_err(|e| format!("create_window_surface: {e}"))?;
     let context = not_current
@@ -488,19 +495,24 @@ fn create_gl(
         .map_err(|e| format!("make_current: {e}"))?;
     let _ = surface.set_swap_interval(&context, SwapInterval::Wait(NonZeroU32::MIN));
 
+    // SAFETY: `context` was made current on this thread just above.
     unsafe { bind_vao() };
     let mut max_texture = 0;
+    // SAFETY: the context made current above, on this thread; the
+    // single-valued GL_MAX_TEXTURE_SIZE writes one GlInt to `max_texture`.
     unsafe { glGetIntegerv(GL_MAX_TEXTURE_SIZE, &mut max_texture) };
     log::info!(
         "GL {} | {} | window scale {} | GL_MAX_TEXTURE_SIZE {max_texture}",
+        // SAFETY: the context made current above, on this thread.
         unsafe { gl_string(GL_VERSION) },
+        // SAFETY: as for GL_VERSION.
         unsafe { gl_string(GL_RENDERER) },
         window.scale_factor()
     );
     Ok(Gl {
-        window,
         surface,
         context,
+        window,
         max_texture,
     })
 }
@@ -508,6 +520,9 @@ fn create_gl(
 /// The back buffer, bottom-up in GL, as a top-down RGB image.
 fn read_pixels(w: i32, h: i32) -> golden::Image {
     let mut rgba = vec![0u8; (w * h * 4) as usize];
+    // SAFETY: the callers draw under the window's context, current on this
+    // thread; `rgba` holds w * h RGBA bytes, all GL writes at the default
+    // pack alignment of 4 (an RGBA row is always a multiple of 4).
     unsafe {
         glReadPixels(
             0,

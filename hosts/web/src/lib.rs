@@ -124,12 +124,16 @@ impl Live {
             video_sound: false,
         };
         let controller = App::new(state, || None);
+        // SAFETY: the canvas's context is current (this fn's contract:
+        // start made it so in make_context, on the page's one thread).
         let pipeline = unsafe { Pipeline::new(w, h, DENSITY_DPI, settings, NoVideo, || None) };
+        // SAFETY: the canvas's context is current, as for the pipeline.
         let mut painter = unsafe { Painter::new() };
         // The theme's text mode is the shader boost, chosen on the frame:
         // right for light and dark text alike, and a theme switch never
         // rebuilds the font atlas.
         painter.text_boost = true;
+        // SAFETY: the canvas's context is current, as for the pipeline.
         let overlay = unsafe { ClockOverlay::new() };
         let now = clock::now();
         log::info!("pipeline + painter ready, {w}x{h}");
@@ -221,6 +225,9 @@ impl Live {
         // and overlay draws under them (the controller's opaque lever).
         if !out.chrome_opaque {
             self.pipeline.draw_frame();
+            // SAFETY: the canvas's context, current since make_context, the
+            // page's one thread; attribute indices 0..8 are within WebGL1's
+            // minimum.
             unsafe {
                 for i in 0..8 {
                     glDisableVertexAttribArray(i);
@@ -433,10 +440,14 @@ fn make_context(canvas: &HtmlCanvasElement) -> Result<(), String> {
         .map_err(|_| "not a WebGL1 context")?;
     make_current(gl);
     let mut max_tex = 0;
+    // SAFETY: the context made current just above; GL_MAX_TEXTURE_SIZE is
+    // single-valued, so one GlInt is written to `max_tex`.
     unsafe { glGetIntegerv(GL_MAX_TEXTURE_SIZE, &mut max_tex) };
     log::info!(
         "{} | {} | GL_MAX_TEXTURE_SIZE {max_tex}",
+        // SAFETY: the context made current above.
         unsafe { gl_string(GL_VERSION) },
+        // SAFETY: as for GL_VERSION.
         unsafe { gl_string(GL_RENDERER) }
     );
     Ok(())
@@ -474,6 +485,8 @@ pub fn start() -> Result<(), JsValue> {
             Host::Preset(Box::new(p))
         }
         None => {
+            // SAFETY: make_context above made the canvas's context current,
+            // and the page has no other thread.
             let live = unsafe { Live::new(w, h) }.map_err(|e| JsValue::from_str(&e))?;
             Host::Live(Box::new(live))
         }

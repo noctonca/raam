@@ -69,6 +69,8 @@ log = "0.4"
 [workspace.lints.clippy]
 # A public fn that can panic says when, under `# Panics`.
 missing_panics_doc = "warn"
+# Every unsafe block and impl says why it holds, under `// SAFETY:`.
+undocumented_unsafe_blocks = "warn"
 
 # Profiles live at the workspace root only (Cargo ignores them in
 # members). Release: LTO earns its keep on the frame (binary size and the

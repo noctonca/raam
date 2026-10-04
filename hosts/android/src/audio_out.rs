@@ -21,6 +21,8 @@ unsafe extern "C" fn buffer_queue_callback(
     _caller: sles::SLAndroidSimpleBufferQueueItf,
     context: *mut c_void,
 ) {
+    // SAFETY: `context` is the `slots` box `AudioOut::new` registered, and
+    // `AudioOut`'s Drop frees it only after Destroy, when no callback runs.
     let slots = unsafe { &*(context as *const BufferSlots) };
     let mut free = slots.free.lock().unwrap();
     *free += 1;
@@ -33,15 +35,21 @@ struct Engine {
     output_mix: sles::SLObjectItf,
 }
 
-// Android's OpenSL ES engine is thread-safe (SL_ENGINEOPTION_THREADSAFE is
-// on by default); each player is only touched by the thread that owns it.
+// SAFETY: Android's OpenSL ES engine is thread-safe
+// (SL_ENGINEOPTION_THREADSAFE is on by default), and the engine and output
+// mix are never destroyed; each player is only touched by the thread that
+// owns it.
 unsafe impl Send for Engine {}
+// SAFETY: as for Send.
 unsafe impl Sync for Engine {}
 
 static ENGINE: OnceLock<Result<Engine, String>> = OnceLock::new();
 
 fn engine() -> Result<&'static Engine, String> {
     ENGINE
+        // SAFETY: each object is checked created and realized before its
+        // interfaces are used, the out-pointers are live locals of the right
+        // interface type, and the OnceLock makes this run once per process.
         .get_or_init(|| unsafe {
             let mut engine_obj: sles::SLObjectItf = ptr::null();
             check(
@@ -95,8 +103,9 @@ pub struct AudioOut {
     pub enqueued_bytes: u64,
 }
 
-// Only the thread that owns it calls into it; the buffer-queue callback runs
-// on an OpenSL ES thread but only touches `slots`.
+// SAFETY: only the thread that owns it calls into it (it isn't Sync); the
+// buffer-queue callback runs on an OpenSL ES thread but only touches
+// `slots`, whose state is behind a Mutex.
 unsafe impl Send for AudioOut {}
 
 impl AudioOut {
@@ -105,6 +114,11 @@ impl AudioOut {
     /// player starts paused.
     pub fn new(sample_rate_hz: u32, channels: u32) -> Result<Self, String> {
         let engine = engine()?;
+        // SAFETY: the engine and output mix live for the process; the
+        // locator and format structs are locals that outlive
+        // CreateAudioPlayer, which copies them; `player_obj` is used only
+        // once created, and destroyed once, either here on error or in Drop
+        // (via `out`); `slots` is registered only after `out` owns it.
         unsafe {
             let mut loc_bufq = sles::SLDataLocator_AndroidSimpleBufferQueue {
                 locatorType: sles::SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE,
@@ -217,6 +231,7 @@ impl AudioOut {
 
     fn set_state(&self, state: sles::SLuint32) -> Result<(), String> {
         check(
+            // SAFETY: `play_itf` comes from the player, which lives until Drop.
             unsafe { ((**self.play_itf).SetPlayState.unwrap())(self.play_itf, state) },
             "SetPlayState",
         )
@@ -238,6 +253,7 @@ impl AudioOut {
             (2000.0 * volume.min(1.0).log10()).round().max(-6000.0) as sles::SLmillibel
         };
         check(
+            // SAFETY: `volume_itf` comes from the player, which lives until Drop.
             unsafe { ((**self.volume_itf).SetVolumeLevel.unwrap())(self.volume_itf, mb) },
             "SetVolumeLevel",
         )
@@ -246,6 +262,7 @@ impl AudioOut {
     /// How much the player has played since it was made, in ms.
     pub fn position_ms(&self) -> Option<u32> {
         let mut ms: sles::SLmillisecond = 0;
+        // SAFETY: `play_itf` lives until Drop, and `ms` is a live local.
         let r = unsafe { ((**self.play_itf).GetPosition.unwrap())(self.play_itf, &mut ms) };
         (r == sles::SL_RESULT_SUCCESS).then_some(ms)
     }
@@ -255,6 +272,8 @@ impl AudioOut {
     /// slot yet: the caller checks for stop or pause and tries again.
     pub fn enqueue(&mut self, pcm: &[u8], timeout: Duration) -> Result<bool, String> {
         {
+            // SAFETY: `slots` is a live box until Drop, and only shared
+            // borrows of it are ever made (its state is behind a Mutex).
             let slots = unsafe { &*self.slots };
             let mut free = slots.free.lock().unwrap();
             if *free == 0 {
@@ -265,6 +284,11 @@ impl AudioOut {
             }
             *free -= 1;
         }
+        // SAFETY: `bq_itf` lives until Drop, and `pcm` is valid for
+        // `pcm.len()` bytes during the call. But Android's buffer queue keeps
+        // the pointer, not a copy, and reads it until the slot's callback:
+        // the caller must leave `pcm` alive and unchanged until then, which
+        // this signature does not enforce.
         let status = unsafe {
             ((**self.bq_itf).Enqueue.unwrap())(
                 self.bq_itf,
@@ -280,6 +304,9 @@ impl AudioOut {
 
 impl Drop for AudioOut {
     fn drop(&mut self) {
+        // SAFETY: `player_obj` and `slots` were made in `new` and are freed
+        // only here, once; Destroy blocks until no callback is running, so
+        // nothing reads `slots` after it is freed.
         unsafe {
             let _ = self.set_state(sles::SL_PLAYSTATE_STOPPED);
             // Destroy blocks until no callback is running, so the slots can go.

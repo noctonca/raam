@@ -49,11 +49,9 @@ const PACKAGE: &str = "io.github.noctonca.raam";
 
 // ---- the engine's seams (raam-core seams.rs), implemented over Android --
 
-/// `ALooper_wake` is thread-safe by the NDK's contract, so sharing the
-/// waker across the engine's threads is sound.
+/// Send and Sync through `AndroidAppWaker`, which holds its own reference
+/// to the looper, and whose `ALooper_wake` any thread may call.
 struct AppWaker(AndroidAppWaker);
-unsafe impl Sync for AppWaker {}
-unsafe impl Send for AppWaker {}
 
 impl raam_core::seams::Waker for AppWaker {
     fn wake(&self) {
@@ -311,6 +309,8 @@ fn android_main(app: AndroidApp) {
                 // returns, so the EGL surface must go now, not next pass.
                 MainEvent::TerminateWindow { .. } => {
                     if let Some(e) = egl.as_mut() {
+                        // SAFETY: on the render thread, which owns the EGL
+                        // state, while the glue's window is still alive.
                         unsafe { e.release_window() };
                     }
                 }
@@ -377,6 +377,9 @@ fn android_main(app: AndroidApp) {
             && let Some(window) = app.native_window()
         {
             let (old_w, old_h) = (e.width, e.height);
+            // SAFETY: on the render thread that owns the EGL state, and the
+            // old surface was released at TerminateWindow; `window` is a
+            // live window the glue just handed out.
             match unsafe { e.attach_window(&window) } {
                 Ok(()) => {
                     log::info!("window surface re-created {}x{}", e.width, e.height);
@@ -418,6 +421,8 @@ fn android_main(app: AndroidApp) {
                 next_wait = out.wait;
                 continue;
             };
+            // SAFETY: on the render thread, which keeps the context made
+            // here current for the rest of the process; `window` is live.
             let e = match unsafe { EglState::new(&window) } {
                 Ok(e) => e,
                 Err(err) => {
@@ -451,13 +456,17 @@ fn android_main(app: AndroidApp) {
                 },
                 lib.clone(),
             ));
+            // SAFETY: `EglState::new` just made the context current on this
+            // thread, and it stays current here for the painter's life.
             painter = Some(unsafe { Painter::new() });
             // The theme's text mode is the shader boost, chosen on the frame:
             // right for light and dark text alike, and a theme switch never
             // rebuilds the font atlas.
             painter.as_mut().unwrap().text_boost = true;
+            // SAFETY: the same current context, kept for the overlay's life.
             clock_overlay = Some(unsafe { ClockOverlay::new() });
             weather = Some(weather::spawn(host.waker.clone()));
+            // SAFETY: the same current context, kept for the pipeline's life.
             pipeline = Some(unsafe {
                 Pipeline::new(
                     e.width,
@@ -549,6 +558,8 @@ fn android_main(app: AndroidApp) {
         if !out.chrome_opaque {
             let t = clock::now();
             pipeline.draw_frame();
+            // SAFETY: plain values to GL with the context current on this
+            // render thread (on the pbuffer if the window is gone).
             unsafe {
                 for i in 0..8 {
                     glDisableVertexAttribArray(i);
@@ -630,6 +641,8 @@ fn android_main(app: AndroidApp) {
         }
 
         let t = clock::now();
+        // SAFETY: on the render thread that owns the EGL state; `swap`
+        // skips a released (null) window surface.
         unsafe { egl_state.swap() };
         stats.swap += clock::elapsed(t);
         stats.total += clock::elapsed(frame_start);
@@ -733,6 +746,11 @@ struct EglState {
 
 impl EglState {
     unsafe fn new(window: &NativeWindow) -> Result<Self, String> {
+        // SAFETY: each EGL handle is checked non-null (or the call checked
+        // for success) before the next call uses it; the attribute lists are
+        // EGL_NONE-terminated locals and the out-pointers live locals, all
+        // outliving their calls. GL strings are read only once
+        // `attach_window` has made the context current.
         unsafe {
             let display = eglGetDisplay(std::ptr::null_mut());
             if display.is_null() {
@@ -802,6 +820,10 @@ impl EglState {
     }
 
     unsafe fn attach_window(&mut self, window: &NativeWindow) -> Result<(), String> {
+        // SAFETY: `display`, `config` and `context` were made and checked in
+        // `new` and are never destroyed; `window` is a live ANativeWindow
+        // (EGL takes its own reference); a surface that fails to become
+        // current is destroyed once and never stored.
         unsafe {
             let surface = eglCreateWindowSurface(
                 self.display,
@@ -833,6 +855,9 @@ impl EglState {
         if self.surface.is_null() {
             return;
         }
+        // SAFETY: `display`, `pbuffer` and `context` live for the process;
+        // `surface` is non-null (checked above) and ours, destroyed once
+        // here and then nulled, after the context has moved off it.
         unsafe {
             if eglMakeCurrent(self.display, self.pbuffer, self.pbuffer, self.context) == 0 {
                 log::error!("eglMakeCurrent(pbuffer) failed: 0x{:x}", eglGetError());
@@ -850,7 +875,10 @@ impl EglState {
         if self.surface.is_null() {
             return;
         }
+        // SAFETY: `display` lives for the process and `surface` is non-null
+        // (checked above), so the live window surface made current earlier.
         if unsafe { eglSwapBuffers(self.display, self.surface) } == 0 {
+            // SAFETY: no arguments; reads this thread's last EGL error.
             log::error!("eglSwapBuffers failed: 0x{:x}", unsafe { eglGetError() });
         }
     }

@@ -315,7 +315,8 @@ impl Provider for LocalFolder {
             .as_deref()
             .ok_or(ProviderError::Failed("no location".into()))?;
         let t = clock::now();
-        let p = make_preview(Path::new(path), short_side).map_err(ProviderError::Failed)?;
+        let p = make_preview(Path::new(path), short_side)
+            .map_err(|e| ProviderError::Failed(format!("{path}: {e}")))?;
         log::info!(
             "local: preview of {path}: source {}x{} {}, preview {}x{} {} KB in {:?}",
             p.src.0,
@@ -330,15 +331,69 @@ impl Provider for LocalFolder {
     }
 }
 
+/// Why a file in the local folder couldn't be described or previewed.
+#[derive(Debug)]
+enum LocalError {
+    /// Opening or reading the file.
+    Io(std::io::Error),
+    /// The JPEG's header or data doesn't decode, or won't scale.
+    Decode(jpeg_decoder::Error),
+    /// A JPEG, but neither RGB nor grayscale.
+    PixelFormat(jpeg_decoder::PixelFormat),
+    /// The decoder returned fewer or more pixels than the size it gave.
+    SizeMismatch,
+    /// The upright preview wouldn't encode.
+    Encode(jpeg_encoder::EncodingError),
+    /// The host's probe couldn't read the clip, in its own words (the
+    /// probe seam's errors are still messages, raam#94).
+    Probe(String),
+    /// The frame can't decode this clip, and why.
+    Unplayable(String),
+}
+
+impl From<std::io::Error> for LocalError {
+    fn from(e: std::io::Error) -> Self {
+        LocalError::Io(e)
+    }
+}
+
+impl std::fmt::Display for LocalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LocalError::Io(e) => write!(f, "{e}"),
+            LocalError::Decode(e) => write!(f, "jpeg: {e}"),
+            LocalError::PixelFormat(p) => write!(f, "unsupported pixel format {p:?}"),
+            LocalError::SizeMismatch => f.write_str("decoded size mismatch"),
+            LocalError::Encode(e) => write!(f, "jpeg encode: {e}"),
+            LocalError::Probe(why) => write!(f, "unreadable clip: {why}"),
+            LocalError::Unplayable(why) => write!(f, "can't play here: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for LocalError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            LocalError::Io(e) => Some(e),
+            LocalError::Decode(e) => Some(e),
+            LocalError::Encode(e) => Some(e),
+            LocalError::PixelFormat(_)
+            | LocalError::SizeMismatch
+            | LocalError::Probe(_)
+            | LocalError::Unplayable(_) => None,
+        }
+    }
+}
+
 /// Streaming SHA-1 of a file, lowercase hex: the content identity that
 /// matches Immich's `checksum`. ring's legacy-use digest — SHA-1 is an
 /// identity key here, not a security boundary.
-fn sha1_of_file(path: &str) -> Result<String, String> {
-    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+fn sha1_of_file(path: &str) -> Result<String, LocalError> {
+    let mut file = std::fs::File::open(path)?;
     let mut ctx = ring::digest::Context::new(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY);
     let mut buf = vec![0u8; limits::HASH_BUFFER_BYTES];
     loop {
-        let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+        let n = file.read(&mut buf)?;
         if n == 0 {
             break;
         }
@@ -349,12 +404,12 @@ fn sha1_of_file(path: &str) -> Result<String, String> {
 
 /// A new or changed file's `MediaRef`: its SHA-1, its size after EXIF
 /// rotation (from the JPEG header, no decode) and its capture time.
-fn describe(path: &str, stamp: (i64, i64)) -> Result<MediaRef, String> {
+fn describe(path: &str, stamp: (i64, i64)) -> Result<MediaRef, LocalError> {
     let sha1 = sha1_of_file(path)?;
-    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let file = std::fs::File::open(path)?;
     let mut dec = jpeg_decoder::Decoder::new(std::io::BufReader::new(file));
-    dec.read_info().map_err(|e| format!("jpeg header: {e}"))?;
-    let info = dec.info().ok_or("no jpeg info")?;
+    dec.read_info().map_err(LocalError::Decode)?;
+    let info = dec.info().expect(INFO_AFTER_OK);
     let (orientation, taken) = read_exif(Path::new(path));
     let (w, h) = (u32::from(info.width), u32::from(info.height));
     let (width, height) = if (5..=8).contains(&orientation) {
@@ -390,10 +445,10 @@ fn describe_video(
     probe: &dyn MediaProbe,
     path: &str,
     stamp: (i64, i64),
-) -> Result<MediaRef, String> {
-    let info = probe.probe(path)?;
+) -> Result<MediaRef, LocalError> {
+    let info = probe.probe(path).map_err(LocalError::Probe)?;
     if let Some(why) = probe.unplayable(&info) {
-        return Err(format!("can't play here: {why}"));
+        return Err(LocalError::Unplayable(why));
     }
     let sha1 = sha1_of_file(path)?;
     let (width, height) = info.display();
@@ -455,6 +510,9 @@ fn list_media(dir: &Path, out: &mut Vec<(String, (i64, i64))>) -> std::io::Resul
     Ok(())
 }
 
+/// jpeg-decoder has the info once `read_info` or `decode` returned Ok.
+const INFO_AFTER_OK: &str = "jpeg-decoder's info after a successful read";
+
 struct Preview {
     jpeg: Vec<u8>,
     size: (u32, u32),
@@ -465,12 +523,12 @@ struct Preview {
 /// An upright preview with its short side at least `short_side` px (or the
 /// original size): decoded at 1/2, 1/4 or 1/8 scale in the DCT where that
 /// still covers it, so a 12 MP photo never needs ~48 MB of RGBA.
-fn make_preview(path: &Path, short_side: u32) -> Result<Preview, String> {
+fn make_preview(path: &Path, short_side: u32) -> Result<Preview, LocalError> {
     let (orientation, _) = read_exif(path);
-    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let file = std::fs::File::open(path)?;
     let mut dec = jpeg_decoder::Decoder::new(std::io::BufReader::new(file));
-    dec.read_info().map_err(|e| format!("jpeg header: {e}"))?;
-    let info = dec.info().ok_or("no jpeg info")?;
+    dec.read_info().map_err(LocalError::Decode)?;
+    let info = dec.info().expect(INFO_AFTER_OK);
     let (src_w, src_h) = (u32::from(info.width), u32::from(info.height));
     let short = src_w.min(src_h).max(1);
     let (req_w, req_h) = if short > short_side {
@@ -483,24 +541,22 @@ fn make_preview(path: &Path, short_side: u32) -> Result<Preview, String> {
     } else {
         (info.width, info.height)
     };
-    let (w, h) = dec
-        .scale(req_w, req_h)
-        .map_err(|e| format!("jpeg scale: {e}"))?;
-    let pixels = dec.decode().map_err(|e| format!("jpeg decode: {e}"))?;
-    let info = dec.info().ok_or("no jpeg info")?;
+    let (w, h) = dec.scale(req_w, req_h).map_err(LocalError::Decode)?;
+    let pixels = dec.decode().map_err(LocalError::Decode)?;
+    let info = dec.info().expect(INFO_AFTER_OK);
     let rgb = match info.pixel_format {
         jpeg_decoder::PixelFormat::RGB24 => pixels,
         jpeg_decoder::PixelFormat::L8 => pixels.iter().flat_map(|&l| [l, l, l]).collect(),
-        other => return Err(format!("unsupported pixel format {other:?}")),
+        other => return Err(LocalError::PixelFormat(other)),
     };
     if rgb.len() != usize::from(w) * usize::from(h) * 3 {
-        return Err("decoded size mismatch".into());
+        return Err(LocalError::SizeMismatch);
     }
     let (ow, oh, rgb) = apply_orientation(orientation, w, h, rgb);
     let mut jpeg = Vec::new();
     jpeg_encoder::Encoder::new(&mut jpeg, 88)
         .encode(&rgb, ow, oh, jpeg_encoder::ColorType::Rgb)
-        .map_err(|e| format!("jpeg encode: {e}"))?;
+        .map_err(LocalError::Encode)?;
     Ok(Preview {
         jpeg,
         size: (u32::from(ow), u32::from(oh)),
@@ -588,7 +644,92 @@ fn read_exif(path: &Path) -> (u8, Option<i64>) {
 
 #[cfg(test)]
 mod tests {
-    use super::apply_orientation;
+    use super::*;
+    use raam_model::ClipInfo;
+
+    /// A probe that fails, or finds every clip unplayable.
+    struct Probe(Result<(), &'static str>);
+
+    impl MediaProbe for Probe {
+        fn probe(&self, _path: &str) -> Result<ClipInfo, String> {
+            self.0.map_err(String::from)?;
+            Ok(ClipInfo {
+                mime: "video/hevc".into(),
+                coded_w: 1920,
+                coded_h: 1080,
+                rotation: 0,
+                duration_us: 1_000_000,
+                has_audio: false,
+                audio: None,
+            })
+        }
+        fn unplayable(&self, _info: &ClipInfo) -> Option<String> {
+            Some("not H.264".into())
+        }
+    }
+
+    fn jpeg(colour: jpeg_encoder::ColorType, pixel: &[u8]) -> Vec<u8> {
+        let data = pixel.repeat(4 * 2);
+        let mut out = Vec::new();
+        jpeg_encoder::Encoder::new(&mut out, 100)
+            .encode(&data, 4, 2, colour)
+            .unwrap();
+        out
+    }
+
+    /// A file the folder can't use says why, as its own variant, and is
+    /// skipped; a good one is described and previewed.
+    #[test]
+    fn a_local_file_is_described_or_says_why_not() {
+        let dir = std::env::temp_dir().join(format!("raam-local-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |name: &str, bytes: &[u8]| {
+            let p = dir.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+
+        let good = file(
+            "good.jpg",
+            &jpeg(jpeg_encoder::ColorType::Rgb, &[9, 99, 199]),
+        );
+        let m = describe(&good, (1, 2)).unwrap();
+        assert_eq!((m.width, m.height, m.kind), (4, 2, MediaKind::Photo));
+        assert_eq!(m.id.as_str().len(), 40, "a hex SHA-1");
+        assert_eq!(make_preview(Path::new(&good), 1).unwrap().src, (4, 2));
+
+        let junk = file("junk.jpg", b"not a jpeg");
+        assert!(matches!(
+            describe(&junk, (1, 2)),
+            Err(LocalError::Decode(_))
+        ));
+        assert!(matches!(
+            make_preview(Path::new(&junk), 1),
+            Err(LocalError::Decode(_))
+        ));
+        let cmyk = file(
+            "cmyk.jpg",
+            &jpeg(jpeg_encoder::ColorType::Cmyk, &[0, 0, 0, 0]),
+        );
+        assert!(matches!(
+            make_preview(Path::new(&cmyk), 1),
+            Err(LocalError::PixelFormat(jpeg_decoder::PixelFormat::CMYK32))
+        ));
+        let gone = dir.join("gone.jpg").to_string_lossy().into_owned();
+        assert!(matches!(describe(&gone, (1, 2)), Err(LocalError::Io(_))));
+
+        let clip = file("clip.mp4", b"");
+        assert!(matches!(
+            describe_video(&Probe(Err("no moov")), &clip, (1, 2)),
+            Err(LocalError::Probe(why)) if why == "no moov"
+        ));
+        assert!(matches!(
+            describe_video(&Probe(Ok(())), &clip, (1, 2)),
+            Err(LocalError::Unplayable(why)) if why == "not H.264"
+        ));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     // A 2x1 image: red then green.
     const RG: [u8; 6] = [255, 0, 0, 0, 255, 0];

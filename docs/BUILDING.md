@@ -134,6 +134,13 @@ Miri can't follow. On Apple silicon add `--target x86_64-unknown-linux-gnu`
 before running anything that draws text: Miri has no NEON, which egui's
 glyph rasteriser uses there.
 
+The rest of raam-core's tests run under Miri too, but the `app::` ones
+drive whole egui frames and take minutes each, so CI leaves them out.
+Under Miri, raam-core's tests allocate through a 16-aligned allocator
+(`miri_alloc` in `lib.rs`): egui's rasteriser casts byte buffers to
+`u32` and relies on the allocator aligning them, as real ones do and
+Miri doesn't (#85).
+
 And cargo-deny over the dependency tree, by `deny.toml` (`brew install
 cargo-deny` or `cargo install cargo-deny`):
 

@@ -76,6 +76,8 @@ pub const GL_INFO_LOG_LENGTH: GlEnum = 0x8B84;
 // The WebGL1 linkage: the same names and signatures, forwarded to the
 // canvas's context (the host makes it current with `webgl::make_current`).
 #[cfg(any(target_arch = "wasm32", test))]
+mod raw;
+#[cfg(any(target_arch = "wasm32", test))]
 mod table;
 #[cfg(target_arch = "wasm32")]
 mod webgl;

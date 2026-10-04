@@ -10,7 +10,7 @@ use std::ptr;
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
-use raam_model::limits::AUDIO_OUT_BUFFERS as NUM_BUFFERS;
+use raam_model::limits::{AUDIO_OUT_BUFFERS as NUM_BUFFERS, PCM_BATCH_BYTES};
 
 struct BufferSlots {
     free: Mutex<u32>,
@@ -100,6 +100,13 @@ pub struct AudioOut {
     volume_itf: sles::SLVolumeItf,
     /// Freed in `Drop`, after the player (and so its callback) is gone.
     slots: *mut BufferSlots,
+    /// The PCM each queue slot plays. Android's buffer queue reads a
+    /// buffer in place until its callback, so the queue gets these, never
+    /// the caller's. Dropped after `Drop` has destroyed the player.
+    bufs: Vec<Vec<u8>>,
+    /// The slot `enqueue` fills next. The queue plays in order, so once a
+    /// slot is free this one, the oldest, has played.
+    next: usize,
     pub enqueued_bytes: u64,
 }
 
@@ -214,6 +221,10 @@ impl AudioOut {
                 bq_itf,
                 volume_itf,
                 slots,
+                bufs: (0..NUM_BUFFERS)
+                    .map(|_| Vec::with_capacity(PCM_BATCH_BYTES * 2))
+                    .collect(),
+                next: 0,
                 enqueued_bytes: 0,
             };
             check(
@@ -268,13 +279,14 @@ impl AudioOut {
     }
 
     /// Waits (up to `timeout`) for a free queue slot, i.e. for playback to
-    /// have consumed an earlier buffer, then enqueues `pcm`. Ok(false) = no
-    /// slot yet: the caller checks for stop or pause and tries again.
+    /// have consumed an earlier buffer, then queues a copy of `pcm`, so the
+    /// caller may reuse it at once. Ok(false) = no slot yet: the caller
+    /// checks for stop or pause and tries again.
     pub fn enqueue(&mut self, pcm: &[u8], timeout: Duration) -> Result<bool, String> {
+        // SAFETY: `slots` is a live box until Drop, and only shared borrows
+        // of it are ever made (its state is behind a Mutex).
+        let slots = unsafe { &*self.slots };
         {
-            // SAFETY: `slots` is a live box until Drop, and only shared
-            // borrows of it are ever made (its state is behind a Mutex).
-            let slots = unsafe { &*self.slots };
             let mut free = slots.free.lock().unwrap();
             if *free == 0 {
                 free = slots.cond.wait_timeout(free, timeout).unwrap().0;
@@ -284,19 +296,26 @@ impl AudioOut {
             }
             *free -= 1;
         }
-        // SAFETY: `bq_itf` lives until Drop, and `pcm` is valid for
-        // `pcm.len()` bytes during the call. But Android's buffer queue keeps
-        // the pointer, not a copy, and reads it until the slot's callback:
-        // the caller must leave `pcm` alive and unchanged until then, which
-        // this signature does not enforce.
+        let buf = &mut self.bufs[self.next];
+        buf.clear();
+        buf.extend_from_slice(pcm);
+        // SAFETY: `bq_itf` lives until Drop. The queue reads `buf` until
+        // this slot's callback: `buf` is only written again once the queue
+        // has played it (see `next`), and lives until Drop has destroyed
+        // the player.
         let status = unsafe {
             ((**self.bq_itf).Enqueue.unwrap())(
                 self.bq_itf,
-                pcm.as_ptr() as *const c_void,
-                pcm.len() as sles::SLuint32,
+                buf.as_ptr() as *const c_void,
+                buf.len() as sles::SLuint32,
             )
         };
-        check(status, "bufferqueue Enqueue")?;
+        if let Err(e) = check(status, "bufferqueue Enqueue") {
+            // Not queued, so no callback will hand the slot back.
+            *slots.free.lock().unwrap() += 1;
+            return Err(e);
+        }
+        self.next = (self.next + 1) % self.bufs.len();
         self.enqueued_bytes += pcm.len() as u64;
         Ok(true)
     }
@@ -306,7 +325,8 @@ impl Drop for AudioOut {
     fn drop(&mut self) {
         // SAFETY: `player_obj` and `slots` were made in `new` and are freed
         // only here, once; Destroy blocks until no callback is running, so
-        // nothing reads `slots` after it is freed.
+        // nothing reads `slots` after it is freed, nor `bufs`, which drop
+        // after this body.
         unsafe {
             let _ = self.set_state(sles::SL_PLAYSTATE_STOPPED);
             // Destroy blocks until no callback is running, so the slots can go.

@@ -120,6 +120,20 @@ The last needs the NDK's clang for the C in the dependencies: set
 `toolchains/llvm/prebuilt/<host>/bin/armv7a-linux-androideabi23-clang`
 and `AR_armv7_linux_androideabi` to `llvm-ar` in the same folder.
 
+CI also runs Miri over the unsafe it can follow, on a pinned nightly
+(the job names it; `rustup component add --toolchain <it> miri rust-src`):
+
+```sh
+cargo +nightly miri test -p raam-model
+cargo +nightly miri test -p raam-core --lib gl::
+```
+
+That's the WebGL1 linkage's pointer helpers (`gl/raw.rs`, `gl/table.rs`)
+and raam-model. Everything else unsafe is GL, NDK or libc calls, which
+Miri can't follow. On Apple silicon add `--target x86_64-unknown-linux-gnu`
+before running anything that draws text: Miri has no NEON, which egui's
+glyph rasteriser uses there.
+
 Pull requests also build the web demo ([below](#web)).
 
 ## Goldens

@@ -17,6 +17,7 @@
 //! blocks that dereference one say which argument sizes it.
 #![allow(non_snake_case, clippy::missing_safety_doc, clippy::too_many_arguments)]
 
+use super::raw::{bytes, mat4s, write_log};
 use super::table::Table;
 use super::*;
 use std::cell::RefCell;
@@ -81,41 +82,6 @@ fn bpp(format: GlEnum) -> usize {
         0x1907 => 3, // GL_RGB
         0x190A => 2, // GL_LUMINANCE_ALPHA
         _ => 1,      // GL_ALPHA, GL_LUMINANCE
-    }
-}
-
-/// `len` bytes at `ptr`, or none for a null pointer.
-///
-/// # Safety
-/// A non-null `ptr` must be valid for reading `len` bytes for as long as
-/// the slice is used (the GL call's duration).
-unsafe fn bytes<'a>(ptr: *const c_void, len: usize) -> Option<&'a [u8]> {
-    if ptr.is_null() {
-        None
-    } else {
-        // SAFETY: non-null, and valid for `len` bytes by the caller's
-        // contract; u8 has no alignment or validity requirement.
-        Some(unsafe { std::slice::from_raw_parts(ptr as *const u8, len) })
-    }
-}
-
-/// Copies `log` into a caller's GL info-log buffer, NUL-terminated and
-/// truncated to `max_len`, as GL does.
-///
-/// # Safety
-/// `out` must be valid for writing `max_len` bytes (at least one), and
-/// `len` null or valid for one write, as glGet*InfoLog require.
-unsafe fn write_log(log: &str, max_len: GlSizei, len: *mut GlSizei, out: *mut c_char) {
-    let n = log.len().min((max_len.max(1) - 1) as usize);
-    // SAFETY: `n` + 1 <= max(max_len, 1) bytes go to `out`, which holds
-    // `max_len`; `log` can't overlap the caller's buffer, and `len` is
-    // written only when non-null.
-    unsafe {
-        std::ptr::copy_nonoverlapping(log.as_ptr(), out as *mut u8, n);
-        *out.add(n) = 0;
-        if !len.is_null() {
-            *len = n as GlSizei;
-        }
     }
 }
 
@@ -381,8 +347,8 @@ pub unsafe fn glUniformMatrix4fv(
     value: *const f32,
 ) {
     // SAFETY: `value` holds `count` 4x4 matrices, 16 floats each, by GL's
-    // contract; a negative count reads none.
-    let m = unsafe { std::slice::from_raw_parts(value, 16 * count.max(0) as usize) };
+    // contract, which is mat4s's.
+    let m = unsafe { mat4s(value, count) };
     uniform(location, |gl, u| {
         gl.uniform_matrix4fv_with_f32_array(Some(u), transpose != 0, m)
     })

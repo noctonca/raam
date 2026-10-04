@@ -6,6 +6,7 @@ use ndk::media::media_format::MediaFormat;
 use raam_model::ClipInfo;
 use std::fmt;
 use std::fs::File;
+use std::mem::MaybeUninit;
 use std::os::unix::io::AsRawFd;
 use std::ptr::NonNull;
 
@@ -100,9 +101,17 @@ impl Extractor {
     }
 
     /// Reads the current sample into `buf`: its size, or negative at the end.
-    pub fn read_sample_data(&self, buf: &mut [u8]) -> isize {
+    /// The codec's input buffer may be uninitialised, so it is taken as
+    /// such and never seen as `&mut [u8]`.
+    pub fn read_sample_data(&self, buf: &mut [MaybeUninit<u8>]) -> isize {
+        // SAFETY: the extractor writes at most `buf.len()` bytes to
+        // `buf`, which is valid for writes of that many; it never reads them.
         unsafe {
-            ndk_sys::AMediaExtractor_readSampleData(self.ptr.as_ptr(), buf.as_mut_ptr(), buf.len())
+            ndk_sys::AMediaExtractor_readSampleData(
+                self.ptr.as_ptr(),
+                buf.as_mut_ptr().cast::<u8>(),
+                buf.len(),
+            )
         }
     }
 

@@ -714,11 +714,7 @@ fn video_thread(path: &str, window: NativeWindow, sh: &Shared) -> Result<(), Pla
             if !input_eos {
                 match codec.dequeue_input_buffer(Duration::from_millis(10)) {
                     Ok(DequeuedInputBufferResult::Buffer(mut input)) => {
-                        let dst = input.buffer_mut();
-                        let dst = unsafe {
-                            std::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len())
-                        };
-                        let n = ex.read_sample_data(dst);
+                        let n = ex.read_sample_data(input.buffer_mut());
                         if n < 0 {
                             codec
                                 .queue_input_buffer(
@@ -1057,11 +1053,7 @@ fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
             if !input_eos {
                 match codec.dequeue_input_buffer(Duration::from_millis(10)) {
                     Ok(DequeuedInputBufferResult::Buffer(mut input)) => {
-                        let dst = input.buffer_mut();
-                        let dst = unsafe {
-                            std::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len())
-                        };
-                        let n = ex.read_sample_data(dst);
+                        let n = ex.read_sample_data(input.buffer_mut());
                         if n < 0 {
                             codec
                                 .queue_input_buffer(

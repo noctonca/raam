@@ -48,6 +48,26 @@ jobs:
       - name: desktop host lints clean with gles
         run: cargo clippy --workspace --all-targets --features gles -- -D warnings
 
+  # Miri checks the unsafe it can run: the raw-pointer helpers behind the
+  # WebGL1 linkage (gl::raw, gl::table) and raam-model. The rest of our
+  # unsafe is GL, NDK and libc calls, which Miri can't follow, and the
+  # egui-driven app tests take too long under it for every push. Nightly
+  # is pinned so a Miri update can't turn a push red on its own.
+  miri:
+    name: miri
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-09-21
+          components: miri, rust-src
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo miri setup
+      - run: cargo miri test -p raam-model
+      - run: "cargo miri test -p raam-core --lib gl::"
+
   # CI can't run the goldens (pixels are exact per GPU), but it can hold
   # the rule's other half: a bless is a commit of its own.
   goldens:

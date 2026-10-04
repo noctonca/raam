@@ -30,7 +30,10 @@ use raam_model::limits::{
     FETCH_BACKOFF_WAIT, FETCH_EMPTY_WAIT, FETCH_FAILED_WAIT, FETCH_SKIP_WAIT, FETCH_SLOT_POLL,
     FETCH_TILE_POLL,
 };
-use raam_model::{AssetId, MediaItem, MediaRef, Photo, Plan, SourceKind, TilePhoto, VideoClip};
+use raam_model::{
+    AssetId, MediaItem, MediaRef, Photo, Plan, ProviderError, SourceKind, TilePhoto, VideoClip,
+};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -510,6 +513,73 @@ fn fetch_loop(shared: Arc<FetchShared>, host: Host, screen: Screen, lib: Arc<Lib
     }
 }
 
+/// Why a queued photo or clip couldn't be loaded for the render thread.
+#[derive(Debug)]
+enum FetchError {
+    /// The server (its `Transport` is the offline signal, already acted
+    /// on), or the clip's download into the cache.
+    Provider(ProviderError),
+    /// A cached or local preview couldn't be read.
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    /// The local photo's upright preview isn't made yet (library.rs).
+    NotMade,
+    /// The preview isn't a JPEG this decoder reads.
+    Decode(jpeg_decoder::Error),
+    /// A JPEG, but neither RGB nor grayscale.
+    PixelFormat(jpeg_decoder::PixelFormat),
+    /// A local clip's row has no file location.
+    NoLocation,
+    /// The clip is bigger than the cache cap.
+    TooBig,
+    /// The host's probe couldn't read the clip, in its own words (the
+    /// probe seam's errors are still messages, raam#94).
+    Probe(String),
+    /// The frame can't decode this clip, and why; it is marked so and out
+    /// of the queue from now on.
+    Unplayable(String),
+}
+
+impl From<ProviderError> for FetchError {
+    fn from(e: ProviderError) -> Self {
+        FetchError::Provider(e)
+    }
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchError::Provider(e) => write!(f, "{e}"),
+            FetchError::Read { path, source } => write!(f, "read {}: {source}", path.display()),
+            FetchError::NotMade => f.write_str("local preview not made yet"),
+            FetchError::Decode(e) => write!(f, "jpeg decode: {e}"),
+            FetchError::PixelFormat(p) => write!(f, "unsupported pixel format {p:?}"),
+            FetchError::NoLocation => f.write_str("local clip has no location"),
+            FetchError::TooBig => f.write_str("clip bigger than the cache cap"),
+            FetchError::Probe(why) => write!(f, "clip unreadable: {why}"),
+            FetchError::Unplayable(why) => write!(f, "clip can't be played here: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for FetchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            FetchError::Provider(e) => Some(e),
+            FetchError::Read { source, .. } => Some(source),
+            FetchError::Decode(e) => Some(e),
+            FetchError::NotMade
+            | FetchError::PixelFormat(_)
+            | FetchError::NoLocation
+            | FetchError::TooBig
+            | FetchError::Probe(_)
+            | FetchError::Unplayable(_) => None,
+        }
+    }
+}
+
 fn label(kind: SourceKind) -> &'static str {
     match kind {
         SourceKind::Immich => "immich:",
@@ -525,7 +595,7 @@ fn load_photo(
     lib: &Library,
     immich: &mut ImmichProvider,
     e: &MediaItem,
-) -> Result<(Photo, &'static str), String> {
+) -> Result<(Photo, &'static str), FetchError> {
     if e.video {
         return load_video(lib, immich, e);
     }
@@ -543,8 +613,10 @@ fn load_photo(
     };
     let (bytes, from) = match cached {
         Some(path) => {
-            let bytes =
-                std::fs::read(&path).map_err(|err| format!("read {}: {err}", path.display()))?;
+            let bytes = std::fs::read(&path).map_err(|source| FetchError::Read {
+                path: path.clone(),
+                source,
+            })?;
             let _ = db::touch_cached(&lib.db.lock().unwrap(), e.asset);
             (
                 bytes,
@@ -555,20 +627,15 @@ fn load_photo(
                 },
             )
         }
-        None if e.source == SourceKind::Local => return Err("local preview not made yet".into()),
+        None if e.source == SourceKind::Local => return Err(FetchError::NotMade),
         None => {
-            let provider = immich
-                .with_config(lib.config())
-                .map_err(|e| e.to_string())?;
+            let provider = immich.with_config(lib.config())?;
             let media = MediaRef::stored(e.remote_id.clone(), None);
-            let bytes = provider
-                .fetch_preview(&media, 0)
-                .inspect_err(|err| {
-                    if err.is_transport() {
-                        lib.set_online(false);
-                    }
-                })
-                .map_err(|e| e.to_string())?;
+            let bytes = provider.fetch_preview(&media, 0).inspect_err(|err| {
+                if err.is_transport() {
+                    lib.set_online(false);
+                }
+            })?;
             match provider.fetch_focus(&media) {
                 Ok(focus) => {
                     let _ = db::set_focus(&lib.db.lock().unwrap(), e.asset, focus);
@@ -602,10 +669,12 @@ fn load_photo(
 
 /// Decodes a preview JPEG (RGB or grayscale) straight to the RGBA the GPU
 /// upload wants.
-fn decode_jpeg_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+fn decode_jpeg_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), FetchError> {
     let mut dec = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
-    let pixels = dec.decode().map_err(|err| format!("jpeg decode: {err}"))?;
-    let info = dec.info().ok_or("no jpeg info")?;
+    let pixels = dec.decode().map_err(FetchError::Decode)?;
+    let info = dec
+        .info()
+        .expect("jpeg-decoder has the info once decode returned Ok");
     let (w, h) = (u32::from(info.width), u32::from(info.height));
     let rgba = match info.pixel_format {
         jpeg_decoder::PixelFormat::RGB24 => pixels
@@ -615,7 +684,7 @@ fn decode_jpeg_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
             .flat_map(|p| [p[0], p[1], p[2], 255])
             .collect(),
         jpeg_decoder::PixelFormat::L8 => pixels.iter().flat_map(|&l| [l, l, l, 255]).collect(),
-        other => return Err(format!("unsupported pixel format {other:?}")),
+        other => return Err(FetchError::PixelFormat(other)),
     };
     Ok((w, h, rgba))
 }
@@ -628,10 +697,10 @@ fn load_video(
     lib: &Library,
     immich: &mut ImmichProvider,
     e: &MediaItem,
-) -> Result<(Photo, &'static str), String> {
+) -> Result<(Photo, &'static str), FetchError> {
     let (path, from) = match e.source {
         SourceKind::Local => (
-            e.location.clone().ok_or("local clip has no location")?,
+            e.location.clone().ok_or(FetchError::NoLocation)?,
             "local file",
         ),
         SourceKind::Immich => {
@@ -642,30 +711,28 @@ fn load_video(
                     (p.to_string_lossy().into_owned(), "cache")
                 }
                 None => {
-                    let provider = immich
-                        .with_config(lib.config())
-                        .map_err(|e| e.to_string())?;
+                    let provider = immich.with_config(lib.config())?;
                     let media = MediaRef::stored(e.remote_id.clone(), None);
                     match library::fetch_immich_video(lib, provider, e.asset, &media, true) {
                         Ok(Some((p, _))) => (p.to_string_lossy().into_owned(), "server"),
-                        Ok(None) => return Err("clip bigger than the cache cap".into()),
+                        Ok(None) => return Err(FetchError::TooBig),
                         Err(err) => {
                             if err.is_transport() {
                                 lib.set_online(false);
                             }
-                            return Err(err.to_string());
+                            return Err(err.into());
                         }
                     }
                 }
             }
         }
     };
-    let info = lib.host.probe.probe(&path)?;
+    let info = lib.host.probe.probe(&path).map_err(FetchError::Probe)?;
     if let Some(why) = lib.host.probe.unplayable(&info) {
         let files = db::mark_unplayable(&lib.db.lock().unwrap(), e.asset, &why);
         db::remove_files(&files);
         lib.bump();
-        return Err(format!("clip can't be played here: {why}"));
+        return Err(FetchError::Unplayable(why));
     }
     let (width, height) = info.display();
     Ok((
@@ -695,4 +762,49 @@ fn pseudo_random_below(n: u32, counter: u64) -> u32 {
     x ^= x >> 7;
     x ^= x << 17;
     u32::try_from(x % u64::from(n.max(1))).expect("below n, a u32")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn jpeg(w: u16, h: u16, colour: jpeg_encoder::ColorType, pixel: &[u8]) -> Vec<u8> {
+        let data: Vec<u8> = pixel
+            .iter()
+            .copied()
+            .cycle()
+            .take(pixel.len() * usize::from(w) * usize::from(h))
+            .collect();
+        let mut out = Vec::new();
+        jpeg_encoder::Encoder::new(&mut out, 100)
+            .encode(&data, w, h, colour)
+            .unwrap();
+        out
+    }
+
+    /// RGB and grayscale previews come out as RGBA; anything else is an
+    /// error that says which, never a tile of wrong pixels.
+    #[test]
+    fn a_preview_decodes_to_rgba_or_says_why_not() {
+        let (w, h, rgba) =
+            decode_jpeg_rgba(&jpeg(4, 2, jpeg_encoder::ColorType::Rgb, &[200, 100, 50])).unwrap();
+        assert_eq!((w, h, rgba.len()), (4, 2, 4 * 2 * 4));
+        assert!(rgba.chunks(4).all(|p| p[3] == 255));
+
+        let (_, _, grey) =
+            decode_jpeg_rgba(&jpeg(3, 3, jpeg_encoder::ColorType::Luma, &[90])).unwrap();
+        assert!(
+            grey.chunks(4)
+                .all(|p| p[0] == p[1] && p[1] == p[2] && p[3] == 255)
+        );
+
+        assert!(matches!(
+            decode_jpeg_rgba(&jpeg(2, 2, jpeg_encoder::ColorType::Cmyk, &[0, 0, 0, 0])),
+            Err(FetchError::PixelFormat(jpeg_decoder::PixelFormat::CMYK32))
+        ));
+        assert!(matches!(
+            decode_jpeg_rgba(b"not a jpeg"),
+            Err(FetchError::Decode(_))
+        ));
+    }
 }

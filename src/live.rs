@@ -183,7 +183,8 @@ impl Live {
             curation_export: files_dir.join("curation.json"),
         };
         let t = clock::now();
-        let database = db::open(&files_dir.join("raam.db"), &paths.local_dir_default)?;
+        let database = db::open(&files_dir.join("raam.db"), &paths.local_dir_default)
+            .map_err(|e| format!("db: {e}"))?;
         let mut state = AppState::new("", "");
         let (saved_keys, overrides) = {
             let conn = database.lock().unwrap();

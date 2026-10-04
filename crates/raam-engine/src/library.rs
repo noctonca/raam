@@ -277,6 +277,13 @@ pub fn default_cap_mb(files_dir: &Path) -> u32 {
     }
 }
 
+// `statvfs`'s field widths vary by platform (u32 or u64 on macOS, Linux
+// and 32-bit Android), so `u64::from` would be a useless conversion on
+// some and `as` is the one spelling that is lossless and clean on all.
+#[allow(
+    clippy::cast_lossless,
+    reason = "statvfs field widths vary by platform"
+)]
 fn free_bytes(path: &Path) -> u64 {
     let Ok(c) = std::ffi::CString::new(path.to_string_lossy().as_bytes()) else {
         return 0;

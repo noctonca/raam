@@ -121,7 +121,7 @@ impl Preset {
     pub fn touch(&mut self, phase: egui::TouchPhase, pos: egui::Pos2, id: i32) {
         let touch = egui::Event::Touch {
             device_id: egui::TouchDeviceId(0),
-            id: egui::TouchId(id as u32 as u64),
+            id: egui::TouchId(u64::from(id as u32)),
             phase,
             pos,
             force: Some(0.5),

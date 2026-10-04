@@ -693,5 +693,5 @@ fn pseudo_random_below(n: u32, counter: u64) -> u32 {
     x ^= x << 13;
     x ^= x >> 7;
     x ^= x << 17;
-    (x % n.max(1) as u64) as u32
+    (x % u64::from(n.max(1))) as u32
 }

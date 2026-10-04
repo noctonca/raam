@@ -159,7 +159,7 @@ impl Live {
             phase,
             pos,
             device_id: 0,
-            touch_id: id as u32 as u64,
+            touch_id: u64::from(id as u32),
             force,
         }));
     }
@@ -268,7 +268,7 @@ impl Live {
         if since >= Duration::from_secs(10) {
             log::info!(
                 "stats fps={:.1} passes={} overlay={} layout={}",
-                self.frames as f64 / since.as_secs_f64(),
+                f64::from(self.frames) / since.as_secs_f64(),
                 self.passes,
                 self.controller.overlay_open(),
                 self.pipeline.shown_layout().as_deref().unwrap_or("-"),

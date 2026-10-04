@@ -356,7 +356,7 @@ impl Player {
             volume_bits: AtomicU32::new(sound.unwrap_or(0.0).to_bits()),
             max_drift_ms: AtomicI64::new(0),
             av_offset_us: Mutex::new(None),
-            latency_us: latency_ms as i64 * 1000,
+            latency_us: i64::from(latency_ms) * 1000,
             error: Mutex::new(None),
             waker,
             label,
@@ -987,7 +987,7 @@ fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
                     volume = v;
                 }
                 if let Some(ms) = o.position_ms() {
-                    let audio_ms = offset_ms + ms as i64;
+                    let audio_ms = offset_ms + i64::from(ms);
                     // GetPosition went back to 0 once a drained player
                     // stopped: keep the furthest point reached.
                     let before = sh.audio_ms.fetch_max(audio_ms, Ordering::Relaxed);

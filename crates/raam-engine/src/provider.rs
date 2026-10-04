@@ -574,7 +574,11 @@ fn read_exif(path: &Path) -> (u8, Option<i64>) {
         // SAFETY: `tm` is a valid, exclusively borrowed `tm` for the call;
         // mktime only normalises it in place and reads the zone.
         let t = unsafe { libc::mktime(&mut tm) };
-        (t != -1).then_some(t as i64 * 1000)
+        // time_t is i32 on the frame's 32-bit ARM and i64 on 64-bit
+        // hosts, where `i64::from` would be a useless conversion.
+        #[allow(clippy::cast_lossless, reason = "time_t's width varies by target")]
+        let ms = t as i64 * 1000;
+        (t != -1).then_some(ms)
     });
     (orientation, taken_ms)
 }

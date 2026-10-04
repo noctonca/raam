@@ -162,14 +162,80 @@ pub fn now_ms() -> i64 {
     i64::try_from(clock::wall().as_millis()).expect("ms since 1970 fit i64 for 292 million years")
 }
 
+/// Why the database couldn't be opened, or a curation export imported.
+#[derive(Debug)]
+pub enum DbError {
+    /// An SQLite call, and what it was doing.
+    Sqlite {
+        doing: String,
+        source: rusqlite::Error,
+    },
+    /// A migration (numbered from 1) broke a foreign key; it was rolled
+    /// back.
+    ForeignKeys { migration: usize },
+    /// The curation export couldn't be read.
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    /// The curation export isn't JSON.
+    Parse {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    /// The curation export is JSON, but not an export Raam reads.
+    Format { path: PathBuf, format: String },
+    /// The curation export has no `items` list.
+    NoItems { path: PathBuf },
+}
+
+impl DbError {
+    fn sqlite(doing: impl Into<String>) -> impl FnOnce(rusqlite::Error) -> Self {
+        move |source| DbError::Sqlite {
+            doing: doing.into(),
+            source,
+        }
+    }
+}
+
+impl std::fmt::Display for DbError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DbError::Sqlite { doing, source } => write!(f, "{doing}: {source}"),
+            DbError::ForeignKeys { migration } => write!(
+                f,
+                "migration {migration}: foreign key check failed, rolled back"
+            ),
+            DbError::Read { path, source } => write!(f, "read {}: {source}", path.display()),
+            DbError::Parse { path, source } => write!(f, "parse {}: {source}", path.display()),
+            DbError::Format { path, format } => {
+                write!(f, "{}: unknown format {format:?}", path.display())
+            }
+            DbError::NoItems { path } => write!(f, "{}: no items array", path.display()),
+        }
+    }
+}
+
+impl std::error::Error for DbError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            DbError::Sqlite { source, .. } => Some(source),
+            DbError::Read { source, .. } => Some(source),
+            DbError::Parse { source, .. } => Some(source),
+            DbError::ForeignKeys { .. } | DbError::Format { .. } | DbError::NoItems { .. } => None,
+        }
+    }
+}
+
 /// Opens (creating if needed) and migrates the database, and makes sure
 /// both sources exist. Nothing is seeded from the build: the Immich
 /// server and key are entered in the settings UI and live only here.
-pub fn open(path: &Path, local_dir: &str) -> Result<Db, String> {
-    let conn = Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+pub fn open(path: &Path, local_dir: &str) -> Result<Db, DbError> {
+    let conn =
+        Connection::open(path).map_err(DbError::sqlite(format!("open {}", path.display())))?;
     let mode: String = conn
         .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
-        .map_err(|e| format!("journal_mode: {e}"))?;
+        .map_err(DbError::sqlite("journal_mode"))?;
     // Foreign keys stay off until the migrations are done: a table rebuild
     // drops the old table, which with them on would cascade into every row
     // that points at it. The pragma is a no-op inside a transaction, so it
@@ -177,34 +243,34 @@ pub fn open(path: &Path, local_dir: &str) -> Result<Db, String> {
     conn.execute_batch(
         "PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = OFF; PRAGMA cache_size = -1024;",
     )
-    .map_err(|e| format!("pragmas: {e}"))?;
+    .map_err(DbError::sqlite("pragmas"))?;
     let version: usize = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
-        .map_err(|e| e.to_string())?;
+        .map_err(DbError::sqlite("user_version"))?;
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(version) {
-        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-        tx.execute_batch(sql)
-            .map_err(|e| format!("migration {}: {e}", i + 1))?;
+        let migration = i + 1;
+        let doing = || format!("migration {migration}");
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(DbError::sqlite(doing()))?;
+        tx.execute_batch(sql).map_err(DbError::sqlite(doing()))?;
         let broken = tx
             .prepare("PRAGMA foreign_key_check")
             .and_then(|mut s| s.exists([]))
-            .map_err(|e| e.to_string())?;
+            .map_err(DbError::sqlite(doing()))?;
         if broken {
-            return Err(format!(
-                "migration {}: foreign key check failed, rolled back",
-                i + 1
-            ));
+            return Err(DbError::ForeignKeys { migration });
         }
-        tx.pragma_update(None, "user_version", i + 1)
-            .map_err(|e| e.to_string())?;
-        tx.commit().map_err(|e| e.to_string())?;
+        tx.pragma_update(None, "user_version", migration)
+            .map_err(DbError::sqlite(doing()))?;
+        tx.commit().map_err(DbError::sqlite(doing()))?;
         log::info!("db: migrated to schema {}", i + 1);
     }
     conn.execute_batch("PRAGMA foreign_keys = ON;")
-        .map_err(|e| format!("pragmas: {e}"))?;
+        .map_err(DbError::sqlite("pragmas"))?;
     let sqlite: String = conn
         .query_row("SELECT sqlite_version()", [], |r| r.get(0))
-        .map_err(|e| e.to_string())?;
+        .map_err(DbError::sqlite("sqlite_version"))?;
     log::info!(
         "db: {} open, SQLite {sqlite}, journal {mode}, schema {}",
         path.display(),
@@ -216,14 +282,14 @@ pub fn open(path: &Path, local_dir: &str) -> Result<Db, String> {
             "INSERT INTO source (kind, created_at_ms) VALUES ('immich', ?1)",
             params![now_ms()],
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(DbError::sqlite("adding the Immich source"))?;
     }
     if source_id(&conn, SourceKind::Local).is_none() {
         conn.execute(
             "INSERT INTO source (kind, base_url, created_at_ms) VALUES ('local', ?1, ?2)",
             params![local_dir, now_ms()],
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(DbError::sqlite("adding the local source"))?;
     }
     Ok(Arc::new(Mutex::new(conn)))
 }
@@ -809,26 +875,37 @@ pub fn curation_json(conn: &Connection) -> rusqlite::Result<String> {
 /// table is empty and the export file exists. Accepts Raam's own exports
 /// and the prototype's ("immich-frame-rs curation v1"), which is how the
 /// frame's curation crosses installs.
-pub fn import_curation(conn: &Connection, path: &Path) -> Result<usize, String> {
+pub fn import_curation(conn: &Connection, path: &Path) -> Result<usize, DbError> {
     let have: i64 = conn
         .query_row("SELECT COUNT(*) FROM curation", [], |r| r.get(0))
-        .map_err(|e| e.to_string())?;
+        .map_err(DbError::sqlite("counting the curation"))?;
     if have > 0 || !path.is_file() {
         return Ok(0);
     }
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let json: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let text = std::fs::read_to_string(path).map_err(|source| DbError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let json: serde_json::Value = serde_json::from_str(&text).map_err(|source| DbError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })?;
     let format = json.get("format").and_then(|v| v.as_str()).unwrap_or("");
     if !matches!(format, "raam curation v1" | "immich-frame-rs curation v1") {
-        return Err(format!("{}: unknown format {format:?}", path.display()));
+        return Err(DbError::Format {
+            path: path.to_path_buf(),
+            format: format.to_string(),
+        });
     }
     let items = json
         .get("items")
         .and_then(|v| v.as_array())
-        .ok_or("no items array")?;
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        .ok_or_else(|| DbError::NoItems {
+            path: path.to_path_buf(),
+        })?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(DbError::sqlite("importing the curation"))?;
     let mut imported = 0;
     {
         let mut stmt = tx
@@ -836,7 +913,7 @@ pub fn import_curation(conn: &Connection, path: &Path) -> Result<usize, String> 
                 "INSERT OR REPLACE INTO curation (key, hidden, scale_mode, focus_x, focus_y, updated_at_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(DbError::sqlite("importing the curation"))?;
         for item in items {
             let Some(key) = item.get("sha1").and_then(|v| v.as_str()) else {
                 continue;
@@ -858,11 +935,12 @@ pub fn import_curation(conn: &Connection, path: &Path) -> Result<usize, String> 
                     .and_then(|v| v.as_i64())
                     .unwrap_or_else(now_ms),
             ])
-            .map_err(|e| e.to_string())?;
+            .map_err(DbError::sqlite(format!("importing {key}")))?;
             imported += 1;
         }
     }
-    tx.commit().map_err(|e| e.to_string())?;
+    tx.commit()
+        .map_err(DbError::sqlite("importing the curation"))?;
     Ok(imported)
 }
 
@@ -1383,6 +1461,62 @@ mod tests {
     fn synchronous(conn: &Connection) -> i64 {
         conn.query_row("PRAGMA synchronous", [], |r| r.get(0))
             .unwrap()
+    }
+
+    /// A prototype export seeds an empty curation table; an export Raam
+    /// can't read says why, as its own variant, and imports nothing.
+    #[test]
+    fn a_curation_export_imports_once_or_says_why_not() {
+        install_clock();
+        let dir = std::env::temp_dir().join(format!("raam-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("curation.json");
+        let import = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            let db = open(Path::new(":memory:"), "").unwrap();
+            let conn = db.lock().unwrap();
+            import_curation(&conn, &path)
+        };
+
+        assert!(matches!(import("{"), Err(DbError::Parse { .. })));
+        assert!(matches!(
+            import(r#"{"format": "something else v1", "items": []}"#),
+            Err(DbError::Format { format, .. }) if format == "something else v1"
+        ));
+        assert!(matches!(
+            import(r#"{"format": "raam curation v1"}"#),
+            Err(DbError::NoItems { .. })
+        ));
+
+        std::fs::write(
+            &path,
+            r#"{"format": "immich-frame-rs curation v1", "items": [
+                {"sha1": "a", "hidden": true},
+                {"sha1": "b", "scale_mode": "fit", "focus": [0.25, 0.75]},
+                {"hidden": true}
+            ]}"#,
+        )
+        .unwrap();
+        let db = open(Path::new(":memory:"), "").unwrap();
+        let conn = db.lock().unwrap();
+        assert_eq!(
+            import_curation(&conn, &path).unwrap(),
+            2,
+            "the item with no sha1 is skipped"
+        );
+        // Seeded once: a table that has rows is left alone.
+        assert_eq!(import_curation(&conn, &path).unwrap(), 0);
+        let focus: (f64, f64) = conn
+            .query_row(
+                "SELECT focus_x, focus_y FROM curation WHERE key = 'b'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(focus, (0.25, 0.75));
+        drop(conn);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Curation commits with FULL and leaves the connection at NORMAL for

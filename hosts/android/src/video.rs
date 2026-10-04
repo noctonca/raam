@@ -14,8 +14,9 @@ pub struct Decoders {
     waker: AndroidAppWaker,
     /// The music output's latency (ms) as Android reports it, set by
     /// lib.rs, and the calibrated extra on top (the "Audio delay" setting,
-    /// or `debug.video.audio_extra_ms`).
-    pub audio_latency_ms: u32,
+    /// or `debug.video.audio_extra_ms`). The reported latency is never
+    /// negative; it's an i32 as Android's is, and as the extra it adds to.
+    pub audio_latency_ms: i32,
     pub audio_extra_ms: i32,
 }
 
@@ -45,7 +46,7 @@ impl VideoPlayer for Decoders {
         let (label, sound, latency) = match role {
             Role::Probe => (format!("clip {asset_id} (probe)"), None, 0),
             Role::Live { sound } => {
-                let latency = self.audio_latency_ms as i32 + self.audio_extra_ms;
+                let latency = self.audio_latency_ms + self.audio_extra_ms;
                 if sound.is_some() {
                     log::info!(
                         "audio delay applied: {latency} ms ({} reported + {} calibrated)",

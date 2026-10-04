@@ -14,7 +14,6 @@
 //! I want is on the texture" from "an older one, or none yet".
 use jni::JNIEnv;
 use jni::objects::{GlobalRef, JFloatArray, JValue};
-use jni::sys::jint;
 use ndk::native_window::NativeWindow;
 
 pub struct VideoTexture {
@@ -36,7 +35,9 @@ impl VideoTexture {
                 let st = env.new_object(
                     "android/graphics/SurfaceTexture",
                     "(I)V",
-                    &[JValue::Int(tex_id as jint)],
+                    // Java's int carries the GLuint name's bits, as GL's own
+                    // Java bindings do.
+                    &[JValue::Int(tex_id.cast_signed())],
                 )?;
                 let surface = env.new_object(
                     "android/view/Surface",

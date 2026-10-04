@@ -157,9 +157,9 @@ impl Painter {
                 None => glTexImage2D(
                     GL_TEXTURE_2D,
                     0,
-                    GL_RGBA as i32,
-                    w as i32,
-                    h as i32,
+                    gl_enum_param(GL_RGBA),
+                    gl_sizei(w),
+                    gl_sizei(h),
                     0,
                     GL_RGBA,
                     GL_UNSIGNED_BYTE,
@@ -168,10 +168,10 @@ impl Painter {
                 Some([x, y]) => glTexSubImage2D(
                     GL_TEXTURE_2D,
                     0,
-                    x as i32,
-                    y as i32,
-                    w as i32,
-                    h as i32,
+                    gl_sizei(x),
+                    gl_sizei(y),
+                    gl_sizei(w),
+                    gl_sizei(h),
                     GL_RGBA,
                     GL_UNSIGNED_BYTE,
                     rgba.as_ptr() as *const c_void,
@@ -216,14 +216,14 @@ impl Painter {
             glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
             glBufferData(
                 GL_ARRAY_BUFFER,
-                (verts.len() * std::mem::size_of::<GpuVertex>()) as isize,
+                gl_byte_len(&verts),
                 verts.as_ptr() as *const c_void,
                 GL_DYNAMIC_DRAW,
             );
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ibo);
             glBufferData(
                 GL_ELEMENT_ARRAY_BUFFER,
-                (indices.len() * 2) as isize,
+                gl_byte_len(&indices),
                 indices.as_ptr() as *const c_void,
                 GL_DYNAMIC_DRAW,
             );
@@ -268,7 +268,7 @@ impl Painter {
             glEnableVertexAttribArray(p.a_pos);
             glEnableVertexAttribArray(p.a_uv);
             glEnableVertexAttribArray(p.a_color);
-            let stride = std::mem::size_of::<GpuVertex>() as i32;
+            let stride = gl_sizei(std::mem::size_of::<GpuVertex>());
             for cmd in &self.cmds {
                 // The host sets a pass's textures before uploading its
                 // meshes (`app::EguiOut`), so every mesh's texture is here.

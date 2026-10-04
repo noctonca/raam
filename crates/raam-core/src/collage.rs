@@ -242,6 +242,9 @@ impl Layout {
     /// separator half. A row shares out the space left after margins by
     /// weight, as Android does: each slot gets the truncated share of what
     /// is left and the last slot the remainder.
+    ///
+    /// # Panics
+    /// Never: a layout's slots are a static handful.
     pub fn rects(&self, w: i32, h: i32, margin: i32) -> Vec<Rect> {
         let m = |on: bool| if on { margin } else { 0 };
         match self.arrangement {
@@ -252,7 +255,8 @@ impl Layout {
                     .map(|s| m(s.margins[0]) + m(s.margins[2]))
                     .sum();
                 let mut excess = w - margins;
-                let mut weight_left = self.slots.len() as i32;
+                let mut weight_left = i32::try_from(self.slots.len())
+                    .expect("a layout's slots, a static handful, fit i32");
                 let mut x = 0;
                 self.slots
                     .iter()

@@ -183,7 +183,7 @@ pub unsafe fn glGetShaderiv(shader: GlUint, pname: GlEnum, params: *mut GlInt) {
         match pname {
             GL_INFO_LOG_LENGTH => {
                 s.gl.get_shader_info_log(&sh)
-                    .map_or(0, |l| l.len() as GlInt + 1)
+                    .map_or(0, |l| gl_sizei(l.len() + 1))
             }
             _ => {
                 s.gl.get_shader_parameter(&sh, pname)
@@ -245,7 +245,7 @@ pub unsafe fn glGetProgramiv(program: GlUint, pname: GlEnum, params: *mut GlInt)
         match pname {
             GL_INFO_LOG_LENGTH => {
                 s.gl.get_program_info_log(&p)
-                    .map_or(0, |l| l.len() as GlInt + 1)
+                    .map_or(0, |l| gl_sizei(l.len() + 1))
             }
             _ => {
                 s.gl.get_program_parameter(&p, pname)
@@ -293,6 +293,9 @@ pub unsafe fn glGetAttribLocation(program: GlUint, name: *const c_char) -> GlInt
 
 /// -1 for a uniform the program doesn't have (or optimised out), as in GL;
 /// the glUniform calls ignore -1.
+///
+/// # Panics
+/// Past 2^31 live uniform handles; programs are linked a few at startup.
 pub unsafe fn glGetUniformLocation(program: GlUint, name: *const c_char) -> GlInt {
     // SAFETY: `name` is NUL-terminated and valid for the call, by GL's
     // contract.
@@ -303,7 +306,8 @@ pub unsafe fn glGetUniformLocation(program: GlUint, name: *const c_char) -> GlIn
             .get(program)
             .and_then(|p| s.gl.get_uniform_location(&p, &name))
         {
-            Some(loc) => s.uniforms.add(loc) as GlInt,
+            Some(loc) => GlInt::try_from(s.uniforms.add(loc))
+                .expect("live uniform handles, a few per program, fit a GLint"),
             None => -1,
         }
     })

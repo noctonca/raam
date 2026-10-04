@@ -120,27 +120,28 @@ fn pad_bitmap(src: &[u8], w: usize, h: usize, bleed: usize) -> (Vec<u8>, usize, 
 /// Two box-blur passes, running sums (plain nested loops scale with the
 /// radius, and the clock's radius is the largest).
 fn box_blur(src: &[u8], w: usize, h: usize, r: usize) -> Vec<u8> {
-    let r = r as i32;
+    // The window at `i` is `i - r ..= i + r`, clipped to the line: it
+    // starts as `0 ..= r`, takes in `i + r + 1` and lets go of `i - r`
+    // once that is on the line.
     let pass =
         |src: &[u8], len: usize, count: usize, at: &dyn Fn(usize, usize) -> usize| -> Vec<u8> {
             let mut out = vec![0u8; src.len()];
             for line in 0..count {
                 let mut sum = 0u32;
                 let mut n = 0u32;
-                for i in 0..=r.min(len as i32 - 1) {
-                    sum += u32::from(src[at(line, i as usize)]);
+                for i in 0..len.min(r + 1) {
+                    sum += u32::from(src[at(line, i)]);
                     n += 1;
                 }
-                for i in 0..len as i32 {
-                    out[at(line, i as usize)] = (sum / n.max(1)) as u8;
+                for i in 0..len {
+                    out[at(line, i)] = (sum / n.max(1)) as u8;
                     let add = i + r + 1;
-                    if add < len as i32 {
-                        sum += u32::from(src[at(line, add as usize)]);
+                    if add < len {
+                        sum += u32::from(src[at(line, add)]);
                         n += 1;
                     }
-                    let sub = i - r;
-                    if sub >= 0 {
-                        sum -= u32::from(src[at(line, sub as usize)]);
+                    if i >= r {
+                        sum -= u32::from(src[at(line, i - r)]);
                         n -= 1;
                     }
                 }
@@ -309,9 +310,9 @@ impl FontAtlas {
             glTexImage2D(
                 GL_TEXTURE_2D,
                 0,
-                GL_ALPHA as i32,
-                ATLAS_WIDTH as i32,
-                atlas_h as i32,
+                gl_enum_param(GL_ALPHA),
+                gl_sizei(ATLAS_WIDTH),
+                gl_sizei(atlas_h),
                 0,
                 GL_ALPHA,
                 GL_UNSIGNED_BYTE,

@@ -646,7 +646,7 @@ mod worker {
                 Event::ScanResults => {
                     self.wifi.nearby = self.read_scan()?;
                     self.wifi.scanning = false;
-                    let t = clock::local(clock::wall().as_secs() as i64);
+                    let t = clock::local(clock::wall_secs());
                     self.wifi.scanned_at = format!("{:02}:{:02}", t.hour, t.min);
                 }
                 Event::Connected(id) => {

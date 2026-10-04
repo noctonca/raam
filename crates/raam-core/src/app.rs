@@ -262,7 +262,7 @@ pub struct App {
     egui_uploaded: bool,
     last_status: String,
     // Re-derive the overlay's text only when one of these changes.
-    clock_inputs: Option<(u64, u64, ClockStyle, Corner, bool, bool)>,
+    clock_inputs: Option<(i64, u64, ClockStyle, Corner, bool, bool)>,
     weather_status: String,
     // What was last sent for saving, so only changes are written.
     saved_rows: Vec<(&'static str, serde_json::Value)>,
@@ -565,8 +565,8 @@ impl App {
                 && !self.overlay_open
                 && let Some(p) = deps.power.as_deref_mut()
             {
-                let wake_in = schedule::until(sched.wake_min, now_sod);
-                let wake_ms = (now_epoch + wake_in.as_secs() as i64) * 1000;
+                let wake_in = schedule::until_secs(sched.wake_min, now_sod);
+                let wake_ms = (now_epoch + i64::from(wake_in)) * 1000;
                 match p.set_wake_alarm(wake_ms) {
                     Ok(()) => {
                         log::info!(
@@ -578,7 +578,7 @@ impl App {
                                 "idle in sleep hours"
                             },
                             schedule::fmt_hm(sched.wake_min),
-                            wake_in.as_secs()
+                            wake_in
                         );
                         self.asleep_since = Some(clock::now());
                         self.manual_wake = None;
@@ -694,7 +694,7 @@ impl App {
         // Clock overlay: over the slideshow (transitions included), under
         // the egui chrome. The host rebuilds and draws; the text and its
         // change detection live here.
-        let minute = clock::wall().as_secs() / 60;
+        let minute = clock::wall_secs() / 60;
         let weather = stage.weather.filter(|_| shows_weather);
         let clock_inputs = (
             minute,
@@ -729,7 +729,7 @@ impl App {
                 _ if weather.is_none() => String::new(),
                 _ => "locating...".to_string(),
             };
-            let now = clock::local((minute * 60) as i64);
+            let now = clock::local(minute * 60);
             let content = overlay::content(
                 self.state.settings.clock_style,
                 self.state.settings.clock_24h,

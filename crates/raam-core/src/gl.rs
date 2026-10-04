@@ -31,6 +31,46 @@ pub type GlEnum = u32;
 pub type GlSizei = i32;
 pub type GlBitfield = u32;
 
+/// A GL enum where GL takes it as a GLint (glTexParameteri's param,
+/// glTexImage2D's internalformat). Every GL enum is below 2^31, so the
+/// value is unchanged; in a `const` the check runs at compile time.
+///
+/// # Panics
+/// On an enum past `GlInt::MAX`, which no GL enum is.
+#[must_use]
+pub const fn gl_enum_param(e: GlEnum) -> GlInt {
+    let param = e.cast_signed();
+    assert!(param >= 0, "GL enum past GLint::MAX");
+    param
+}
+
+/// A size, count, stride or offset where GL takes a GLsizei (or a GLint
+/// that can't be negative): texture sides and offsets, vertex counts. They
+/// are bounded far below 2^31 (a texture side by GL_MAX_TEXTURE_SIZE, a
+/// vertex count by the buffer it's drawn from), so the value is unchanged.
+///
+/// # Panics
+/// On a value past `GlSizei::MAX`: a size that big is a bug upstream.
+#[must_use]
+#[track_caller]
+pub fn gl_sizei<N>(n: N) -> GlSizei
+where
+    N: TryInto<GlSizei> + Copy + std::fmt::Display,
+{
+    n.try_into()
+        .unwrap_or_else(|_| panic!("GL size {n} past GLsizei::MAX"))
+}
+
+/// A slice's length in bytes as GL's GLsizeiptr (glBufferData's size).
+/// Rust caps an allocation at `isize::MAX` bytes, so this can't fail.
+///
+/// # Panics
+/// Never: no slice is longer than `isize::MAX` bytes.
+#[must_use]
+pub fn gl_byte_len<T>(data: &[T]) -> isize {
+    isize::try_from(size_of_val(data)).expect("a slice spans at most isize::MAX bytes")
+}
+
 pub const GL_COLOR_BUFFER_BIT: GlBitfield = 0x4000;
 pub const GL_VERTEX_SHADER: GlEnum = 0x8B31;
 pub const GL_FRAGMENT_SHADER: GlEnum = 0x8B30;
@@ -306,7 +346,7 @@ mod desktop {
             tex_image_2d(
                 target,
                 level,
-                GL_R8 as GlInt,
+                gl_enum_param(GL_R8),
                 width,
                 height,
                 border,
@@ -314,7 +354,7 @@ mod desktop {
                 type_,
                 pixels,
             );
-            let swizzle = [GL_ZERO, GL_ZERO, GL_ZERO, GL_RED as GlInt];
+            let swizzle = [GL_ZERO, GL_ZERO, GL_ZERO, gl_enum_param(GL_RED)];
             // SAFETY: SWIZZLE_RGBA reads four GLints, and `swizzle` is four.
             glTexParameteriv(target, GL_TEXTURE_SWIZZLE_RGBA, swizzle.as_ptr());
         }
@@ -407,13 +447,15 @@ pub use gles::{bind_vao, glReadPixels};
 /// # Safety
 /// Requires a current GL context with a texture bound to `GL_TEXTURE_2D`.
 pub unsafe fn set_linear_clamp() {
+    const LINEAR: GlInt = gl_enum_param(GL_LINEAR);
+    const CLAMP: GlInt = gl_enum_param(GL_CLAMP_TO_EDGE);
     // SAFETY: the caller's contract: a current GL context with a texture
     // bound.
     unsafe {
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as GlInt);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as GlInt);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as GlInt);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as GlInt);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, CLAMP);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, CLAMP);
     }
 }
 
@@ -624,7 +666,7 @@ impl RenderTarget {
             glTexImage2D(
                 GL_TEXTURE_2D,
                 0,
-                GL_RGBA as i32,
+                gl_enum_param(GL_RGBA),
                 width,
                 height,
                 0,

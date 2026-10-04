@@ -213,7 +213,7 @@ impl ClockOverlay {
         // line above it. One draw per (atlas, pass).
         for shadow in [true, false] {
             for atlas in [&self.clock, &self.date_row, &self.small, &self.weather] {
-                let first = (verts.len() / 4) as i32;
+                let first = gl_sizei(verts.len() / 4);
                 for (a, text, x, baseline) in &lines {
                     if std::ptr::eq(*a, atlas) {
                         let (x, y) = if shadow {
@@ -224,7 +224,7 @@ impl ClockOverlay {
                         atlas.append_line(&mut verts, text, x, y, shadow);
                     }
                 }
-                let count = (verts.len() / 4) as i32 - first;
+                let count = gl_sizei(verts.len() / 4) - first;
                 if count > 0 {
                     let color = if shadow { shadow_color } else { color };
                     draws.push(Draw {
@@ -245,7 +245,7 @@ impl ClockOverlay {
                 glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
                 glBufferData(
                     GL_ARRAY_BUFFER,
-                    (verts.len() * 4) as isize,
+                    gl_byte_len(&verts),
                     verts.as_ptr() as *const c_void,
                     GL_STATIC_DRAW,
                 );

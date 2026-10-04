@@ -494,7 +494,7 @@ fn android_main(app: AndroidApp) {
                 match pw.output_latency_ms() {
                     Ok(ms) => {
                         log::info!("music output latency {ms} ms (AudioManager.getOutputLatency)");
-                        p.video.player_mut().audio_latency_ms = ms.max(0) as u32;
+                        p.video.player_mut().audio_latency_ms = ms.max(0);
                     }
                     Err(e) => log::warn!("no output latency ({e}), using 0"),
                 }

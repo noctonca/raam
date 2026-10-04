@@ -39,14 +39,14 @@ impl Backdrop {
             glBindBuffer(GL_ARRAY_BUFFER, bufs[0]);
             glBufferData(
                 GL_ARRAY_BUFFER,
-                size_of_val(&quad) as isize,
+                gl_byte_len(&quad),
                 quad.as_ptr() as *const c_void,
                 GL_STATIC_DRAW,
             );
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, bufs[1]);
             glBufferData(
                 GL_ELEMENT_ARRAY_BUFFER,
-                size_of_val(&idx) as isize,
+                gl_byte_len(&idx),
                 idx.as_ptr() as *const c_void,
                 GL_STATIC_DRAW,
             );
@@ -140,7 +140,7 @@ unsafe fn texture(w: i32, h: i32, seed: u32) -> GlUint {
         glTexImage2D(
             GL_TEXTURE_2D,
             0,
-            GL_RGBA as GlInt,
+            gl_enum_param(GL_RGBA),
             w,
             h,
             0,

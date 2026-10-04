@@ -2551,10 +2551,14 @@ pub fn number_picker(
 
 /// A time of day in `step`-minute steps (a `number_picker`): - and + step
 /// it, wrapping at midnight; the slider covers the day.
+///
+/// # Panics
+/// If `step` is past `i32::MAX`: a step is minutes within a day.
 pub fn time_picker(ui: &mut Ui, minutes: &mut u32, step: u32) -> bool {
-    const DAY: u32 = 24 * 60;
+    const DAY: i32 = 24 * 60;
+    let step = i32::try_from(step).expect("a time step, minutes within a day, fits i32");
     let mut v = *minutes as f32;
-    let wrap = |v: f32, dir: i32| ((v as i32 + dir * step as i32).rem_euclid(DAY as i32)) as f32;
+    let wrap = |v: f32, dir: i32| ((v as i32 + dir * step).rem_euclid(DAY)) as f32;
     let changed = number_picker(
         ui,
         &mut v,
@@ -2620,7 +2624,8 @@ fn step_focus(ctx: &egui::Context, order: &[Id], own_arrows: Option<Id>) {
         return;
     };
     let (step, any) = ctx.input(|inp| {
-        let n = |k| inp.num_presses(k) as i32;
+        let n =
+            |k| i32::try_from(inp.num_presses(k)).expect("one frame's presses of a key fit i32");
         let horizontal = if own_arrows == Some(focused) {
             0
         } else {
@@ -2642,7 +2647,9 @@ fn step_focus(ctx: &egui::Context, order: &[Id], own_arrows: Option<Id>) {
     // The arrow lock only holds from a control's second pass with the
     // focus: egui mustn't take a step of its own as well.
     ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
-    let j = (i as i32 + step).clamp(0, order.len() as i32 - 1) as usize;
+    // One screen's controls, a few dozen.
+    let index = |k: usize| i32::try_from(k).expect("a focus order index fits i32");
+    let j = (index(i) + step).clamp(0, index(order.len() - 1)) as usize;
     if j != i {
         ctx.memory_mut(|m| m.request_focus(order[j]));
     }

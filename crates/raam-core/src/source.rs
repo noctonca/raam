@@ -6,7 +6,7 @@
 //! core -> source again on Prev, carrying the fetch side's fields through
 //! the core untouched).
 
-use crate::{clock, collage};
+use crate::{clock, collage, num};
 pub use raam_model::{MediaItem, Photo, Plan, SourceKind, TilePhoto, VideoClip};
 use std::time::Duration;
 
@@ -74,11 +74,12 @@ pub fn shrink_to_cover(photo: &mut Photo, rect: collage::Rect) -> Duration {
     if photo.width == 0 || photo.height == 0 {
         return clock::elapsed(start);
     }
-    let (tw, th) = (rect.w as u32, rect.h as u32);
+    let side = |n: i32| u32::try_from(n).expect("a tile's side, asserted positive above");
+    let (tw, th) = (side(rect.w), side(rect.h));
     let s = (tw as f32 / photo.width as f32).max(th as f32 / photo.height as f32);
     let (cover_w, cover_h) = (
-        (photo.width as f32 * s).ceil() as u32,
-        (photo.height as f32 * s).ceil() as u32,
+        num::sat_u32((photo.width as f32 * s).ceil()),
+        num::sat_u32((photo.height as f32 * s).ceil()),
     );
     while photo.width / 2 >= cover_w && photo.height / 2 >= cover_h {
         let (w, h) = (photo.width / 2, photo.height / 2);

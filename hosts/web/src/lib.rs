@@ -160,7 +160,7 @@ impl Live {
             phase,
             pos,
             device_id: 0,
-            touch_id: u64::from(id as u32),
+            touch_id: u64::from(id.cast_unsigned()),
             force,
         }));
     }
@@ -478,8 +478,8 @@ pub fn start() -> Result<(), JsValue> {
         .get_element_by_id("frame")
         .ok_or("no #frame canvas")?
         .dyn_into()?;
-    canvas.set_width(w as u32);
-    canvas.set_height(h as u32);
+    canvas.set_width(from_gl_size(w));
+    canvas.set_height(from_gl_size(h));
     make_context(&canvas).map_err(|e| JsValue::from_str(&e))?;
     switches::set_fail(&QuerySwitches.get("debug.video.fail"));
 

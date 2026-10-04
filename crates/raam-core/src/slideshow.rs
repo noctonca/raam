@@ -268,8 +268,8 @@ fn kb_focal(
             let window = fill_uv(
                 meta.width,
                 meta.height,
-                target_w as u32,
-                target_h as u32,
+                from_gl_size(target_w),
+                from_gl_size(target_h),
                 meta.fill_centre,
             );
             face_focal_to_fill_uv(u, v, window)
@@ -587,8 +587,9 @@ impl Tile {
             .as_ref()
             .and_then(|v| v.bg.as_ref())
             .map_or(0, |b| b.width * b.height);
-        4 * (self.source.width * self.source.height + self.target.width * self.target.height + bg)
-            as usize
+        4 * from_gl_size::<_, usize>(
+            self.source.width * self.source.height + self.target.width * self.target.height + bg,
+        )
     }
 }
 
@@ -1872,8 +1873,8 @@ impl<P: VideoPlayer> Pipeline<P> {
                 let window = fill_uv(
                     meta.width,
                     meta.height,
-                    target.width as u32,
-                    target.height as u32,
+                    from_gl_size(target.width),
+                    from_gl_size(target.height),
                     meta.fill_centre,
                 );
                 target.bind_and_viewport();
@@ -1924,7 +1925,7 @@ impl<P: VideoPlayer> Pipeline<P> {
     /// targets keep the screen's aspect; the tile draw stretches them back.
     fn run_blur_chain(&self, source: GlUint, photo_w: u32, photo_h: u32, tile_w: i32, tile_h: i32) {
         let [a, b] = &self.blur_targets;
-        let cover = cover_uv(photo_w, photo_h, tile_w as u32, tile_h as u32);
+        let cover = cover_uv(photo_w, photo_h, from_gl_size(tile_w), from_gl_size(tile_h));
         let texel_h = (1.0 / a.width as f32, 0.0);
         let texel_v = (0.0, 1.0 / a.height as f32);
         // SAFETY: a Pipeline lives on the render thread with its context

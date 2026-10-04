@@ -15,6 +15,7 @@ pub mod gl;
 pub mod icons;
 pub mod kit;
 pub mod network;
+pub mod num;
 pub mod overlay;
 pub mod painter;
 mod palette;

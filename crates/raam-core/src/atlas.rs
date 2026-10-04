@@ -8,8 +8,8 @@
 //! from weather_icons.rs, on private-use codepoints) so they are laid out
 //! and shadowed exactly like text, and the blur radius is a parameter so
 //! the 80px clock can have a softer shadow than the smaller lines.
-use crate::clock;
 use crate::gl::*;
+use crate::{clock, num};
 use std::collections::HashMap;
 use std::ffi::c_void;
 
@@ -200,7 +200,7 @@ fn pack(font: &fontdue::Font, px: f32, shadow: Shadow, extra: Vec<Raster>) -> Pa
             let mut b = box_blur(&padded, pw, ph, shadow.radius);
             if shadow.gain != 1.0 {
                 b.iter_mut()
-                    .for_each(|v| *v = (f32::from(*v) * shadow.gain).min(255.0) as u8);
+                    .for_each(|v| *v = num::sat_u8(f32::from(*v) * shadow.gain));
             }
             (b, pw, ph)
         })

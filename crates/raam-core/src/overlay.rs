@@ -13,9 +13,8 @@
 //! a setting); every other frame is just the bind plus 2 draw calls per
 //! atlas.
 use crate::atlas::{FontAtlas, Raster, Shadow};
-use crate::clock;
 use crate::gl::*;
-use crate::weather_icons;
+use crate::{clock, num, weather_icons};
 use raam_model::{ClockStyle, Corner, LocalTime};
 use std::ffi::c_void;
 
@@ -109,7 +108,7 @@ impl ClockOverlay {
             fontdue::Font::from_bytes(ROBOTO_BOLD, fontdue::FontSettings::default()).unwrap();
         // Roboto's cap height is 0.711 em; icons are centred on it.
         let icon_set = |px: f32, scale: f32, gap: f32| {
-            weather_icons::all((px * scale).round() as usize, px * 0.711, gap)
+            weather_icons::all(num::sat_usize((px * scale).round()), px * 0.711, gap)
         };
         // SAFETY: this constructor's own contract: the context is current.
         let atlas = |font: &fontdue::Font, px: f32, shadow: Shadow, extra: Vec<Raster>| unsafe {
@@ -403,21 +402,18 @@ pub fn content(style: ClockStyle, h24: bool, t: &LocalTime, weather: Option<Weat
         }
     };
     // A month or weekday out of range is a clock bug, not a time to show.
-    assert!(
-        (0..12).contains(&t.mon),
-        "LocalTime month {} out of range",
-        t.mon
-    );
-    assert!(
-        (0..7).contains(&t.wday),
-        "LocalTime weekday {} out of range",
-        t.wday
-    );
-    let mon = MONTHS[t.mon as usize];
+    let name = |names: &[&'static str], i: i32, what: &str| {
+        usize::try_from(i)
+            .ok()
+            .and_then(|i| names.get(i).copied())
+            .unwrap_or_else(|| panic!("LocalTime {what} {i} out of range"))
+    };
+    let mon = name(&MONTHS, t.mon, "month");
+    let day = name(&DAYS, t.wday, "weekday");
     Content {
         time,
         short_date: format!("{mon} {}", t.mday),
-        long_date: format!("{}, {mon} {}", DAYS[t.wday as usize], t.mday),
+        long_date: format!("{day}, {mon} {}", t.mday),
         weather,
     }
 }

@@ -198,8 +198,15 @@ pub fn probe(path: &str) -> Result<ClipInfo, String> {
         .and_then(|(_, mut f)| f.str("mime").map(str::to_string));
     Ok(ClipInfo {
         mime,
-        coded_w: video.i32("width").unwrap_or(0).max(0) as u32,
-        coded_h: video.i32("height").unwrap_or(0).max(0) as u32,
+        // Missing or negative (a broken header): 0.
+        coded_w: video
+            .i32("width")
+            .and_then(|w| u32::try_from(w).ok())
+            .unwrap_or(0),
+        coded_h: video
+            .i32("height")
+            .and_then(|h| u32::try_from(h).ok())
+            .unwrap_or(0),
         rotation: video.i32("rotation-degrees").unwrap_or(0).rem_euclid(360),
         duration_us: video.i64("durationUs").unwrap_or(0),
         has_audio: audio.is_some(),

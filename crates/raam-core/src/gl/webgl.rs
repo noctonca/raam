@@ -314,11 +314,12 @@ pub unsafe fn glGetUniformLocation(program: GlUint, name: *const c_char) -> GlIn
 }
 
 fn uniform(location: GlInt, f: impl FnOnce(&Wgl, &WebGlUniformLocation)) {
-    if location < 0 {
+    // -1 is "no such uniform", which GL ignores.
+    let Ok(location) = GlUint::try_from(location) else {
         return;
-    }
+    };
     with(|s| {
-        if let Some(u) = s.uniforms.get(location as GlUint) {
+        if let Some(u) = s.uniforms.get(location) {
             f(&s.gl, &u)
         }
     })
@@ -361,7 +362,7 @@ pub unsafe fn glUniformMatrix4fv(
 // Buffers and drawing.
 
 pub unsafe fn glGenBuffers(n: GlSizei, buffers: *mut GlUint) {
-    for i in 0..n.max(0) as usize {
+    for i in 0..from_gl_size(n.max(0)) {
         let id = with(|s| s.gl.create_buffer().map_or(0, |b| s.buffers.add(b)));
         // SAFETY: `buffers` holds `n` GlUints by GL's contract, and i < n.
         unsafe { *buffers.add(i) = id };
@@ -374,7 +375,7 @@ pub unsafe fn glBindBuffer(target: GlEnum, buffer: GlUint) {
 
 pub unsafe fn glBufferData(target: GlEnum, size: isize, data: *const c_void, usage: GlEnum) {
     // SAFETY: non-null `data` holds `size` bytes, by GL's contract.
-    match unsafe { bytes(data, size as usize) } {
+    match unsafe { bytes(data, from_gl_size(size)) } {
         Some(b) => with(|s| s.gl.buffer_data_with_u8_array(target, b, usage)),
         None => with(|s| s.gl.buffer_data_with_i32(target, size as i32, usage)),
     }
@@ -441,7 +442,7 @@ pub unsafe fn glDrawElements(mode: GlEnum, count: GlSizei, type_: GlEnum, indice
 // Textures and framebuffers.
 
 pub unsafe fn glGenTextures(n: GlSizei, textures: *mut GlUint) {
-    for i in 0..n.max(0) as usize {
+    for i in 0..from_gl_size(n.max(0)) {
         let id = with(|s| s.gl.create_texture().map_or(0, |t| s.textures.add(t)));
         // SAFETY: `textures` holds `n` GlUints by GL's contract, and i < n.
         unsafe { *textures.add(i) = id };
@@ -476,7 +477,12 @@ pub unsafe fn glTexImage2D(
     // SAFETY: non-null `pixels` holds a width x height image in `format`
     // by GL's contract, at least width * height * bpp bytes (row padding
     // only adds to it).
-    let data = unsafe { bytes(pixels, width as usize * height as usize * bpp(format)) };
+    let data = unsafe {
+        bytes(
+            pixels,
+            from_gl_size::<_, usize>(width) * from_gl_size::<_, usize>(height) * bpp(format),
+        )
+    };
     with(|s| {
         let r =
             s.gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
@@ -508,7 +514,12 @@ pub unsafe fn glTexSubImage2D(
     pixels: *const c_void,
 ) {
     // SAFETY: as glTexImage2D's: at least width * height * bpp bytes.
-    let data = unsafe { bytes(pixels, width as usize * height as usize * bpp(format)) };
+    let data = unsafe {
+        bytes(
+            pixels,
+            from_gl_size::<_, usize>(width) * from_gl_size::<_, usize>(height) * bpp(format),
+        )
+    };
     with(|s| {
         let r =
             s.gl.tex_sub_image_2d_with_i32_and_i32_and_u32_and_type_and_opt_u8_array(
@@ -521,7 +532,7 @@ pub unsafe fn glTexSubImage2D(
 }
 
 pub unsafe fn glDeleteTextures(n: GlSizei, textures: *const GlUint) {
-    for i in 0..n.max(0) as usize {
+    for i in 0..from_gl_size(n.max(0)) {
         // SAFETY: `textures` holds `n` GlUints by GL's contract, and i < n.
         let id = unsafe { *textures.add(i) };
         with(|s| {
@@ -533,7 +544,7 @@ pub unsafe fn glDeleteTextures(n: GlSizei, textures: *const GlUint) {
 }
 
 pub unsafe fn glGenFramebuffers(n: GlSizei, framebuffers: *mut GlUint) {
-    for i in 0..n.max(0) as usize {
+    for i in 0..from_gl_size(n.max(0)) {
         let id = with(|s| {
             s.gl.create_framebuffer()
                 .map_or(0, |f| s.framebuffers.add(f))
@@ -573,7 +584,7 @@ pub unsafe fn glCheckFramebufferStatus(target: GlEnum) -> GlEnum {
 }
 
 pub unsafe fn glDeleteFramebuffers(n: GlSizei, framebuffers: *const GlUint) {
-    for i in 0..n.max(0) as usize {
+    for i in 0..from_gl_size(n.max(0)) {
         // SAFETY: `framebuffers` holds `n` GlUints by GL's contract, and
         // i < n.
         let id = unsafe { *framebuffers.add(i) };

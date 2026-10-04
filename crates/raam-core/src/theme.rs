@@ -13,7 +13,7 @@
 //!
 //! Tokens are a vocabulary: some aren't used by the product yet.
 #![allow(dead_code)]
-use crate::palette;
+use crate::{num, palette};
 use egui::epaint::FontColorTransferFunction;
 use egui::epaint::text::TextOptions;
 use egui::style::{HandleShape, Selection, TextCursorStyle, WidgetVisuals, Widgets};
@@ -132,7 +132,9 @@ pub fn scheme_of(ctx: &egui::Context) -> Scheme {
 /// M3 state layer: `on` drawn over `base` at `opacity`, precomputed because
 /// egui has no overlay concept of its own (one fill per widget state).
 pub fn layer(base: Color32, on: Color32, opacity: f32) -> Color32 {
-    let mix = |b: u8, o: u8| (f32::from(b) + (f32::from(o) - f32::from(b)) * opacity).round() as u8;
+    let mix = |b: u8, o: u8| {
+        num::sat_u8((f32::from(b) + (f32::from(o) - f32::from(b)) * opacity).round())
+    };
     Color32::from_rgba_unmultiplied(
         mix(base.r(), on.r()),
         mix(base.g(), on.g()),

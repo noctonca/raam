@@ -7,9 +7,8 @@
 //! separator, scroll area, modal) is used as is, through the Style that
 //! `theme::install` sets. Its checkbox, slider and text edit didn't pass on
 //! the frame, so the kit has its own (the text field keeps egui's editing).
-use crate::icons;
-use crate::schedule;
 use crate::theme::{self, Scheme, Type, layer, scheme, shape, size, space, state};
+use crate::{icons, num, schedule};
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{
     Align, Color32, CornerRadius, FontId, Frame, Galley, Id, Key, LayerId, Margin, Painter, Rangef,
@@ -49,7 +48,7 @@ fn with_state(base: Color32, on: Color32, resp: &Response) -> Color32 {
 
 /// `c` at `opacity` (0..1), as the state layers draw it.
 fn at_opacity(c: Color32, opacity: f32) -> Color32 {
-    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (opacity * 255.0) as u8)
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), num::sat_u8(opacity * 255.0))
 }
 
 fn icon_font(px: f32, filled: bool) -> FontId {
@@ -265,7 +264,7 @@ fn focus_ring(ui: &Ui, resp: &Response, shape: Rect, corner: CornerRadius, room:
         );
         return;
     }
-    let grow = |r: u8| r.saturating_add(RING_GAP as u8);
+    let grow = |r: u8| r.saturating_add(num::sat_u8(RING_GAP));
     let corner = CornerRadius {
         nw: grow(corner.nw),
         ne: grow(corner.ne),
@@ -567,7 +566,7 @@ fn one_line(ui: &Ui, text: &str, ty: Type, colour: Color32, max_w: f32) -> Arc<G
 /// content), so a colour meant to end up at `alpha` is drawn at this.
 fn disabled(c: Color32, alpha: f32) -> Color32 {
     let a = (alpha / state::DISABLED_CONTENT).min(1.0);
-    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a * 255.0).round() as u8)
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), num::sat_u8((a * 255.0).round()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,7 +1006,7 @@ pub fn slider(
         Rect::from_x_y_ranges(rect.x_range(), Rangef::point(cy).expand(TRACK / 2.0)),
     );
     // Outer ends are pills; the ends at the handle are nearly square.
-    let (outer, inner) = ((TRACK / 2.0) as u8, 2u8);
+    let (outer, inner) = (num::sat_u8(TRACK / 2.0), 2u8);
     let active = Rect::from_min_max(
         pos2(rect.left(), cy - TRACK / 2.0),
         pos2(hx - HANDLE.x / 2.0 - gap, cy + TRACK / 2.0),
@@ -1052,7 +1051,7 @@ pub fn slider(
     };
     match step {
         Some(st) if st > 0.0 && (hi - lo) / st <= 40.0 => {
-            let n = ((hi - lo) / st).round() as usize;
+            let n = num::sat_usize(((hi - lo) / st).round());
             for i in 0..=n {
                 dot(egui::lerp(x0..=x1, i as f32 / n as f32));
             }
@@ -2297,7 +2296,7 @@ pub fn floating_toolbar(
         let row_top = rect.top() + status_h + PAD;
         let x0 = (rect.center().x - row_w / 2.0).round();
         // Nested corners: the container's radius minus its padding.
-        let inner = CornerRadius::same(shape::XL - PAD as u8);
+        let inner = CornerRadius::same(shape::XL - num::sat_u8(PAD));
         for (i, it) in items.iter().enumerate() {
             let r = Rect::from_min_size(
                 pos2(x0 + i as f32 * (item_w + GAP), row_top),
@@ -2565,9 +2564,9 @@ pub fn time_picker(ui: &mut Ui, minutes: &mut u32, step: u32) -> bool {
         0.0..=(DAY - step) as f32,
         step as f32,
         wrap,
-        |v| schedule::fmt_hm(v as u32),
+        |v| schedule::fmt_hm(num::sat_u32(v)),
     );
-    *minutes = v as u32;
+    *minutes = num::sat_u32(v);
     changed
 }
 
@@ -2649,7 +2648,8 @@ fn step_focus(ctx: &egui::Context, order: &[Id], own_arrows: Option<Id>) {
     ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
     // One screen's controls, a few dozen.
     let index = |k: usize| i32::try_from(k).expect("a focus order index fits i32");
-    let j = (index(i) + step).clamp(0, index(order.len() - 1)) as usize;
+    let j = usize::try_from((index(i) + step).clamp(0, index(order.len() - 1)))
+        .expect("clamped to 0 and up");
     if j != i {
         ctx.memory_mut(|m| m.request_focus(order[j]));
     }

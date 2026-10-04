@@ -106,7 +106,7 @@ mod tests {
 
     fn photo(w: u32, h: u32) -> Photo {
         Photo {
-            asset_id: 1,
+            asset_id: raam_model::AssetId::new(1),
             key: "k".into(),
             width: w,
             height: h,

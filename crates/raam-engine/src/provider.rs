@@ -17,7 +17,9 @@ use crate::immich;
 use raam_core::clock;
 use raam_core::seams::MediaProbe;
 use raam_model::limits;
-use raam_model::{Focus, MediaKind, MediaRef, ProviderError, SourceKind};
+use raam_model::{
+    AlbumId, Focus, MediaKind, MediaRef, ProviderError, RemoteId, SourceKind, UserId,
+};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
@@ -59,7 +61,7 @@ pub struct ImmichProvider {
     client: Option<immich::Client>,
     /// The picked albums that are on the server, set by the library thread
     /// before each `list()`.
-    albums: Vec<String>,
+    albums: Vec<AlbumId>,
 }
 
 impl Default for ImmichProvider {
@@ -76,7 +78,7 @@ impl ImmichProvider {
         }
     }
 
-    pub fn set_albums(&mut self, albums: Vec<String>) {
+    pub fn set_albums(&mut self, albums: Vec<AlbumId>) {
         self.albums = albums;
     }
 
@@ -84,7 +86,7 @@ impl ImmichProvider {
         self.connected()?.albums()
     }
 
-    pub fn user_id(&self) -> Result<String, ProviderError> {
+    pub fn user_id(&self) -> Result<UserId, ProviderError> {
         self.connected()?.user_id()
     }
 
@@ -120,7 +122,7 @@ impl Provider for ImmichProvider {
     fn list(&mut self) -> Result<Vec<MediaRef>, ProviderError> {
         let client = self.connected()?;
         let mut out: Vec<MediaRef> = Vec::new();
-        let mut index: HashMap<String, usize> = HashMap::new();
+        let mut index: HashMap<RemoteId, usize> = HashMap::new();
         for album in &self.albums {
             for a in client.album_assets(album)? {
                 if let Some(&i) = index.get(&a.id) {
@@ -361,7 +363,7 @@ fn describe(path: &str, stamp: (i64, i64)) -> Result<MediaRef, String> {
         (w, h)
     };
     Ok(MediaRef {
-        id: sha1.clone(),
+        id: RemoteId::new(sha1.clone()),
         sha1: Some(sha1),
         location: Some(path.to_string()),
         width,
@@ -405,7 +407,7 @@ fn describe_video(
         info.audio
     );
     Ok(MediaRef {
-        id: sha1.clone(),
+        id: RemoteId::new(sha1.clone()),
         sha1: Some(sha1),
         location: Some(path.to_string()),
         width,

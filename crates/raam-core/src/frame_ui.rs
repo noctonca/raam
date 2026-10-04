@@ -23,8 +23,8 @@ use raam_model::limits::{
     INTERVAL_RANGE_SECS, LARGEST_LAYOUT,
 };
 use raam_model::{
-    AlbumRow, ClockStyle, Corner, FitBackground, GapColour, Prefetch, ScaleMode, Settings,
-    SourceKind, Stats, TransitionChoice, VideoPlayback,
+    AlbumId, AlbumRow, ClockStyle, Corner, CurationKey, FitBackground, GapColour, Prefetch,
+    ScaleMode, Settings, SourceKind, Stats, TransitionChoice, VideoPlayback,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -65,10 +65,10 @@ pub struct Actions {
     pub sync_now: bool,
     pub hide: bool,
     pub undo_hide: bool,
-    pub unhide: Option<String>,
+    pub unhide: Option<CurationKey>,
     pub export: bool,
     /// (Immich album id, picked).
-    pub select_album: Vec<(String, bool)>,
+    pub select_album: Vec<(AlbumId, bool)>,
     /// For the host's network worker, in order.
     pub net: Vec<NetCommand>,
 }
@@ -291,7 +291,7 @@ pub struct AppState {
     pub undo_secs: Option<u64>,
     /// Picks not yet seen back in `library.albums`, so a checkbox doesn't
     /// flick back while the writer thread commits.
-    pub pending_albums: HashMap<String, bool>,
+    pub pending_albums: HashMap<AlbumId, bool>,
     pub status: Status,
     /// The host runs a weather worker (the web demo doesn't), set by the
     /// controller; without one the Weather switch is greyed out.

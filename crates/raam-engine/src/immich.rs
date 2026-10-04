@@ -7,7 +7,7 @@
 //! frame is API 23 and its system trust store is stale. Errors are typed:
 //! `ProviderError::Transport` is the offline signal, never a string match.
 use raam_model::limits;
-use raam_model::{Focus, ProviderError};
+use raam_model::{AlbumId, Focus, ProviderError, RemoteId, UserId};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Config {
@@ -23,13 +23,13 @@ pub struct Client {
 /// An album as the picker lists it.
 #[derive(Clone, Debug)]
 pub struct RemoteAlbum {
-    pub id: String,
+    pub id: AlbumId,
     pub name: String,
     pub asset_count: i64,
 }
 
 pub struct RemoteAsset {
-    pub id: String,
+    pub id: RemoteId,
     pub width: u32,
     pub height: u32,
     pub taken_at_ms: Option<i64>,
@@ -73,11 +73,11 @@ impl Client {
 
     /// The key's user (`GET /api/users/me`, its UUID `id`): which library
     /// the frame syncs, whatever URL reaches it.
-    pub fn user_id(&self) -> Result<String, ProviderError> {
+    pub fn user_id(&self) -> Result<UserId, ProviderError> {
         let me = self.get_json("/api/users/me")?;
         me.get("id")
             .and_then(|v| v.as_str())
-            .map(str::to_string)
+            .map(UserId::from)
             .ok_or_else(|| ProviderError::Failed("/api/users/me: no id".into()))
     }
 
@@ -91,7 +91,7 @@ impl Client {
             .iter()
             .filter_map(|a| {
                 Some(RemoteAlbum {
-                    id: a.get("id")?.as_str()?.to_string(),
+                    id: AlbumId::from(a.get("id")?.as_str()?),
                     name: a.get("albumName")?.as_str()?.to_string(),
                     asset_count: a.get("assetCount").and_then(|v| v.as_i64()).unwrap_or(0),
                 })
@@ -107,13 +107,13 @@ impl Client {
     /// album a call: several `albumIds` in one call return only the photos
     /// in ALL of them (probed live), not the union. Each asset's top-level
     /// `width`/`height` is already oriented (probed too).
-    pub fn album_assets(&self, album_id: &str) -> Result<Vec<RemoteAsset>, ProviderError> {
+    pub fn album_assets(&self, album_id: &AlbumId) -> Result<Vec<RemoteAsset>, ProviderError> {
         let mut out = Vec::new();
         let mut page = 1;
         for _ in 0..limits::IMMICH_MAX_PAGES {
             let body = self.post_json(
                 "/api/search/metadata",
-                &serde_json::json!({ "albumIds": [album_id], "size": limits::IMMICH_PAGE_SIZE, "page": page }),
+                &serde_json::json!({ "albumIds": [album_id.as_str()], "size": limits::IMMICH_PAGE_SIZE, "page": page }),
             )?;
             let assets = body.get("assets");
             if let Some(items) = assets
@@ -122,7 +122,7 @@ impl Client {
             {
                 out.extend(items.iter().filter_map(|a| {
                     Some(RemoteAsset {
-                        id: a.get("id")?.as_str()?.to_string(),
+                        id: RemoteId::from(a.get("id")?.as_str()?),
                         // A size past u32 is no size: the asset is left out.
                         width: u32::try_from(a.get("width")?.as_u64()?).ok()?,
                         height: u32::try_from(a.get("height")?.as_u64()?).ok()?,
@@ -155,7 +155,7 @@ impl Client {
     }
 
     /// The preview JPEG's bytes, as the server sends them.
-    pub fn preview(&self, id: &str) -> Result<Vec<u8>, ProviderError> {
+    pub fn preview(&self, id: &RemoteId) -> Result<Vec<u8>, ProviderError> {
         let mut resp = self
             .http
             .get(format!(
@@ -189,7 +189,7 @@ impl Client {
     /// file cut short.
     pub fn download_video(
         &self,
-        id: &str,
+        id: &RemoteId,
         dest: &std::path::Path,
         max_bytes: u64,
     ) -> Result<u64, ProviderError> {
@@ -228,7 +228,7 @@ impl Client {
     /// rule turns them into the focus (`Focus::from_faces`). `Err` only when
     /// the server couldn't be asked; a photo with no faces gets the middle
     /// and no target.
-    pub fn faces(&self, id: &str) -> Result<Focus, ProviderError> {
+    pub fn faces(&self, id: &RemoteId) -> Result<Focus, ProviderError> {
         let faces = self.get_json(&format!("/api/faces?id={id}"))?;
         let mut found: Vec<(f32, (f32, f32))> = Vec::new();
         for face in faces.as_array().into_iter().flatten() {
@@ -423,7 +423,12 @@ mod tests {
                 key: "key".into(),
             })
             .unwrap();
-            assert_eq!(client.download_video("a", &dest, max).unwrap(), written);
+            assert_eq!(
+                client
+                    .download_video(&RemoteId::new("a"), &dest, max)
+                    .unwrap(),
+                written
+            );
             assert_eq!(std::fs::metadata(&dest).unwrap().len(), written);
         }
         std::fs::remove_dir_all(&dir).unwrap();

@@ -38,7 +38,10 @@ use raam_model::limits::{
     ALBUM_PICK_DEBOUNCE, CAP_CHOICES_MB, DEFAULT_CAP_MB, LIBRARY_IDLE_WAIT, LRU_BATCH_ENFORCE,
     LRU_BATCH_STORE, PREVIEW_SHORT_SIDE, SCAN_EVERY, SYNC_EVERY, SYNC_RETRY,
 };
-use raam_model::{MediaRef, Prefetch, ProviderError, ScaleMode, SourceKind, Stats};
+use raam_model::{
+    AlbumId, AssetId, CurationKey, MediaRef, Prefetch, ProviderError, RemoteId, ScaleMode,
+    SourceKind, Stats,
+};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -51,15 +54,15 @@ pub enum Cmd {
         rows: Vec<(&'static str, serde_json::Value)>,
         sleep: schedule::Schedule,
     },
-    SetScale(String, Option<ScaleMode>),
-    SetHidden(String, bool),
+    SetScale(CurationKey, Option<ScaleMode>),
+    SetHidden(CurationKey, bool),
     SetSourceEnabled(SourceKind, bool),
     SetServer(immich::Config),
     ExportCuration,
     /// Pick or un-pick an album (Immich album id).
-    SelectAlbum(String, bool),
+    SelectAlbum(AlbumId, bool),
     /// The frame couldn't decode this clip (asset id, why).
-    SetUnplayable(i64, String),
+    SetUnplayable(AssetId, String),
     // To the library thread.
     SetCap(u32),
     ClearCache,
@@ -454,7 +457,7 @@ struct Loop {
     /// Nothing left to materialise (or the cache is at its cap).
     idle: bool,
     /// Assets whose preview failed this run, not retried until the next sync.
-    failed: std::collections::HashSet<i64>,
+    failed: std::collections::HashSet<AssetId>,
     local_note: String,
     immich_note: String,
     prefetch: Prefetch,
@@ -763,7 +766,7 @@ fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, S
     if kind == SourceKind::Immich {
         // An album un-picked while the list was downloading must not come
         // back: keep only what the albums picked now hold.
-        let picked: std::collections::HashSet<String> =
+        let picked: std::collections::HashSet<AlbumId> =
             db::selected_albums(&conn).into_iter().collect();
         let listed = items.len();
         for m in &mut items {
@@ -777,11 +780,16 @@ fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, S
             );
         }
     }
-    let mut existing: std::collections::HashMap<String, (i64, u32, u32, Option<String>)> = conn
-        .prepare("SELECT remote_id, id, width, height, location FROM asset WHERE source_id = ?1")
+    let mut existing: std::collections::HashMap<RemoteId, (AssetId, u32, u32, Option<String>)> =
+        conn.prepare(
+            "SELECT remote_id, id, width, height, location FROM asset WHERE source_id = ?1",
+        )
         .and_then(|mut s| {
             s.query_map([source], |r| {
-                Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+                Ok((
+                    RemoteId::new(r.get::<_, String>(0)?),
+                    (AssetId::new(r.get(1)?), r.get(2)?, r.get(3)?, r.get(4)?),
+                ))
             })?
             .collect()
         })
@@ -803,7 +811,7 @@ fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, S
                 tx.execute(
                     "UPDATE asset SET width = ?2, height = ?3, taken_at_ms = ?4, location = ?5, file_bytes = ?6,
                        file_mtime_ms = ?7, hash = ?8 WHERE id = ?1",
-                    rusqlite::params![id, m.width, m.height, m.taken_at_ms, m.location, bytes, mtime, m.sha1],
+                    rusqlite::params![id.get(), m.width, m.height, m.taken_at_ms, m.location, bytes, mtime, m.sha1],
                 )
                 .map_err(|e| format!("updating asset {id}: {e}"))?;
             }
@@ -814,7 +822,7 @@ fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, S
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     rusqlite::params![
                         source,
-                        m.id,
+                        m.id.as_str(),
                         m.sha1,
                         m.location,
                         m.kind.as_str(),
@@ -836,7 +844,7 @@ fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, S
     for (m, focus) in items.iter().filter_map(|m| Some((m, m.focus?))) {
         tx.execute(
             "UPDATE asset SET focus_x = ?3, focus_y = ?4, faces_checked = 1 WHERE source_id = ?1 AND remote_id = ?2",
-            rusqlite::params![source, m.id, focus.centre.0, focus.centre.1],
+            rusqlite::params![source, m.id.as_str(), focus.centre.0, focus.centre.1],
         )
         .map_err(|e| format!("focus of {}: {e}", m.id))?;
     }
@@ -846,7 +854,7 @@ fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, S
             log::info!("library: {loc} is gone, dropping asset {id}");
         }
     }
-    let gone: Vec<i64> = existing.values().map(|v| v.0).collect();
+    let gone: Vec<AssetId> = existing.values().map(|v| v.0).collect();
     let files = db::delete_assets(&tx, &gone).map_err(|e| format!("dropping assets: {e}"))?;
     if kind == SourceKind::Immich {
         db::set_memberships(&tx, source, &items).map_err(|e| format!("memberships: {e}"))?;
@@ -1030,7 +1038,7 @@ fn materialise_one(lib: &Library, st: &mut Loop) -> bool {
 /// not stored.
 pub fn store_immich_preview(
     lib: &Library,
-    asset: i64,
+    asset: AssetId,
     bytes: &[u8],
     evict: bool,
 ) -> Result<bool, String> {
@@ -1056,7 +1064,7 @@ pub fn store_immich_preview(
     stall::at(&lib.host, Site::Row, writer, &what);
     let conn = lib.db.lock().unwrap();
     let evicted = if evict {
-        make_room(&conn, asset, len, cap, LRU_BATCH_STORE).0
+        make_room(&conn, Some(asset), len, cap, LRU_BATCH_STORE).0
     } else {
         Vec::new()
     };
@@ -1081,7 +1089,7 @@ pub fn store_immich_preview(
 pub fn fetch_immich_video(
     lib: &Library,
     provider: &mut ImmichProvider,
-    asset: i64,
+    asset: AssetId,
     media: &MediaRef,
     evict: bool,
 ) -> Result<Option<(PathBuf, raam_model::ClipInfo)>, ProviderError> {
@@ -1162,7 +1170,7 @@ pub fn fetch_immich_video(
     sync_parent(&path).map_err(ProviderError::Failed)?;
     let conn = lib.db.lock().unwrap();
     let evicted = if evict {
-        make_room(&conn, asset, len, cap, LRU_BATCH_STORE).0
+        make_room(&conn, Some(asset), len, cap, LRU_BATCH_STORE).0
     } else {
         Vec::new()
     };
@@ -1179,12 +1187,13 @@ pub fn fetch_immich_video(
     Ok(Some((path, info)))
 }
 
-/// Evicts the least recently shown Immich files, never `keep`, until
-/// `incoming` more bytes fit under `cap` (or nothing is left to evict).
+/// Evicts the least recently shown Immich files, never `keep` (the asset
+/// being stored, if any), until `incoming` more bytes fit under `cap` (or
+/// nothing is left to evict).
 /// Returns the files to remove once the lock is let go, and how many went.
 fn make_room(
     conn: &rusqlite::Connection,
-    keep: i64,
+    keep: Option<AssetId>,
     incoming: i64,
     cap: i64,
     batch: usize,
@@ -1217,8 +1226,7 @@ fn make_room(
 fn enforce_cap(lib: &Library) {
     let conn = lib.db.lock().unwrap();
     let cap = lib.cap_bytes() as i64;
-    // No asset has id -1: nothing is kept back.
-    let (files, dropped) = make_room(&conn, -1, 0, cap, LRU_BATCH_ENFORCE);
+    let (files, dropped) = make_room(&conn, None, 0, cap, LRU_BATCH_ENFORCE);
     drop(conn);
     db::remove_files(&files);
     if dropped > 0 {

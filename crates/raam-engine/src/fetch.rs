@@ -30,7 +30,7 @@ use raam_model::limits::{
     FETCH_BACKOFF_WAIT, FETCH_EMPTY_WAIT, FETCH_FAILED_WAIT, FETCH_SKIP_WAIT, FETCH_SLOT_POLL,
     FETCH_TILE_POLL,
 };
-use raam_model::{MediaItem, MediaRef, Photo, Plan, SourceKind, TilePhoto, VideoClip};
+use raam_model::{AssetId, MediaItem, MediaRef, Photo, Plan, SourceKind, TilePhoto, VideoClip};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -147,13 +147,13 @@ struct Queue {
 }
 
 impl Queue {
-    fn rank(&self, asset: i64) -> u64 {
-        rank(self.seed, asset)
+    fn rank(&self, asset: AssetId) -> u64 {
+        rank(self.seed, asset.get())
     }
 
     fn sort(&mut self) {
         let seed = self.seed;
-        self.entries.sort_by_key(|e| rank(seed, e.asset));
+        self.entries.sort_by_key(|e| rank(seed, e.asset.get()));
     }
 
     fn start(&self) -> usize {
@@ -193,7 +193,7 @@ impl Queue {
     }
 }
 
-/// splitmix64 of the seed and the asset id.
+/// splitmix64 of the seed and an asset row's id (or a counter).
 fn rank(seed: u64, asset: i64) -> u64 {
     let mut z = seed ^ (asset as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -221,13 +221,13 @@ fn fetch_loop(shared: Arc<FetchShared>, host: Host, screen: Screen, lib: Arc<Lib
     if let Some((current, seed)) = db::load_playback(&lib.db.lock().unwrap()) {
         queue.seed = seed;
         // Just below the saved photo's rank, so it is the first one shown.
-        queue.cursor = current.and_then(|c| rank(seed, c).checked_sub(1));
+        queue.cursor = current.and_then(|c| rank(seed, c.get()).checked_sub(1));
         log::info!("resuming the saved queue at asset {current:?} (seed {seed:016x})");
     }
     let mut seq: u64 = 0;
     // The last planned (not Prev-requested) collage's first photo: saved to
     // `playback` once the render thread has shown it.
-    let mut to_save: Option<i64> = None;
+    let mut to_save: Option<AssetId> = None;
     let mut empty_logged = false;
 
     loop {

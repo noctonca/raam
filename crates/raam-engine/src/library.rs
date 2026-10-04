@@ -48,6 +48,81 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// Why the library couldn't do something. `Provider` keeps the provider's
+/// own error, whose `Transport` is the offline signal; the rest are the
+/// frame's own database and disk.
+#[derive(Debug)]
+pub enum LibraryError {
+    Provider(ProviderError),
+    /// A database call, and what it was doing.
+    Db {
+        doing: String,
+        source: rusqlite::Error,
+    },
+    /// A file call, and what it was doing to which path.
+    Io {
+        doing: &'static str,
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    /// The kind has no `source` row (the schema makes one per kind).
+    NoSource(SourceKind),
+}
+
+impl LibraryError {
+    /// The server could not be reached at all.
+    pub fn is_offline(&self) -> bool {
+        matches!(self, LibraryError::Provider(e) if e.is_transport())
+    }
+
+    fn db(doing: impl Into<String>) -> impl FnOnce(rusqlite::Error) -> Self {
+        move |source| LibraryError::Db {
+            doing: doing.into(),
+            source,
+        }
+    }
+
+    fn io(doing: &'static str, path: &Path) -> impl FnOnce(std::io::Error) -> Self {
+        move |source| LibraryError::Io {
+            doing,
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+}
+
+impl From<ProviderError> for LibraryError {
+    fn from(e: ProviderError) -> Self {
+        LibraryError::Provider(e)
+    }
+}
+
+impl std::fmt::Display for LibraryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LibraryError::Provider(e) => write!(f, "{e}"),
+            LibraryError::Db { doing, source } => write!(f, "{doing}: {source}"),
+            LibraryError::Io {
+                doing,
+                path,
+                source,
+            } => write!(f, "{doing} {}: {source}", path.display()),
+            LibraryError::NoSource(kind) => write!(f, "no source row for {}", kind.as_str()),
+        }
+    }
+}
+
+impl std::error::Error for LibraryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            LibraryError::Provider(e) => Some(e),
+            LibraryError::Db { source, .. } => Some(source),
+            LibraryError::Io { source, .. } => Some(source),
+            LibraryError::NoSource(_) => None,
+        }
+    }
+}
+
 pub enum Cmd {
     // To the writer thread.
     SaveSettings {
@@ -466,9 +541,8 @@ struct Loop {
     /// Assets whose preview failed this run, not retried until the next sync.
     failed: std::collections::HashSet<AssetId>,
     local_note: String,
-    immich_note: String,
+    sync: SyncNotes,
     prefetch: Prefetch,
-    albums_note: String,
     test_cap: Option<u32>,
     /// The cap from settings, put back when the debug override is cleared.
     setting_cap: u64,
@@ -511,9 +585,8 @@ fn library_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
         idle: false,
         failed: Default::default(),
         local_note: String::new(),
-        immich_note: "not synced yet".into(),
+        sync: SyncNotes::new(),
         prefetch: Prefetch::Idle,
-        albums_note: "saved list, not refreshed yet".into(),
         test_cap: None,
         setting_cap: lib.cap_bytes(),
     };
@@ -551,7 +624,7 @@ fn library_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
                     }
                     Err(e) => {
                         log::error!("library: scan failed: {e}");
-                        st.local_note = e;
+                        st.local_note = e.to_string();
                     }
                 }
                 st.idle = false;
@@ -567,8 +640,8 @@ fn library_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
             // A fresh install has no server yet: nothing to sync (or spam
             // the log with) until settings provide one.
             if lib.enabled(SourceKind::Immich) && !lib.has_server() {
-                st.immich_note = "no server configured".into();
-                st.albums_note = "no server configured".into();
+                st.sync.immich = "no server configured".into();
+                st.sync.albums = "no server configured".into();
             } else if lib.enabled(SourceKind::Immich) {
                 let t = clock::now();
                 // The album list first (the picker's, and which picked
@@ -576,7 +649,7 @@ fn library_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
                 let result = st
                     .immich
                     .with_config(lib.config())
-                    .map_err(|e| e.to_string())
+                    .map_err(LibraryError::from)
                     .and_then(|p| {
                         // Which library this is (another server or user starts
                         // over). A key that may not read the user is left
@@ -584,7 +657,7 @@ fn library_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
                         match p.user_id() {
                             Ok(user) => {
                                 let stale = db::check_library(&lib.db.lock().unwrap(), &user)
-                                    .map_err(|e| e.to_string())?;
+                                    .map_err(LibraryError::db("checking the library"))?;
                                 if let Some(files) = stale {
                                     db::remove_files(&files);
                                     lib.bump();
@@ -594,9 +667,9 @@ fn library_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
                                 "library: can't tell which library the key reads ({e}), not checked"
                             ),
                         }
-                        let albums = p.albums().map_err(|e| e.to_string())?;
+                        let albums = p.albums()?;
                         let picked = db::update_albums(&lib.db.lock().unwrap(), &albums)
-                            .map_err(|e| e.to_string())?;
+                            .map_err(LibraryError::db("saving the album list"))?;
                         log::info!(
                             "library: {} albums on the server, {} picked, listed in {:?}",
                             albums.len(),
@@ -610,25 +683,15 @@ fn library_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
                 match result {
                     Ok((n, none)) => {
                         log::info!("library: album sync: {n} in {:?}", clock::elapsed(t));
-                        st.albums_note = format!("updated {}", hm_now());
-                        st.immich_note = if none {
-                            "no album picked".to_string()
-                        } else {
-                            format!("synced {}", hm_now())
-                        };
+                        st.sync.synced(none, &hm_now());
                         st.failed.clear();
                         lib.set_online(true);
                     }
                     Err(e) => {
                         log::error!("library: album sync failed: {e}");
-                        if lib.online() || !st.immich_note.starts_with("offline") {
-                            st.immich_note = format!("offline since {}", hm_now());
-                            st.albums_note = format!(
-                                "can't reach the server ({}), showing the saved list",
-                                hm_now()
-                            );
+                        if let Some(online) = st.sync.failed(&e, &hm_now()) {
+                            lib.set_online(online);
                         }
-                        lib.set_online(false);
                     }
                 }
                 st.idle = false;
@@ -656,6 +719,61 @@ fn library_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
         };
         for cmd in first.into_iter().chain(rx.try_iter()) {
             handle(&lib, &mut st, cmd);
+        }
+    }
+}
+
+/// What settings says about the Immich sync: the source's note and the
+/// album list's.
+struct SyncNotes {
+    immich: String,
+    albums: String,
+    /// When the server was last found unreachable, while it still is.
+    offline_since: Option<String>,
+}
+
+impl SyncNotes {
+    fn new() -> Self {
+        Self {
+            immich: "not synced yet".into(),
+            albums: "saved list, not refreshed yet".into(),
+            offline_since: None,
+        }
+    }
+
+    fn synced(&mut self, none_picked: bool, hm: &str) {
+        self.offline_since = None;
+        self.albums = format!("updated {hm}");
+        self.immich = if none_picked {
+            "no album picked".to_string()
+        } else {
+            format!("synced {hm}")
+        };
+    }
+
+    /// Notes a failed sync at `hm`, and returns what it says about being
+    /// online: only a transport error is offline; any other provider error
+    /// means the server answered; the frame's own database or disk says
+    /// nothing either way (None).
+    fn failed(&mut self, e: &LibraryError, hm: &str) -> Option<bool> {
+        if e.is_offline() {
+            let since = self.offline_since.get_or_insert_with(|| hm.to_string());
+            self.immich = format!("offline since {since}");
+            self.albums = format!("can't reach the server ({since}), showing the saved list");
+            return Some(false);
+        }
+        self.offline_since = None;
+        self.immich = format!("sync failed {hm}");
+        match e {
+            LibraryError::Provider(_) => {
+                self.albums =
+                    format!("the server answered with an error ({hm}), showing the saved list");
+                Some(true)
+            }
+            LibraryError::Db { .. } | LibraryError::Io { .. } | LibraryError::NoSource(_) => {
+                self.albums = format!("couldn't save the list ({hm}), showing the saved list");
+                None
+            }
         }
     }
 }
@@ -745,13 +863,13 @@ fn publish_stats(lib: &Library, st: &Loop) {
         shared,
         local_dir: lib.local_dir.clone(),
         local_note: st.local_note.clone(),
-        immich_note: st.immich_note.clone(),
+        immich_note: st.sync.immich.clone(),
         prefetch: st.prefetch,
         free_bytes: free_bytes(&lib.cache_dir) / FREE_SPACE_STEP * FREE_SPACE_STEP,
         hidden,
         export_note: lib.export_note.lock().unwrap().clone(),
         albums,
-        albums_note: st.albums_note.clone(),
+        albums_note: st.sync.albums.clone(),
         videos,
         videos_ready,
         videos_unplayable,
@@ -765,11 +883,11 @@ fn publish_stats(lib: &Library, st: &Loop) {
 /// provider no longer lists goes, with its files. Curation is untouched.
 /// One row that won't write fails the whole sync, rolled back: a commit
 /// with it missing would count it as gone.
-fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, String> {
+fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, LibraryError> {
     let kind = provider.kind();
-    let mut items = provider.list().map_err(|e| e.to_string())?;
+    let mut items = provider.list()?;
     let conn = lib.db.lock().unwrap();
-    let source = db::source_id(&conn, kind).ok_or("no source row")?;
+    let source = db::source_id(&conn, kind).ok_or(LibraryError::NoSource(kind))?;
     if kind == SourceKind::Immich {
         // An album un-picked while the list was downloading must not come
         // back: keep only what the albums picked now hold.
@@ -800,10 +918,12 @@ fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, S
             })?
             .collect()
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(LibraryError::db("reading the source's assets"))?;
     let (mut added, mut changed, mut moved) = (0, 0, 0);
     let now = db::now_ms();
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(LibraryError::db("starting the sync"))?;
     for m in &items {
         let (bytes, mtime) = m.stamp.map_or((None, None), |(b, t)| (Some(b), Some(t)));
         match existing.remove(&m.id) {
@@ -820,7 +940,7 @@ fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, S
                        file_mtime_ms = ?7, hash = ?8 WHERE id = ?1",
                     rusqlite::params![id.get(), m.width, m.height, m.taken_at_ms, m.location, bytes, mtime, m.sha1],
                 )
-                .map_err(|e| format!("updating asset {id}: {e}"))?;
+                .map_err(LibraryError::db(format!("updating asset {id}")))?;
             }
             None => {
                 tx.execute(
@@ -841,7 +961,7 @@ fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, S
                         mtime
                     ],
                 )
-                .map_err(|e| format!("adding {}: {e}", m.id))?;
+                .map_err(LibraryError::db(format!("adding {}", m.id)))?;
                 added += 1;
             }
         }
@@ -853,7 +973,7 @@ fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, S
             "UPDATE asset SET focus_x = ?3, focus_y = ?4, faces_checked = 1 WHERE source_id = ?1 AND remote_id = ?2",
             rusqlite::params![source, m.id.as_str(), focus.centre.0, focus.centre.1],
         )
-        .map_err(|e| format!("focus of {}: {e}", m.id))?;
+        .map_err(LibraryError::db(format!("focus of {}", m.id)))?;
     }
     let removed = existing.len();
     for (id, _, _, loc) in existing.values() {
@@ -862,9 +982,9 @@ fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, S
         }
     }
     let gone: Vec<AssetId> = existing.values().map(|v| v.0).collect();
-    let files = db::delete_assets(&tx, &gone).map_err(|e| format!("dropping assets: {e}"))?;
+    let files = db::delete_assets(&tx, &gone).map_err(LibraryError::db("dropping assets"))?;
     if kind == SourceKind::Immich {
-        db::set_memberships(&tx, source, &items).map_err(|e| format!("memberships: {e}"))?;
+        db::set_memberships(&tx, source, &items).map_err(LibraryError::db("memberships"))?;
     }
     // A host with no player: the clips just listed are out before anything
     // can plan them or fetch them to probe.
@@ -872,7 +992,8 @@ fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, S
         Some(why) => db::mark_clips_unplayable(&tx, &why),
         None => (0, Vec::new()),
     };
-    tx.commit().map_err(|e| e.to_string())?;
+    tx.commit()
+        .map_err(LibraryError::db("committing the sync"))?;
     drop(conn);
     db::remove_files(&files);
     db::remove_files(&stale);
@@ -1048,7 +1169,7 @@ pub fn store_immich_preview(
     asset: AssetId,
     bytes: &[u8],
     evict: bool,
-) -> Result<bool, String> {
+) -> Result<bool, LibraryError> {
     let cap = db::sql_int(lib.cap_bytes());
     let len = db::sql_int(bytes.len());
     if len > cap {
@@ -1082,7 +1203,7 @@ pub fn store_immich_preview(
         // Typically the asset went while its preview downloaded (its album
         // was un-picked): the file has no row to belong to.
         db::remove_files(&[path]);
-        return Err(e.to_string());
+        return Err(LibraryError::db(format!("recording asset {asset}"))(e));
     }
     Ok(true)
 }
@@ -1174,7 +1295,7 @@ pub fn fetch_immich_video(
     // directory synced, before the row says the clip is here.
     std::fs::rename(&tmp, &path)
         .map_err(|e| ProviderError::Failed(format!("rename {}: {e}", path.display())))?;
-    sync_parent(&path).map_err(ProviderError::Failed)?;
+    sync_parent(&path).map_err(|e| ProviderError::Failed(e.to_string()))?;
     let conn = lib.db.lock().unwrap();
     let evicted = if evict {
         make_room(&conn, Some(asset), len, cap, LRU_BATCH_STORE).0
@@ -1254,32 +1375,35 @@ fn enforce_cap(lib: &Library) {
 /// other's rename. The startup sweep deletes any a crash leaves.
 /// `before_rename` runs with the temp file whole and synced: the
 /// `debug.video.stall` hook (stall.rs).
-fn write_atomic(path: &Path, bytes: &[u8], before_rename: impl FnOnce()) -> Result<(), String> {
+fn write_atomic(
+    path: &Path,
+    bytes: &[u8],
+    before_rename: impl FnOnce(),
+) -> Result<(), LibraryError> {
     use std::io::Write;
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".{}.tmp", NEXT.fetch_add(1, Ordering::Relaxed)));
     let tmp = path.with_file_name(name);
-    let mut file =
-        std::fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
+    let mut file = std::fs::File::create(&tmp).map_err(LibraryError::io("create", &tmp))?;
     file.write_all(bytes)
         .and_then(|()| file.sync_all())
-        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        .map_err(LibraryError::io("write", &tmp))?;
     drop(file);
     before_rename();
-    std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))?;
+    std::fs::rename(&tmp, path).map_err(LibraryError::io("rename", path))?;
     sync_parent(path)
 }
 
 /// Syncs `path`'s directory, so a rename into it survives a power cut.
-fn sync_parent(path: &Path) -> Result<(), String> {
+fn sync_parent(path: &Path) -> Result<(), LibraryError> {
     let dir = path
         .parent()
         .filter(|d| !d.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     std::fs::File::open(dir)
         .and_then(|d| d.sync_all())
-        .map_err(|e| format!("sync {}: {e}", dir.display()))
+        .map_err(LibraryError::io("sync", dir))
 }
 
 /// The controller's read-only view (raam-core app.rs).
@@ -1298,6 +1422,46 @@ impl raam_core::app::LibraryInfo for Library {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only an unreachable server is offline (raam#44): an HTTP error
+    /// means the server answered, and a failure of the frame's own
+    /// database says nothing either way.
+    #[test]
+    fn only_a_transport_error_makes_the_sync_offline() {
+        let mut notes = SyncNotes::new();
+        let refused = LibraryError::Provider(ProviderError::Failed(
+            "/api/albums: 401 Unauthorized".into(),
+        ));
+        assert_eq!(notes.failed(&refused, "10:00"), Some(true));
+        assert_eq!(notes.immich, "sync failed 10:00");
+        assert!(
+            notes
+                .albums
+                .starts_with("the server answered with an error")
+        );
+
+        let db = LibraryError::db("saving the album list")(rusqlite::Error::InvalidQuery);
+        assert!(!db.is_offline());
+        assert_eq!(notes.failed(&db, "10:01"), None);
+        assert_eq!(notes.immich, "sync failed 10:01");
+        assert!(notes.albums.starts_with("couldn't save the list"));
+
+        let unreachable = LibraryError::Provider(ProviderError::Transport(
+            "GET /api/albums: connection refused".into(),
+        ));
+        assert_eq!(notes.failed(&unreachable, "10:02"), Some(false));
+        assert_eq!(notes.immich, "offline since 10:02");
+        // Still offline a minute later: since the first time.
+        assert_eq!(notes.failed(&unreachable, "10:03"), Some(false));
+        assert_eq!(notes.immich, "offline since 10:02");
+        assert!(notes.albums.starts_with("can't reach the server (10:02)"));
+
+        // Back: a later outage starts its own "since".
+        notes.synced(false, "10:04");
+        assert_eq!(notes.immich, "synced 10:04");
+        assert_eq!(notes.failed(&unreachable, "10:05"), Some(false));
+        assert_eq!(notes.immich, "offline since 10:05");
+    }
 
     /// The fetch and library threads can store the same preview at once
     /// (raam#17): each must leave a whole file, and neither may fail.

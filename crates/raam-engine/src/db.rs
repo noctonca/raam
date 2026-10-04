@@ -21,9 +21,9 @@
 //! The schema starts at v1, with no upgrade path from the prototype's
 //! database. Curation carries over through the JSON export/import
 //! (`import_curation`).
-use raam_core::clock;
 use raam_core::schedule::Schedule;
 use raam_core::store::transition_str;
+use raam_core::{clock, num};
 use raam_model::limits;
 use raam_model::{
     AlbumId, AlbumRow, AssetId, ClockStyle, Corner, CurationKey, FitBackground, Focus, GapColour,
@@ -159,7 +159,7 @@ where
 }
 
 pub fn now_ms() -> i64 {
-    clock::wall().as_millis() as i64
+    i64::try_from(clock::wall().as_millis()).expect("ms since 1970 fit i64 for 292 million years")
 }
 
 /// Opens (creating if needed) and migrates the database, and makes sure
@@ -336,7 +336,7 @@ pub fn load_settings(conn: &Connection, s: &mut Settings) -> Vec<String> {
         // `Duration::from_secs_f32`, which panics on a negative or
         // infinite value, on every pass.
         let (lo, hi) = limits::INTERVAL_RANGE_SECS;
-        s.interval_secs = v.clamp(f64::from(lo), f64::from(hi)) as f32;
+        s.interval_secs = num::to_f32(v.clamp(f64::from(lo), f64::from(hi)));
     }
     if let Some(v) = str_of("slideshow.transition") {
         s.transition = TransitionChoice::ALL
@@ -361,7 +361,9 @@ pub fn load_settings(conn: &Connection, s: &mut Settings) -> Vec<String> {
         s.fit_background = FitBackground::parse(&v).unwrap_or(s.fit_background);
     }
     if let Some(v) = rows.get("collage.max").and_then(|v| v.as_u64()) {
-        s.collage_max = (v as usize).clamp(1, limits::LARGEST_LAYOUT);
+        s.collage_max = usize::try_from(v)
+            .unwrap_or(usize::MAX)
+            .clamp(1, limits::LARGEST_LAYOUT);
     }
     if let Some(v) = str_of("collage.gap_colour") {
         s.gap_colour = GapColour::parse(&v).unwrap_or(s.gap_colour);
@@ -391,7 +393,7 @@ pub fn load_settings(conn: &Connection, s: &mut Settings) -> Vec<String> {
     if let Some(v) = rows.get("cache.cap_mb").and_then(|v| v.as_u64()) {
         // No larger than the picker's largest, before the cast can wrap.
         let most = limits::CAP_CHOICES_MB[limits::CAP_CHOICES_MB.len() - 1];
-        s.cache_cap_mb = v.min(u64::from(most)) as u32;
+        s.cache_cap_mb = u32::try_from(v.min(u64::from(most))).expect("at most a u32 choice");
     }
     if let Some(v) = str_of("video.playback") {
         s.video_playback = VideoPlayback::parse(&v).unwrap_or(s.video_playback);
@@ -403,10 +405,11 @@ pub fn load_settings(conn: &Connection, s: &mut Settings) -> Vec<String> {
         // Clamped in i64, before the narrowing, so a huge row can't wrap
         // into range.
         let (lo, hi) = limits::AUDIO_DELAY_RANGE;
-        s.audio_delay_ms = v.clamp(i64::from(lo), i64::from(hi)) as i32;
+        s.audio_delay_ms =
+            i32::try_from(v.clamp(i64::from(lo), i64::from(hi))).expect("clamped to an i32 range");
     }
     if let Some(v) = rows.get("video.volume").and_then(|v| v.as_f64()) {
-        s.video_volume = (v as f32).clamp(0.0, 1.0);
+        s.video_volume = num::to_f32(v).clamp(0.0, 1.0);
     }
     if let Ok((start, end, enabled)) = conn.query_row(
         "SELECT start_min, end_min, enabled FROM schedule WHERE kind = 'sleep' ORDER BY id LIMIT 1",
@@ -984,8 +987,9 @@ pub fn focus(conn: &Connection, asset: AssetId) -> ((f32, f32), Option<(f32, f32
         let hx: Option<f64> = r.get(2)?;
         let hy: Option<f64> = r.get(3)?;
         Ok((
-            fx.zip(fy).map_or((0.5, 0.5), |(x, y)| (x as f32, y as f32)),
-            hx.zip(hy).map(|(x, y)| (x as f32, y as f32)),
+            fx.zip(fy)
+                .map_or((0.5, 0.5), |(x, y)| (num::to_f32(x), num::to_f32(y))),
+            hx.zip(hy).map(|(x, y)| (num::to_f32(x), num::to_f32(y))),
             r.get::<_, bool>(4)?,
         ))
     })

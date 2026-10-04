@@ -12,11 +12,11 @@
 //!
 //! `presets` and the `Stats` fixtures are the QA surface: every screen
 //! reachable by name for the desktop host's `--page` and the ux-qa pass.
-use crate::icons;
 use crate::kit::{self, ButtonKind, DialogResult, ListItem, Tone, ToolItem, Trailing};
 use crate::network::{self, JoinStage, LinkKind, NetCommand, NetSnapshot, Security, Ssid, Wifi};
 use crate::schedule;
 use crate::theme::{self, Type, scheme, size, space};
+use crate::{icons, num};
 use egui::{Align, CornerRadius, Ui, UiBuilder};
 use raam_model::limits::{
     AUDIO_DELAY_RANGE, CAP_CHOICES_MB, DEFAULT_CAP_MB, FOCUS_CLAIM_PASSES, HIDDEN_LIST_MAX,
@@ -1355,7 +1355,7 @@ fn draw_settings(ui: &mut Ui, st: &mut AppState) {
             .frame(
                 egui::Frame::new()
                     .fill(s.surface)
-                    .inner_margin(egui::Margin::symmetric(space::M as i8, 0)),
+                    .inner_margin(egui::Margin::symmetric(num::sat_i8(space::M), 0)),
             )
             .show(ui, |ui| {
                 // Each item leaves 12 under it (`kit::nav_item`), whatever
@@ -1378,7 +1378,7 @@ fn draw_settings(ui: &mut Ui, st: &mut AppState) {
                         nw: theme::shape::L,
                         ..Default::default()
                     })
-                    .inner_margin(egui::Margin::same(space::XL as i8)),
+                    .inner_margin(egui::Margin::same(num::sat_i8(space::XL))),
             )
             .show(ui, |ui| {
                 let id = format!("frame.{:?}.{:?}", st.section, st.sub);
@@ -1439,8 +1439,8 @@ fn claimed_by(ctx: &egui::Context, st: &mut AppState, claimed: bool) {
 fn on_content_edge<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     egui::Frame::new()
         .inner_margin(egui::Margin {
-            left: space::L as i8,
-            right: space::L as i8,
+            left: num::sat_i8(space::L),
+            right: num::sat_i8(space::L),
             ..Default::default()
         })
         .show(ui, add)
@@ -3028,7 +3028,7 @@ fn dialogs(ctx: &egui::Context, st: &mut AppState) {
             });
             st.delay_draft = draft;
             if done == Some(1) {
-                st.settings.audio_delay_ms = draft as i32;
+                st.settings.audio_delay_ms = num::sat_i32(draft);
             }
             if !open {
                 st.dialog = Dialog::None;
@@ -3291,7 +3291,7 @@ mod tests {
             let (lo, hi) = INTERVAL_RANGE_SECS;
             prop_oneof![
                 lo..=hi,
-                (lo as i32..=hi as i32).prop_map(|v| v as f32),
+                (num::sat_i32(lo)..=num::sat_i32(hi)).prop_map(|v| v as f32),
                 any::<f32>().prop_filter("NaN", |v| !v.is_nan()),
             ]
         }

@@ -166,7 +166,7 @@ impl AudioOut {
                     &mut player_obj,
                     &mut audio_src,
                     &mut audio_snk,
-                    ids.len() as u32,
+                    u32::try_from(ids.len()).expect("a handful of interface ids"),
                     ids.as_ptr(),
                     req.as_ptr(),
                 ),
@@ -261,7 +261,11 @@ impl AudioOut {
         let mb: sles::SLmillibel = if volume <= 0.001 {
             sles::SL_MILLIBEL_MIN
         } else {
-            (2000.0 * volume.min(1.0).log10()).round().max(-6000.0) as sles::SLmillibel
+            // In -6000..=0: the volume is in (0.001, 1] here.
+            sles::SLmillibel::try_from(raam_core::num::sat_i32(
+                (2000.0 * volume.min(1.0).log10()).round().max(-6000.0),
+            ))
+            .expect("-6000..=0 millibels fit i16")
         };
         check(
             // SAFETY: `volume_itf` comes from the player, which lives until Drop.
@@ -307,7 +311,7 @@ impl AudioOut {
             ((**self.bq_itf).Enqueue.unwrap())(
                 self.bq_itf,
                 buf.as_ptr() as *const c_void,
-                buf.len() as sles::SLuint32,
+                sles::SLuint32::try_from(buf.len()).expect("a PCM batch fits u32"),
             )
         };
         if let Err(e) = check(status, "bufferqueue Enqueue") {

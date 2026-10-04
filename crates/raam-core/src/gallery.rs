@@ -220,7 +220,7 @@ pub fn draw(ui: &mut Ui, g: &mut Gallery, info: &ProbeInfo) -> Vec<Request> {
         .frame(
             egui::Frame::new()
                 .fill(s.surface)
-                .inner_margin(egui::Margin::symmetric(space::M as i8, 0)),
+                .inner_margin(egui::Margin::symmetric(num::sat_i8(space::M), 0)),
         )
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -239,7 +239,7 @@ pub fn draw(ui: &mut Ui, g: &mut Gallery, info: &ProbeInfo) -> Vec<Request> {
                     nw: theme::shape::L,
                     ..Default::default()
                 })
-                .inner_margin(egui::Margin::same(space::XL as i8)),
+                .inner_margin(egui::Margin::same(num::sat_i8(space::XL))),
         )
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
@@ -403,8 +403,8 @@ fn settings(ui: &mut Ui, g: &mut Gallery, req: &mut Vec<Request>) {
 fn on_content_edge<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     egui::Frame::new()
         .inner_margin(egui::Margin {
-            left: space::L as i8,
-            right: space::L as i8,
+            left: num::sat_i8(space::L),
+            right: num::sat_i8(space::L),
             ..Default::default()
         })
         .show(ui, add)
@@ -1132,7 +1132,10 @@ fn probe(ui: &mut Ui, info: &ProbeInfo, req: &mut Vec<Request>) {
         egui::Frame::new()
             .fill(bg)
             .corner_radius(CornerRadius::same(theme::shape::M))
-            .inner_margin(egui::Margin::symmetric(space::L as i8, space::M as i8))
+            .inner_margin(egui::Margin::symmetric(
+                num::sat_i8(space::L),
+                num::sat_i8(space::M),
+            ))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.spacing_mut().item_spacing.y = 0.0;

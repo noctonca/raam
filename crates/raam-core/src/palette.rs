@@ -7,7 +7,8 @@ use crate::theme::Scheme;
 use egui::Color32;
 
 const fn c(rgb: u32) -> Color32 {
-    Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+    let [_, r, g, b] = rgb.to_be_bytes();
+    Color32::from_rgb(r, g, b)
 }
 
 pub const LIGHT: Scheme = Scheme {

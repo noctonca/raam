@@ -445,7 +445,7 @@ fn android_main(app: AndroidApp) {
                 controller.state.settings.collage_max = default_max.min(LARGEST_LAYOUT);
             }
             controller.state.settings.screen_default_max = default_max;
-            let margin = ((2.0 * density as f32 / 160.0) + 0.5) as i32;
+            let margin = raam_core::num::sat_i32((2.0 * density as f32 / 160.0) + 0.5);
             fetch = Some(fetch::spawn(
                 host.clone(),
                 controller.state.settings.collage_max,

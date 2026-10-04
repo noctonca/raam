@@ -134,7 +134,7 @@ pub unsafe fn glGetIntegerv(pname: GlEnum, params: *mut GlInt) {
     });
     // SAFETY: the names this shim answers are single-valued, and `params`
     // is valid for one GlInt by GL's contract.
-    unsafe { *params = v as GlInt };
+    unsafe { *params = crate::num::sat_i32(v) };
 }
 
 // Shaders and programs.
@@ -373,11 +373,17 @@ pub unsafe fn glBindBuffer(target: GlEnum, buffer: GlUint) {
     with(|s| s.gl.bind_buffer(target, s.buffers.get(buffer).as_ref()))
 }
 
+/// # Panics
+/// If `size` is negative, or past `i32` (which an `isize` can't be on
+/// wasm32).
 pub unsafe fn glBufferData(target: GlEnum, size: isize, data: *const c_void, usage: GlEnum) {
     // SAFETY: non-null `data` holds `size` bytes, by GL's contract.
     match unsafe { bytes(data, from_gl_size(size)) } {
         Some(b) => with(|s| s.gl.buffer_data_with_u8_array(target, b, usage)),
-        None => with(|s| s.gl.buffer_data_with_i32(target, size as i32, usage)),
+        None => {
+            let size = i32::try_from(size).expect("wasm32's isize is i32");
+            with(|s| s.gl.buffer_data_with_i32(target, size, usage));
+        }
     }
 }
 

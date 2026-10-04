@@ -6,6 +6,7 @@
 //! Blocking HTTP over ureq (rustls). Roots are bundled (webpki): the
 //! frame is API 23 and its system trust store is stale. Errors are typed:
 //! `ProviderError::Transport` is the offline signal, never a string match.
+use raam_core::num;
 use raam_model::limits;
 use raam_model::{AlbumId, Focus, ProviderError, RemoteId, UserId};
 
@@ -232,7 +233,7 @@ impl Client {
         let faces = self.get_json(&format!("/api/faces?id={id}"))?;
         let mut found: Vec<(f32, (f32, f32))> = Vec::new();
         for face in faces.as_array().into_iter().flatten() {
-            let get = |k: &str| face.get(k).and_then(|v| v.as_f64()).map(|v| v as f32);
+            let get = |k: &str| face.get(k).and_then(|v| v.as_f64()).map(num::to_f32);
             let (Some(x1), Some(y1), Some(x2), Some(y2), Some(iw), Some(ih)) = (
                 get("boundingBoxX1"),
                 get("boundingBoxY1"),
@@ -334,7 +335,8 @@ fn base64_to_hex(s: &str) -> Option<String> {
         n += 6;
         if n >= 8 {
             n -= 8;
-            out.push((bits >> n) as u8);
+            // The low byte: the bits above it went out already.
+            out.push((bits >> n).to_le_bytes()[0]);
         }
     }
     (!out.is_empty()).then(|| to_hex(&out))
@@ -353,7 +355,10 @@ fn parse_iso_ms(s: &str) -> Option<i64> {
         t.next()?.parse::<i64>().ok()?,
     );
     let ss: f64 = t.next().unwrap_or("0").parse().ok()?;
-    Some((days_from_civil(y, m, day) * 86_400 + hh * 3600 + mm * 60) * 1000 + (ss * 1000.0) as i64)
+    Some(
+        (days_from_civil(y, m, day) * 86_400 + hh * 3600 + mm * 60) * 1000
+            + num::sat_i64(ss * 1000.0),
+    )
 }
 
 /// Howard Hinnant's days-from-civil, for UTC dates without a date crate.

@@ -19,6 +19,7 @@
 //!   based on the active text colour" route epaint's own comment on
 //!   `FontColorTransferFunction` suggests.
 use crate::gl::*;
+use crate::num;
 use std::collections::HashMap;
 use std::ffi::c_void;
 
@@ -343,16 +344,22 @@ fn tessellated(
             (prim.clip_rect.min.to_vec2() * ppp).to_pos2(),
             (prim.clip_rect.max.to_vec2() * ppp).to_pos2(),
         );
-        let x = clip.min.x.max(0.0).floor() as i32;
-        let w = (clip.max.x.min(screen_w as f32) - clip.min.x.max(0.0))
-            .max(0.0)
-            .ceil() as i32;
-        let h = (clip.max.y.min(screen_h as f32) - clip.min.y.max(0.0))
-            .max(0.0)
-            .ceil() as i32;
-        let y_gl = (screen_h as f32 - clip.max.y.min(screen_h as f32))
-            .max(0.0)
-            .floor() as i32;
+        let x = num::sat_i32(clip.min.x.max(0.0).floor());
+        let w = num::sat_i32(
+            (clip.max.x.min(screen_w as f32) - clip.min.x.max(0.0))
+                .max(0.0)
+                .ceil(),
+        );
+        let h = num::sat_i32(
+            (clip.max.y.min(screen_h as f32) - clip.min.y.max(0.0))
+                .max(0.0)
+                .ceil(),
+        );
+        let y_gl = num::sat_i32(
+            (screen_h as f32 - clip.max.y.min(screen_h as f32))
+                .max(0.0)
+                .floor(),
+        );
         let mut push = |vertices: &[egui::epaint::Vertex], part: &mut dyn Iterator<Item = u16>| {
             let idx_start = indices.len();
             let vert_byte_offset = verts.len() * std::mem::size_of::<GpuVertex>();
@@ -373,7 +380,9 @@ fn tessellated(
         };
         // epaint's own bound for one 16-bit part.
         if mesh.vertices.len() <= usize::from(u16::MAX) {
-            push(&mesh.vertices, &mut mesh.indices.iter().map(|&i| i as u16));
+            // Each index is below the vertex count, so it fits a u16 here.
+            let index = |&i: &u32| u16::try_from(i).expect("an index into a 16-bit part");
+            push(&mesh.vertices, &mut mesh.indices.iter().map(index));
         } else {
             for part in mesh.clone().split_to_u16() {
                 push(&part.vertices, &mut part.indices.into_iter());

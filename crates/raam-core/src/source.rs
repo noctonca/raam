@@ -96,7 +96,7 @@ pub fn shrink_to_cover(photo: &mut Photo, rect: collage::Rect) -> Duration {
                         + u16::from(src[r0 + c + 4 + k])
                         + u16::from(src[r1 + c + k])
                         + u16::from(src[r1 + c + 4 + k]);
-                    out[o + k] = ((sum + 2) / 4) as u8;
+                    out[o + k] = u8::try_from((sum + 2) / 4).expect("a mean of 4 bytes is a byte");
                 }
             }
         }
@@ -160,7 +160,8 @@ mod tests {
         // 4x2 -> 2x1 (then 1x0 would not cover a 1x1 tile).
         assert_eq!((p.width, p.height), (2, 1));
         let at = |x: usize, y: usize, k: usize| u16::from(src[4 * (y * 4 + x) + k]);
-        let want = ((at(0, 0, 0) + at(1, 0, 0) + at(0, 1, 0) + at(1, 1, 0) + 2) / 4) as u8;
+        let want =
+            u8::try_from((at(0, 0, 0) + at(1, 0, 0) + at(0, 1, 0) + at(1, 1, 0) + 2) / 4).unwrap();
         assert_eq!(p.rgba[0], want);
     }
 

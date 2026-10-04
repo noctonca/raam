@@ -40,7 +40,8 @@ impl Icon {
     /// # Panics
     /// If `ALL` leaves an icon out.
     pub fn ch(self) -> char {
-        char::from_u32(0xE000 + Icon::ALL.iter().position(|&i| i == self).unwrap() as u32).unwrap()
+        let at = Icon::ALL.iter().position(|&i| i == self).unwrap();
+        char::from_u32(0xE000 + u32::try_from(at).expect("`ALL` is a handful of icons")).unwrap()
     }
 }
 
@@ -192,7 +193,7 @@ pub fn raster(icon: Icon, size: usize, cap_height: f32, gap: f32) -> Raster {
         width: size,
         height: size,
         xmin: 0,
-        ymin: (cap_height / 2.0 - size as f32 / 2.0).round() as i32,
+        ymin: num::sat_i32((cap_height / 2.0 - size as f32 / 2.0).round()),
         advance: size as f32 + gap,
         bitmap,
     }

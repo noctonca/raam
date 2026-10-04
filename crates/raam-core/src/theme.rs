@@ -447,8 +447,8 @@ pub fn style(s: &Scheme, opts: Options, theme: Theme) -> Style {
     // 12 between controls in a row, so a focus ring (5 px outside its
     // control) keeps 4 px of air to the next one (UX.md, Fitts's Law).
     sp.item_spacing = vec2(space::M, space::S);
-    sp.window_margin = Margin::same(space::XL as i8);
-    sp.menu_margin = Margin::same(space::S as i8);
+    sp.window_margin = Margin::same(num::sat_i8(space::XL));
+    sp.menu_margin = Margin::same(num::sat_i8(space::S));
     sp.button_padding = vec2(space::XL, space::M);
     sp.indent = space::XL;
     // Everything clickable is at least a touch target tall.

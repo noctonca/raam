@@ -34,7 +34,8 @@ fn generate() -> String {
          use egui::Color32;\n\
          \n\
          const fn c(rgb: u32) -> Color32 {\n\
-         \x20   Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)\n\
+         \x20   let [_, r, g, b] = rgb.to_be_bytes();\n\
+         \x20   Color32::from_rgb(r, g, b)\n\
          }\n",
     );
     for (name, scheme, group, dark) in [

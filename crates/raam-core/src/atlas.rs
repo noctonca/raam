@@ -134,7 +134,8 @@ fn box_blur(src: &[u8], w: usize, h: usize, r: usize) -> Vec<u8> {
                     n += 1;
                 }
                 for i in 0..len {
-                    out[at(line, i)] = (sum / n.max(1)) as u8;
+                    out[at(line, i)] =
+                        u8::try_from(sum / n.max(1)).expect("a mean of bytes is a byte");
                     let add = i + r + 1;
                     if add < len {
                         sum += u32::from(src[at(line, add)]);

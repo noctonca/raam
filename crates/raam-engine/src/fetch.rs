@@ -204,7 +204,7 @@ fn rank(seed: u64, asset: i64) -> u64 {
 fn new_seed(counter: u64) -> u64 {
     // Wall time, through the Clock seam, so each boot shuffles differently;
     // monotonic time reads much the same at every boot.
-    let nanos = clock::wall().as_nanos() as u64;
+    let nanos = u64::try_from(clock::wall().as_nanos()).expect("ns since 1970 fit u64 until 2554");
     rank(nanos, counter.cast_signed())
 }
 
@@ -688,10 +688,11 @@ fn load_video(
 /// enough in `0..n` for a shuffle and Frameo's weighted layout pick without
 /// pulling in a `rand` dependency.
 fn pseudo_random_below(n: u32, counter: u64) -> u32 {
-    let nanos = clock::now().as_nanos() as u64;
+    let nanos =
+        u64::try_from(clock::now().as_nanos()).expect("584 years of uptime fit u64 nanoseconds");
     let mut x = (nanos ^ counter.wrapping_mul(0x9E3779B97F4A7C15)) | 1;
     x ^= x << 13;
     x ^= x >> 7;
     x ^= x << 17;
-    (x % u64::from(n.max(1))) as u32
+    u32::try_from(x % u64::from(n.max(1))).expect("below n, a u32")
 }

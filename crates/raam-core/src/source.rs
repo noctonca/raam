@@ -68,6 +68,12 @@ pub fn shrink_to_cover(photo: &mut Photo, rect: collage::Rect) -> Duration {
         rect.h
     );
     let start = clock::now();
+    // An empty preview has nothing to halve. Its cover size is 0 * inf =
+    // NaN, which casts to 0, so a 0x0 one would "still cover" at every
+    // halving and the loop would never end.
+    if photo.width == 0 || photo.height == 0 {
+        return clock::elapsed(start);
+    }
     let (tw, th) = (rect.w as u32, rect.h as u32);
     let s = (tw as f32 / photo.width as f32).max(th as f32 / photo.height as f32);
     let (cover_w, cover_h) = (
@@ -170,5 +176,23 @@ mod tests {
             h: 0,
         };
         shrink_to_cover(&mut p, empty);
+    }
+
+    /// A 0x0 preview is left as it is; it once looped for ever (found by
+    /// the properties below).
+    #[test]
+    fn an_empty_preview_is_left_alone() {
+        clock::fake::install();
+        let tile = collage::Rect {
+            x: 0,
+            y: 0,
+            w: 420,
+            h: 398,
+        };
+        for (w, h) in [(0, 0), (0, 7), (7, 0)] {
+            let mut p = photo(w, h);
+            shrink_to_cover(&mut p, tile);
+            assert_eq!((p.width, p.height, p.rgba.len()), (w, h, 0));
+        }
     }
 }

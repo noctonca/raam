@@ -138,6 +138,10 @@ mod tests {
         assert_eq!(until(0, 0), Duration::from_secs(86_400));
     }
 
+    // Not under miri: proptest reads the working directory (its
+    // regressions file) and the OS's randomness, which miri's isolation
+    // refuses, and miri is here for unsafe code, which these don't touch.
+    #[cfg(not(miri))]
     mod properties {
         use super::*;
         use proptest::prelude::*;

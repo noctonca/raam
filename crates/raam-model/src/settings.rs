@@ -386,6 +386,10 @@ mod tests {
         check(&Corner::ALL, Corner::as_str, Corner::parse);
     }
 
+    // Not under miri: proptest reads the working directory (its
+    // regressions file) and the OS's randomness, which miri's isolation
+    // refuses, and miri is here for unsafe code, which these don't touch.
+    #[cfg(not(miri))]
     mod properties {
         use super::*;
         use proptest::prelude::*;

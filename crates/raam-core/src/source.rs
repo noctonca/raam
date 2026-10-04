@@ -68,6 +68,12 @@ pub fn shrink_to_cover(photo: &mut Photo, rect: collage::Rect) -> Duration {
         rect.h
     );
     let start = clock::now();
+    // An empty preview has nothing to halve. Its cover size is 0 * inf =
+    // NaN, which casts to 0, so a 0x0 one would "still cover" at every
+    // halving and the loop would never end.
+    if photo.width == 0 || photo.height == 0 {
+        return clock::elapsed(start);
+    }
     let (tw, th) = (rect.w as u32, rect.h as u32);
     let s = (tw as f32 / photo.width as f32).max(th as f32 / photo.height as f32);
     let (cover_w, cover_h) = (
@@ -170,5 +176,147 @@ mod tests {
             h: 0,
         };
         shrink_to_cover(&mut p, empty);
+    }
+
+    /// A 0x0 preview is left as it is; it once looped for ever (found by
+    /// the properties below).
+    #[test]
+    fn an_empty_preview_is_left_alone() {
+        clock::fake::install();
+        let tile = collage::Rect {
+            x: 0,
+            y: 0,
+            w: 420,
+            h: 398,
+        };
+        for (w, h) in [(0, 0), (0, 7), (7, 0)] {
+            let mut p = photo(w, h);
+            shrink_to_cover(&mut p, tile);
+            assert_eq!((p.width, p.height, p.rgba.len()), (w, h, 0));
+        }
+    }
+
+    // Not under miri: proptest reads the working directory (its
+    // regressions file) and the OS's randomness, which miri's isolation
+    // refuses, and miri is here for unsafe code, which these don't touch.
+    #[cfg(not(miri))]
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        fn tile(w: i32, h: i32) -> collage::Rect {
+            collage::Rect { x: 0, y: 0, w, h }
+        }
+
+        /// A tile side: empty, small, screen-sized, or any i32 at all
+        /// (negative and past any screen included).
+        fn side() -> impl Strategy<Value = i32> {
+            prop_oneof![0..=2i32, 1..=2000i32, any::<i32>()]
+        }
+
+        /// A preview side: up to 600, so a case stays a few ms in a debug
+        /// build; 0 included (a decoder handing over nothing).
+        fn preview_side() -> impl Strategy<Value = u32> {
+            prop_oneof![0..=4u32, 0..=600u32]
+        }
+
+        /// The source's size scaled to just cover the tile, in f64
+        /// (independent of the f32 arithmetic under test).
+        fn cover_size(w: u32, h: u32, rect: collage::Rect) -> (f64, f64) {
+            let s = (f64::from(rect.w) / f64::from(w)).max(f64::from(rect.h) / f64::from(h));
+            (f64::from(w) * s, f64::from(h) * s)
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(128))]
+
+            /// Any preview into any tile returns (the 0x0 tile once looped
+            /// for ever), or panics if and only if the tile is empty.
+            #[test]
+            fn returns_or_refuses_only_an_empty_tile(
+                w in preview_side(),
+                h in preview_side(),
+                tw in side(),
+                th in side(),
+            ) {
+                clock::fake::install();
+                let mut p = photo(w, h);
+                let done = catch_unwind(AssertUnwindSafe(|| shrink_to_cover(&mut p, tile(tw, th))));
+                prop_assert_eq!(done.is_err(), tw <= 0 || th <= 0);
+            }
+
+            /// The result is the preview halved k times in both directions
+            /// together (k = 0 when it is already near the tile), so it
+            /// stays inside the source, keeps its shape to within the
+            /// halving's rounding, and has exactly its pixels' bytes.
+            #[test]
+            fn halves_whole_preview_in_step(
+                w in preview_side(),
+                h in preview_side(),
+                tw in 1..=i32::MAX,
+                th in 1..=i32::MAX,
+            ) {
+                clock::fake::install();
+                let mut p = photo(w, h);
+                shrink_to_cover(&mut p, tile(tw, th));
+                let k = (0..32).find(|k| (w >> k, h >> k) == (p.width, p.height));
+                prop_assert!(k.is_some(), "{}x{} -> {}x{}", w, h, p.width, p.height);
+                prop_assert_eq!(p.rgba.len(), (p.width * p.height * 4) as usize);
+                if k != Some(0) && p.width > 0 && p.height > 0 {
+                    // Each floor loses under a pixel per side.
+                    let source = f64::from(w) / f64::from(h);
+                    let result = f64::from(p.width) / f64::from(p.height);
+                    let slack = 1.0 / f64::from(p.width) + 1.0 / f64::from(p.height);
+                    prop_assert!((result / source - 1.0).abs() <= slack * 1.01,
+                        "{}x{} -> {}x{}", w, h, p.width, p.height);
+                }
+            }
+
+            /// A halved preview still covers the tile (the GPU never has
+            /// to enlarge it), and is the smallest halving that does.
+            #[test]
+            fn halves_to_the_smallest_cover(
+                w in 1..=600u32,
+                h in 1..=600u32,
+                tw in 1..=2000i32,
+                th in 1..=2000i32,
+            ) {
+                clock::fake::install();
+                let rect = tile(tw, th);
+                let mut p = photo(w, h);
+                shrink_to_cover(&mut p, rect);
+                let (cover_w, cover_h) = cover_size(w, h, rect);
+                // One pixel of slack for the f32 arithmetic under test.
+                if (p.width, p.height) != (w, h) {
+                    prop_assert!(f64::from(p.width) >= cover_w - 1.0
+                        && f64::from(p.height) >= cover_h - 1.0,
+                        "{}x{} -> {}x{} under the {}x{} cover", w, h, p.width, p.height,
+                        cover_w, cover_h);
+                }
+                prop_assert!(f64::from(p.width / 2) < cover_w + 1.0
+                    || f64::from(p.height / 2) < cover_h + 1.0,
+                    "{}x{} -> {}x{} could halve again over the {}x{} cover", w, h,
+                    p.width, p.height, cover_w, cover_h);
+            }
+
+            /// Averaging keeps a flat colour flat: no rounding drift, no
+            /// channel bleeding into its neighbour.
+            #[test]
+            fn a_flat_colour_stays_that_colour(
+                w in 1..=256u32,
+                h in 1..=256u32,
+                tw in 1..=64i32,
+                th in 1..=64i32,
+                rgba: [u8; 4],
+            ) {
+                clock::fake::install();
+                let mut p = photo(w, h);
+                p.rgba = rgba.repeat((w * h) as usize);
+                shrink_to_cover(&mut p, tile(tw, th));
+                let (pixels, rest) = p.rgba.as_chunks::<4>();
+                prop_assert!(rest.is_empty() && pixels.iter().all(|px| *px == rgba));
+            }
+        }
     }
 }

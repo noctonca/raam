@@ -3276,6 +3276,69 @@ mod tests {
         }
     }
 
+    // Not under miri: proptest reads the working directory (its
+    // regressions file) and the OS's randomness, which miri's isolation
+    // refuses, and miri is here for unsafe code, which these don't touch.
+    #[cfg(not(miri))]
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// An interval as the picker may be handed one: on the range, a
+        /// fraction from a hand-edited row, or any float but NaN (the
+        /// load clamps every row into range, and JSON has no NaN).
+        fn interval() -> impl Strategy<Value = f32> {
+            let (lo, hi) = INTERVAL_RANGE_SECS;
+            prop_oneof![
+                lo..=hi,
+                (lo as i32..=hi as i32).prop_map(|v| v as f32),
+                any::<f32>().prop_filter("NaN", |v| !v.is_nan()),
+            ]
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+
+            /// A step lands in the range from anywhere, and moves the way
+            /// it was pressed; it stays put only at that end (the picker
+            /// greys a button whose step stays put).
+            #[test]
+            fn an_interval_step_stays_in_range_and_moves(v in interval(), up: bool) {
+                let (lo, hi) = INTERVAL_RANGE_SECS;
+                let dir = if up { 1 } else { -1 };
+                let next = interval_step(v, dir);
+                prop_assert!((lo..=hi).contains(&next), "{} {:+} -> {}", v, dir, next);
+                if (lo..=hi).contains(&v) {
+                    let end = if up { hi } else { lo };
+                    if v == end {
+                        prop_assert_eq!(next, end);
+                    } else {
+                        prop_assert!(if up { next > v } else { next < v },
+                            "{} {:+} -> {}", v, dir, next);
+                    }
+                }
+            }
+
+            /// Either button reaches its end of the range from anywhere,
+            /// and soon: end to end is 25 one-second taps to 30 s and 18
+            /// five-second ones on to 120 s (43), and an out-of-range
+            /// value lands on an end in one.
+            #[test]
+            fn every_interval_reaches_both_ends(v in interval()) {
+                let (lo, hi) = INTERVAL_RANGE_SECS;
+                for (dir, end) in [(1, hi), (-1, lo)] {
+                    let mut at = v;
+                    let mut taps = 0;
+                    while at != end {
+                        at = interval_step(at, dir);
+                        taps += 1;
+                        prop_assert!(taps <= 44, "{} never reached {}", v, end);
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_cache_fits_its_cap_over_the_average_preview() {
         let mut lib = sample_stats();

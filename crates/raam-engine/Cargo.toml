@@ -34,3 +34,7 @@ kamadak-exif = "0.6"
 ring = "0.17"
 # statvfs (free space) and mktime (EXIF local times); native-only crate.
 libc = "0.2"
+
+[dev-dependencies]
+# Property tests; never in a shipped build.
+proptest.workspace = true

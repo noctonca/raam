@@ -1632,6 +1632,159 @@ mod tests {
         assert_eq!(loaded.cache_cap_mb, 4096);
     }
 
+    // Not under miri: proptest reads the working directory (its
+    // regressions file) and the OS's randomness, which miri's isolation
+    // refuses, and miri is here for unsafe code, which these don't touch.
+    #[cfg(not(miri))]
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, TestRunner};
+        use serde_json::{Value, json};
+
+        /// What a numeric row may hold after a hand edit or another
+        /// build: any number JSON can carry (a NaN or infinity has no
+        /// JSON form; `json!` makes it null), or not a number at all.
+        fn any_row() -> impl Strategy<Value = Value> {
+            prop_oneof![
+                any::<f64>().prop_map(|v| json!(v)),
+                any::<f32>().prop_map(|v| json!(v)),
+                any::<i64>().prop_map(|v| json!(v)),
+                any::<u64>().prop_map(|v| json!(v)),
+                (-1000i64..=5000).prop_map(|v| json!(v)),
+                Just(Value::Null),
+                any::<bool>().prop_map(|v| json!(v)),
+                "\\PC{0,8}".prop_map(|v| json!(v)),
+            ]
+        }
+
+        const NUMERIC_KEYS: [&str; 5] = [
+            "slideshow.interval_s",
+            "collage.max",
+            "cache.cap_mb",
+            "video.audio_delay_ms",
+            "video.volume",
+        ];
+
+        /// Whatever the numeric rows hold, every setting loads inside its
+        /// range, and the interval makes a `Duration` without the panic
+        /// a negative one once caused.
+        #[test]
+        fn any_numeric_row_loads_inside_its_range() {
+            install_clock();
+            let db = open(Path::new(":memory:"), "").unwrap();
+            let conn = db.lock().unwrap();
+            let rows = prop::array::uniform5(any_row());
+            TestRunner::new(Config::with_cases(128))
+                .run(&rows, |values| {
+                    let rows: Vec<_> = NUMERIC_KEYS.into_iter().zip(values).collect();
+                    save_settings(&conn, &rows, OFF_1_TO_7).unwrap();
+                    let mut s = Settings::defaults("", "");
+                    load_settings(&conn, &mut s);
+                    let (lo, hi) = limits::INTERVAL_RANGE_SECS;
+                    prop_assert!((lo..=hi).contains(&s.interval_secs), "{}", s.interval_secs);
+                    let _ = std::time::Duration::from_secs_f32(s.interval_secs);
+                    prop_assert!((1..=limits::LARGEST_LAYOUT).contains(&s.collage_max));
+                    let most = limits::CAP_CHOICES_MB[limits::CAP_CHOICES_MB.len() - 1];
+                    prop_assert!(s.cache_cap_mb <= most, "{}", s.cache_cap_mb);
+                    let (lo, hi) = limits::AUDIO_DELAY_RANGE;
+                    prop_assert!((lo..=hi).contains(&s.audio_delay_ms));
+                    prop_assert!((0.0..=1.0).contains(&s.video_volume), "{}", s.video_volume);
+                    Ok(())
+                })
+                .unwrap();
+        }
+
+        /// The rows of any settings the UI can make, not one value at a
+        /// time: `every_named_value_round_trips_through_the_db` generalised.
+        /// (Rows, not `Settings`, which has no `Debug`: it holds the key.)
+        fn any_settings_rows() -> impl Strategy<Value = Vec<(&'static str, Value)>> {
+            let (lo, hi) = limits::INTERVAL_RANGE_SECS;
+            let (delay_lo, delay_hi) = limits::AUDIO_DELAY_RANGE;
+            let most = limits::CAP_CHOICES_MB[limits::CAP_CHOICES_MB.len() - 1];
+            let named = (
+                prop::sample::select(TransitionChoice::ALL.to_vec()),
+                prop::sample::select(FitBackground::ALL.to_vec()),
+                prop::sample::select(GapColour::ALL.to_vec()),
+                prop::sample::select(ClockStyle::ALL.to_vec()),
+                prop::sample::select(Corner::ALL.to_vec()),
+                prop::sample::select(VideoPlayback::ALL.to_vec()),
+            );
+            let numbers = (
+                lo..=hi,
+                1..=limits::LARGEST_LAYOUT,
+                0..=most,
+                delay_lo..=delay_hi,
+                0.0f32..=1.0,
+            );
+            let switches = prop::array::uniform6(any::<bool>());
+            (named, numbers, switches).prop_map(
+                |(
+                    (transition, fit, gap, style, corner, playback),
+                    (interval, collage, cap, delay, volume),
+                    [ken_burns, fill, clock_24h, weather, sound, dark],
+                )| {
+                    let mut s = Settings::defaults("", "");
+                    s.interval_secs = interval;
+                    s.transition = transition;
+                    s.ken_burns_enabled = ken_burns;
+                    s.fill_by_default = fill;
+                    s.fit_background = fit;
+                    s.collage_max = collage;
+                    s.gap_colour = gap;
+                    s.clock_style = style;
+                    s.clock_corner = corner;
+                    s.clock_24h = clock_24h;
+                    s.weather_enabled = weather;
+                    s.dark_theme = dark;
+                    s.cache_cap_mb = cap;
+                    s.video_playback = playback;
+                    s.video_sound = sound;
+                    s.video_volume = volume;
+                    s.audio_delay_ms = delay;
+                    raam_core::store::settings_rows(&s)
+                },
+            )
+        }
+
+        fn any_schedule() -> impl Strategy<Value = Schedule> {
+            (
+                any::<bool>(),
+                0..limits::MINUTES_PER_DAY,
+                0..limits::MINUTES_PER_DAY,
+            )
+                .prop_map(|(enabled, sleep_min, wake_min)| Schedule {
+                    enabled,
+                    sleep_min,
+                    wake_min,
+                })
+        }
+
+        #[test]
+        fn any_settings_round_trip_through_the_db() {
+            install_clock();
+            let db = open(Path::new(":memory:"), "").unwrap();
+            let conn = db.lock().unwrap();
+            TestRunner::new(Config::with_cases(128))
+                .run(&(any_settings_rows(), any_schedule()), |(rows, sleep)| {
+                    save_settings(&conn, &rows, sleep).unwrap();
+                    let mut loaded = Settings::defaults("", "");
+                    load_settings(&conn, &mut loaded);
+                    prop_assert_eq!(raam_core::store::settings_rows(&loaded), rows);
+                    prop_assert_eq!(
+                        Schedule {
+                            enabled: loaded.sleep_enabled,
+                            sleep_min: loaded.sleep_min,
+                            wake_min: loaded.wake_min,
+                        },
+                        sleep
+                    );
+                    Ok(())
+                })
+                .unwrap();
+        }
+    }
+
     #[test]
     fn the_sweep_drops_a_file_a_power_cut_left_short() {
         install_clock();

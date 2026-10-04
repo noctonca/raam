@@ -344,6 +344,11 @@ Notably absent, by decision: wgpu, glow, tokio, reqwest, `image`,
 bindgen-at-build-time, material-colors-at-runtime, clap (hosts parse
 their few flags by hand), any async runtime.
 
+Tools that check the tree without entering a build: `cargo-deny`
+(CI and locally, by `deny.toml`) holds the licences to the allow list,
+fails on RustSec advisories and unknown sources, and reports duplicate
+versions.
+
 Licences: all permissive; ship the notices (Roboto's OFL-1.1, Material
 Symbols' Apache-2.0, ring, webpki-roots' CDLA-Permissive-2.0).
 

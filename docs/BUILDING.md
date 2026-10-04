@@ -134,6 +134,13 @@ Miri can't follow. On Apple silicon add `--target x86_64-unknown-linux-gnu`
 before running anything that draws text: Miri has no NEON, which egui's
 glyph rasteriser uses there.
 
+And cargo-deny over the dependency tree, by `deny.toml` (`brew install
+cargo-deny` or `cargo install cargo-deny`):
+
+```sh
+cargo deny check
+```
+
 Pull requests also build the web demo ([below](#web)).
 
 ## Goldens

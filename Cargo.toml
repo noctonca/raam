@@ -4,6 +4,9 @@ description = "Turn a cheap Android photo frame into something you own: a fast, 
 readme = "README.md"
 keywords = ["photo-frame", "immich", "slideshow", "egui", "android"]
 categories = ["multimedia::images"]
+# 0.0.0 on crates.io holds the name. The crates under crates/ aren't
+# published, so neither is this until a release plan says otherwise.
+publish = false
 # Ship only code, README and licences (the docs live in the repo).
 include = ["src/**", "build.rs", "README.md", "LICENSE-*"]
 build = "build.rs"

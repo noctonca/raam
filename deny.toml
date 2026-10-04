@@ -1,0 +1,57 @@
+# cargo-deny: the dependency register (docs/ARCHITECTURE.md) says why
+# each crate is here; this checks what the register can't: licences,
+# RustSec advisories, duplicate versions and where crates come from.
+# CI runs `cargo deny check` on every push and PR.
+
+[graph]
+# Every target a host builds for: the Mac and Linux desktops, the Pi,
+# the frame and the web demo. A crate only one of them links still counts.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "armv7-linux-androideabi",
+    "wasm32-unknown-unknown",
+]
+all-features = true
+
+[advisories]
+# An unmaintained crate fails only when we depend on it directly: that
+# one is ours to replace. Deeper ones are their parents' to replace.
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+# All permissive (the register's "Licences" line). A crate offering a
+# choice (self_cell: Apache-2.0 OR GPL-2.0-only) passes on the
+# permissive side.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0", # webpki-roots
+    "IJG",                 # jpeg-encoder's DCT
+    "ISC",
+    "MIT",
+    "Unicode-3.0",         # unicode-ident
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+# The workspace's own crates are never published from here.
+ignore = true
+
+[bans]
+# Duplicates are reported, not failed: some are known and accepted
+# (jni 0.21 beside android-activity's 0.22, in the register).
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

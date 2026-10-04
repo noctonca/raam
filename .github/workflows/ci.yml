@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# A pull request's newer push cancels its stale run; main runs every push.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   build:
     name: fmt, clippy, test
@@ -67,6 +72,21 @@ jobs:
       - run: cargo miri setup
       - run: cargo miri test -p raam-model
       - run: "cargo miri test -p raam-core --lib gl::"
+
+  # Licences, RustSec advisories, duplicate versions and sources, by
+  # deny.toml. The advisory database is fetched fresh, so a new advisory
+  # can turn a run red on its own: update the lockfile, or ignore it in
+  # deny.toml with the reason.
+  deny:
+    name: dependencies pass cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - run: cargo deny check
 
   # CI can't run the goldens (pixels are exact per GPU), but it can hold
   # the rule's other half: a bless is a commit of its own.

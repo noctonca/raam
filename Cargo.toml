@@ -60,6 +60,9 @@ raam-model = { path = "crates/raam-model" }
 raam-core = { path = "crates/raam-core" }
 raam-engine = { path = "crates/raam-engine" }
 log = "0.4"
+# Property tests, in [dev-dependencies] only: never in a build that ships.
+# `std` alone: no fork/timeout (rusty-fork, tempfile) and no bit-set.
+proptest = { version = "1", default-features = false, features = ["std"] }
 # Every dependency added here must first earn its row in
 # docs/ARCHITECTURE.md "The dependency register".
 

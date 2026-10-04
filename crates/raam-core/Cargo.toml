@@ -43,3 +43,7 @@ web-sys = { version = "0.3", features = [
     "WebGlTexture",
     "WebGlUniformLocation",
 ] }
+
+[dev-dependencies]
+# Property tests; never in a shipped build.
+proptest.workspace = true

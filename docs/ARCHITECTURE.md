@@ -341,6 +341,7 @@ heavier crate, the replacement is a decision:
 | `winit`, `glutin`, `glutin-winit`, `egui-winit` (no `links`), `png` | raam (desktop) | The window host, its keys in egui's terms, and the screenshot tool |
 | `wasm-bindgen`, `js-sys`, `web-sys` | web; core on wasm32 only (the WebGL1 module) | Unavoidable wasm glue, and egui already brings all three on wasm32. The web host logs and reports panics to the console itself (about 20 lines), so no `console_log` or `console_error_panic_hook` |
 | Baked colour table (generator in `tools/`) | core | Replaces `material-colors` at runtime (−20 crates, −getrandom); a test asserts the table matches the derivation |
+| `proptest` 1, `std` only (no fork/timeout) | model, core, engine: **dev-dependency only** | Property tests over the geometry, the sleep schedule, the setting clamps and the stored names. Never in a shipped build, so no APK or wasm surface; its rand/getrandom stay in test binaries, outside the pure-core rule. It finds the class of bug that has shipped: the 0x0 tile that hung `shrink_to_cover` (#64), the negative interval that panicked `Duration::from_secs_f32` (#49); on arrival it found a 0x0 preview hanging the same loop and an overflow in `parse_hm` |
 
 Notably absent, by decision: wgpu, glow, tokio, reqwest, `image`,
 bindgen-at-build-time, material-colors-at-runtime, clap (hosts parse

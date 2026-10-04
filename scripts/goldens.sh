@@ -31,8 +31,12 @@ export LC_ALL=C
 cd "$(git rev-parse --show-toplevel)" || exit 2
 GOLDENS=tests/goldens.txt
 OUT=target/goldens
-BIN=target/release/raam
-JOBS=4
+# The `quick` profile: release without LTO, the same pixels for a
+# fraction of the relink.
+BIN=target/quick/raam
+# Each shot is a process of its own; one per core is fastest (on an M1
+# Pro: 23 s at 10, 25 s at 8, 36 s at 4).
+JOBS=$(getconf _NPROCESSORS_ONLN)
 
 # name, then the flags that draw it (--exact and --hash are added).
 list() {
@@ -120,8 +124,8 @@ renderer() {
 }
 
 build() {
-    echo "building the desktop host (release)"
-    cargo build --release --bin raam -q || exit 2
+    echo "building the desktop host (quick)"
+    cargo build --profile quick --bin raam -q || exit 2
 }
 
 # The commit that last blessed, built in a worktree of its own; echoes the
@@ -143,12 +147,15 @@ base_bin() {
     # has them, so only what differs compiles.
     if [ ! -d "$OUT/base-target" ]; then
         mkdir -p "$OUT/base-target"
-        cp -cR target/release "$OUT/base-target/" 2> /dev/null || true
+        cp -cR target/quick "$OUT/base-target/" 2> /dev/null || true
     fi
     echo "building the blessed commit ${base:0:8} in $wt" >&2
-    CARGO_TARGET_DIR=$OUT/base-target cargo build --release --bin raam -q \
+    # The profile is spelled out here: a commit blessed before it existed
+    # doesn't define it.
+    CARGO_TARGET_DIR=$OUT/base-target cargo build --profile quick --bin raam -q \
+        --config 'profile.quick.inherits="release"' --config profile.quick.lto=false \
         --manifest-path "$wt/Cargo.toml" >&2 || return 1
-    echo "$OUT/base-target/release/raam"
+    echo "$OUT/base-target/quick/raam"
 }
 
 # Draws each shot on stdin before (the blessed commit) and after (this

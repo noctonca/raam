@@ -20,8 +20,9 @@ checks against it.
 
 - **Desktop host.** The `raam` binary renders the core's own
   theme/kit/gallery/frame_ui with the core's own painter, so it shows
-  the same pixels as the frame: `cargo build --release -p raam`, then
-  `target/release/raam`. Its flags are in the `//!` header of
+  the same pixels as the frame: `cargo build --profile quick -p raam`, then
+  `target/quick/raam` (release without LTO: the same pixels, a fast
+  relink). Its flags are in the `//!` header of
   `src/main.rs`:
   - `--exact`: device pixels;
   - `--page`, `--theme`, `--scroll PX`, `--size WxH`;

@@ -16,8 +16,8 @@ Scope: [files and functions this fixer owns]. Another agent is editing
 breaks in code you didn't touch, wait 30 s and retry. Re-read a shared
 file right before each edit. Don't commit.
 
-Iterate with the desktop host: `cargo build --release -p raam`, then
-`target/release/raam --theme dark|light --page <page> --exact
+Iterate with the desktop host: `cargo build --profile quick -p raam`, then
+`target/quick/raam --theme dark|light --page <page> --exact
 [--scroll PX] --screenshot /path.png`. Look at every screenshot with the
 Read tool. Measure with `uv run -q --with pillow python
 .claude/skills/ux-qa/scripts/qa.py` (ink, glyphs, zoom, contrast,
@@ -42,7 +42,7 @@ animation smoothness), but don't try to check it.
 
 Final report, concise: for each finding, what changed (file:line) with
 measurements before and after; what you didn't fix and why; the new
-findings you fixed; the frame-only list. `cargo build --release -p raam`
+findings you fixed; the frame-only list. `cargo build --profile quick -p raam`
 must pass without warnings.
 ```
 

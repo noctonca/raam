@@ -57,6 +57,15 @@ pub fn wall() -> Duration {
     (source().wall)()
 }
 
+/// Wall-clock unix seconds, as `local` takes them.
+///
+/// # Panics
+/// Past `i64::MAX` seconds, 292 billion years from now: a clock source
+/// that far out is a bug.
+pub fn wall_secs() -> i64 {
+    i64::try_from(wall().as_secs()).expect("unix seconds fit i64 for 292 billion years")
+}
+
 /// The local time at `epoch` (unix seconds).
 pub fn local(epoch: i64) -> LocalTime {
     (source().local)(epoch)

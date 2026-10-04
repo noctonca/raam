@@ -312,22 +312,22 @@ impl Player {
             glTexParameteri(
                 GL_TEXTURE_EXTERNAL_OES,
                 GL_TEXTURE_MIN_FILTER,
-                GL_LINEAR as i32,
+                gl_enum_param(GL_LINEAR),
             );
             glTexParameteri(
                 GL_TEXTURE_EXTERNAL_OES,
                 GL_TEXTURE_MAG_FILTER,
-                GL_LINEAR as i32,
+                gl_enum_param(GL_LINEAR),
             );
             glTexParameteri(
                 GL_TEXTURE_EXTERNAL_OES,
                 GL_TEXTURE_WRAP_S,
-                GL_CLAMP_TO_EDGE as i32,
+                gl_enum_param(GL_CLAMP_TO_EDGE),
             );
             glTexParameteri(
                 GL_TEXTURE_EXTERNAL_OES,
                 GL_TEXTURE_WRAP_T,
-                GL_CLAMP_TO_EDGE as i32,
+                gl_enum_param(GL_CLAMP_TO_EDGE),
             );
         }
         let (texture, window) = match VideoTexture::new(&mut env, oes) {
@@ -1130,8 +1130,8 @@ fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
                 }
                 Ok(DequeuedOutputBufferInfoResult::OutputFormatChanged) => {
                     let f = codec.output_format();
-                    rate = f.i32("sample-rate").unwrap_or(rate as i32) as u32;
-                    channels = f.i32("channel-count").unwrap_or(channels as i32) as u32;
+                    rate = f.i32("sample-rate").map_or(rate, |r| r as u32);
+                    channels = f.i32("channel-count").map_or(channels, |c| c as u32);
                 }
                 Ok(_) => {}
                 Err(e) => return Err(format!("dequeue output: {e:?}")),

@@ -441,9 +441,9 @@ fn plan_next(s: &mut State) -> Option<Plan> {
     }
     s.empty_logged = false;
     let seed = s.seed;
-    order.sort_by_key(|&i| rank(seed, i as i64 + 1));
+    order.sort_by_key(|&i| rank(seed, sample_id(i)));
     let start = |s: &State, order: &[usize]| match s.cursor {
-        Some(c) => order.partition_point(|&i| rank(s.seed, i as i64 + 1) <= c),
+        Some(c) => order.partition_point(|&i| rank(s.seed, sample_id(i)) <= c),
         None => 0,
     };
     if start(s, &order) >= order.len() {
@@ -451,7 +451,7 @@ fn plan_next(s: &mut State) -> Option<Plan> {
         s.seed = new_seed(s.counter);
         s.cursor = None;
         let seed = s.seed;
-        order.sort_by_key(|&i| rank(seed, i as i64 + 1));
+        order.sort_by_key(|&i| rank(seed, sample_id(i)));
         log::info!(
             "queue reshuffled ({} photos, seed {:016x})",
             order.len(),
@@ -471,7 +471,7 @@ fn plan_next(s: &mut State) -> Option<Plan> {
         pseudo_random_below(n, *counter)
     });
     if let Some(&last) = window[..choice.consumed().min(window.len())].last() {
-        s.cursor = Some(rank(s.seed, last as i64 + 1));
+        s.cursor = Some(rank(s.seed, sample_id(last)));
     }
     let assets: Vec<MediaItem> = choice
         .slot_to_item
@@ -480,7 +480,7 @@ fn plan_next(s: &mut State) -> Option<Plan> {
             let i = window[w];
             let p = &s.samples[i];
             MediaItem {
-                asset: AssetId::new(i as i64 + 1),
+                asset: AssetId::new(sample_id(i)),
                 key: CurationKey::new(p.key.clone()),
                 source: SourceKind::Local,
                 remote_id: RemoteId::new(p.file.clone()),
@@ -516,6 +516,11 @@ fn plan_next(s: &mut State) -> Option<Plan> {
     })
 }
 
+/// Sample `i`'s asset id: its index from 1, as asset ids count.
+fn sample_id(i: usize) -> i64 {
+    i64::try_from(i + 1).expect("a bundled sample's index, one of a handful, fits i64")
+}
+
 /// splitmix64 of the seed and the asset id (fetch.rs's keyed shuffle).
 fn rank(seed: u64, asset: i64) -> u64 {
     let mut z = seed ^ (asset as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -526,7 +531,7 @@ fn rank(seed: u64, asset: i64) -> u64 {
 
 fn new_seed(counter: u64) -> u64 {
     // Wall time, so each page load shuffles differently.
-    rank(clock::wall().as_nanos() as u64, counter as i64)
+    rank(clock::wall().as_nanos() as u64, counter.cast_signed())
 }
 
 /// fetch.rs's xorshift64 draw, seeded from the clock plus a counter.

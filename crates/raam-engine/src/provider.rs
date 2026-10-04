@@ -448,7 +448,7 @@ fn list_media(dir: &Path, out: &mut Vec<(String, (i64, i64))>) -> std::io::Resul
                 .map_or(0, |d| d.as_millis() as i64);
             out.push((
                 e.path().to_string_lossy().into_owned(),
-                (meta.len() as i64, mtime_ms),
+                (crate::db::sql_int(meta.len()), mtime_ms),
             ));
         }
     }

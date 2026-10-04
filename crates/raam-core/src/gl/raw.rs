@@ -3,7 +3,7 @@
 //! `table`, so their tests run natively, and under Miri (CI's miri job),
 //! which can't run the linkage itself.
 
-use super::GlSizei;
+use super::{GlSizei, gl_sizei};
 use std::ffi::{c_char, c_void};
 
 /// `len` bytes at `ptr`, or none for a null pointer.
@@ -52,7 +52,7 @@ pub(super) unsafe fn write_log(log: &str, max_len: GlSizei, len: *mut GlSizei, o
         std::ptr::copy_nonoverlapping(log.as_ptr(), out.cast::<u8>(), n);
         *out.add(n) = 0;
         if !len.is_null() {
-            *len = n as GlSizei;
+            *len = gl_sizei(n);
         }
     }
 }

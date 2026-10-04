@@ -65,7 +65,7 @@ impl Extractor {
                 ptr.as_ptr(),
                 file.as_raw_fd(),
                 0,
-                len as ndk_sys::off64_t,
+                ndk_sys::off64_t::try_from(len).expect("a file's length fits off64_t"),
             )
         };
         if status != ndk_sys::media_status_t::AMEDIA_OK {

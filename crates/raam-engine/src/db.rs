@@ -142,6 +142,22 @@ const MIGRATIONS: &[&str] = &["CREATE TABLE source (
        updated_at_ms INTEGER NOT NULL
      );"];
 
+/// A byte count or row count as SQLite's INTEGER (an i64). The frame's
+/// files and buffers are megabytes and its counts small, and no file
+/// reaches 2^63 bytes, so the value is unchanged.
+///
+/// # Panics
+/// On a value past `i64::MAX`: a size or count that big is a bug upstream.
+#[must_use]
+#[track_caller]
+pub fn sql_int<N>(n: N) -> i64
+where
+    N: TryInto<i64> + Copy + std::fmt::Display,
+{
+    n.try_into()
+        .unwrap_or_else(|_| panic!("{n} past SQLite's INTEGER range"))
+}
+
 pub fn now_ms() -> i64 {
     clock::wall().as_millis() as i64
 }
@@ -871,7 +887,7 @@ pub fn load_playback(conn: &Connection) -> Option<(Option<AssetId>, u64)> {
         |r| {
             Ok((
                 r.get::<_, Option<i64>>(0)?.map(AssetId::new),
-                r.get::<_, Option<i64>>(1)?.unwrap_or(0) as u64,
+                r.get::<_, Option<i64>>(1)?.unwrap_or(0).cast_unsigned(),
             ))
         },
     )
@@ -885,7 +901,7 @@ pub fn save_playback(conn: &Connection, current: AssetId, seed: u64) -> rusqlite
         "INSERT INTO playback (id, current_asset, shuffle_seed, updated_at_ms) VALUES (1, ?1, ?2, ?3)
          ON CONFLICT (id) DO UPDATE SET current_asset = excluded.current_asset,
            shuffle_seed = excluded.shuffle_seed, updated_at_ms = excluded.updated_at_ms",
-        params![current.get(), seed as i64, now_ms()],
+        params![current.get(), seed.cast_signed(), now_ms()],
     )
 }
 
@@ -1244,7 +1260,7 @@ pub fn lru_immich(conn: &Connection, except: Option<AssetId>, limit: usize) -> V
         "SELECT c.asset_id, c.bytes FROM cached_file c JOIN asset a ON a.id = c.asset_id
          JOIN source s ON s.id = a.source_id
          WHERE s.kind = 'immich' AND c.asset_id IS NOT ?1 ORDER BY c.last_used_ms LIMIT ?2",
-    ) && let Ok(iter) = stmt.query_map(params![except.map(AssetId::get), limit as i64], |r| {
+    ) && let Ok(iter) = stmt.query_map(params![except.map(AssetId::get), sql_int(limit)], |r| {
         Ok((asset_id(r, 0)?, r.get(1)?))
     }) {
         out.extend(iter.flatten());

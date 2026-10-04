@@ -22,13 +22,15 @@ pub fn clock_source() -> clock::Source {
         wall: || Duration::from_secs_f64(js_sys::Date::now().max(0.0) / 1000.0),
         local: |epoch| {
             let d = js_sys::Date::new(&JsValue::from_f64(epoch as f64 * 1000.0));
+            // A Date's fields are an hour, a minute, a day of the month...
+            let field = |v: u32| i32::try_from(v).expect("a Date field is under 60");
             LocalTime {
-                hour: d.get_hours() as i32,
-                min: d.get_minutes() as i32,
-                sec: d.get_seconds() as i32,
-                mday: d.get_date() as i32,
-                mon: d.get_month() as i32,
-                wday: d.get_day() as i32,
+                hour: field(d.get_hours()),
+                min: field(d.get_minutes()),
+                sec: field(d.get_seconds()),
+                mday: field(d.get_date()),
+                mon: field(d.get_month()),
+                wday: field(d.get_day()),
             }
         },
     }

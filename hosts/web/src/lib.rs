@@ -103,11 +103,12 @@ impl Live {
         s.sleep_enabled = false;
         let margin = ((2.0 * DENSITY_DPI as f32 / 160.0) + 0.5) as i32;
         let source = WebSource::new(s.collage_max, (w, h, margin.max(1)))?;
+        let samples = i64::try_from(source.len()).expect("the bundled samples, a handful, fit i64");
         let library = WebLibrary {
             version: Cell::new(1),
             stats: RefCell::new(Stats {
-                local_assets: source.len() as i64,
-                local_ready: source.len() as i64,
+                local_assets: samples,
+                local_ready: samples,
                 local_dir: "Sample photos (CC0, Wikimedia Commons)".into(),
                 local_note: "bundled with the demo".into(),
                 ..Stats::default()

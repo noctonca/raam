@@ -205,7 +205,7 @@ fn new_seed(counter: u64) -> u64 {
     // Wall time, through the Clock seam, so each boot shuffles differently;
     // monotonic time reads much the same at every boot.
     let nanos = clock::wall().as_nanos() as u64;
-    rank(nanos, counter as i64)
+    rank(nanos, counter.cast_signed())
 }
 
 fn fetch_loop(shared: Arc<FetchShared>, host: Host, screen: Screen, lib: Arc<Library>) {

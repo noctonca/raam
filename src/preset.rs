@@ -383,7 +383,7 @@ impl Preset {
             }
         }
         let size = gl.window.inner_size();
-        let (w, h) = (size.width as i32, size.height as i32);
+        let (w, h) = (gl_sizei(size.width), gl_sizei(size.height));
         let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
         painter.upload(&prims, out.pixels_per_point, w, h);
         for id in &out.textures_delta.free {

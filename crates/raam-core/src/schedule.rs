@@ -42,18 +42,23 @@ pub fn parse_hm(s: &str) -> Option<u32> {
 
 /// Local seconds after midnight, and the matching unix time (via the Clock).
 pub fn local_now() -> (u32, i64) {
-    let epoch = crate::clock::wall().as_secs() as i64;
+    let epoch = crate::clock::wall_secs();
     let t = crate::clock::local(epoch);
     ((t.hour * 3600 + t.min * 60 + t.sec) as u32, epoch)
 }
 
-/// Time from `now_sod` (seconds after midnight) to the next `target_min`,
-/// always in the future (a full day if it is exactly now).
-pub fn until(target_min: u32, now_sod: u32) -> Duration {
+/// Seconds from `now_sod` (seconds after midnight) to the next
+/// `target_min`, always in the future (a full day if it is exactly now).
+pub fn until_secs(target_min: u32, now_sod: u32) -> u32 {
     debug_assert!(target_min < raam_model::limits::MINUTES_PER_DAY);
     let target = target_min * 60;
     let secs = (target + 86_400 - now_sod) % 86_400;
-    Duration::from_secs(if secs == 0 { 86_400 } else { u64::from(secs) })
+    if secs == 0 { 86_400 } else { secs }
+}
+
+/// `until_secs` as a `Duration`.
+pub fn until(target_min: u32, now_sod: u32) -> Duration {
+    Duration::from_secs(u64::from(until_secs(target_min, now_sod)))
 }
 
 #[cfg(test)]

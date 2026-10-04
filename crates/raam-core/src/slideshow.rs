@@ -737,7 +737,7 @@ impl<P: VideoPlayer> Pipeline<P> {
             // (f32 and u16 elements); GL copies the data.
             glBufferData(
                 GL_ARRAY_BUFFER,
-                (QUAD.len() * 4) as isize,
+                gl_byte_len(&QUAD),
                 QUAD.as_ptr() as *const c_void,
                 GL_STATIC_DRAW,
             );
@@ -746,7 +746,7 @@ impl<P: VideoPlayer> Pipeline<P> {
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
             glBufferData(
                 GL_ELEMENT_ARRAY_BUFFER,
-                (QUAD_INDICES.len() * 2) as isize,
+                gl_byte_len(&QUAD_INDICES),
                 QUAD_INDICES.as_ptr() as *const c_void,
                 GL_STATIC_DRAW,
             );
@@ -1465,7 +1465,8 @@ impl<P: VideoPlayer> Pipeline<P> {
         // flipped, which keeps the upload's orientation (row 0 = the
         // photo's top), so the compose code treats `source` like photo_tex.
         let mut halvings: Vec<RenderTarget> = Vec::new();
-        let (mut cur_tex, mut cw, mut ch) = (self.photo_tex, meta.width as i32, meta.height as i32);
+        let (mut cur_tex, mut cw, mut ch) =
+            (self.photo_tex, gl_sizei(meta.width), gl_sizei(meta.height));
         // SAFETY: a Pipeline lives on the render thread with its context
         // current (gl.rs # Safety). `blit` stays bound through the loop
         // (making a target uses no program), and on failure each halving is
@@ -1822,7 +1823,7 @@ impl<P: VideoPlayer> Pipeline<P> {
             glTexImage2D(
                 GL_TEXTURE_2D,
                 0,
-                GL_RGBA as i32,
+                gl_enum_param(GL_RGBA),
                 w,
                 h,
                 0,
@@ -1843,7 +1844,7 @@ impl<P: VideoPlayer> Pipeline<P> {
             glTexImage2D(
                 GL_TEXTURE_2D,
                 0,
-                GL_RGBA as i32,
+                gl_enum_param(GL_RGBA),
                 1,
                 1,
                 0,

@@ -2230,7 +2230,7 @@ fn server_page(ui: &mut Ui, st: &mut AppState) {
         // mixes two kinds of gigabyte.
         usage.push(format!(
             "{} free",
-            size(lib.free_bytes.min(i64::MAX as u64) as i64)
+            size(i64::try_from(lib.free_bytes).unwrap_or(i64::MAX))
         ));
     }
     // Downloading only means something once there's a server.

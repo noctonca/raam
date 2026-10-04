@@ -739,7 +739,7 @@ fn publish_stats(lib: &Library, st: &Loop) {
         immich_assets,
         immich_cached,
         cache_bytes,
-        cap_bytes: lib.cap_bytes() as i64,
+        cap_bytes: db::sql_int(lib.cap_bytes()),
         local_assets,
         local_ready,
         shared,
@@ -1002,7 +1002,7 @@ fn materialise_one(lib: &Library, st: &mut Loop) -> bool {
                 &lib.db.lock().unwrap(),
                 asset,
                 &path,
-                bytes.len() as i64,
+                db::sql_int(bytes.len()),
                 db::now_ms(),
             );
             // A new local photo just became showable.
@@ -1049,8 +1049,8 @@ pub fn store_immich_preview(
     bytes: &[u8],
     evict: bool,
 ) -> Result<bool, String> {
-    let cap = lib.cap_bytes() as i64;
-    let len = bytes.len() as i64;
+    let cap = db::sql_int(lib.cap_bytes());
+    let len = db::sql_int(bytes.len());
     if len > cap {
         return Ok(false);
     }
@@ -1106,7 +1106,7 @@ pub fn fetch_immich_video(
         "{asset}.mp4.{}.part",
         if evict { "fetch" } else { "prefetch" }
     ));
-    let cap = lib.cap_bytes() as i64;
+    let cap = db::sql_int(lib.cap_bytes());
     let room = if evict {
         cap
     } else {
@@ -1118,7 +1118,7 @@ pub fn fetch_immich_video(
     };
     let t = clock::now();
     let len = match provider.fetch_video(media, &tmp, max_bytes) {
-        Ok(n) => n as i64,
+        Ok(n) => db::sql_int(n),
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
@@ -1232,14 +1232,14 @@ fn make_room(
 /// Brings the cache under a lowered cap, least recently shown first.
 fn enforce_cap(lib: &Library) {
     let conn = lib.db.lock().unwrap();
-    let cap = lib.cap_bytes() as i64;
-    let (files, dropped) = make_room(&conn, None, 0, cap, LRU_BATCH_ENFORCE);
+    let cap_bytes = lib.cap_bytes();
+    let (files, dropped) = make_room(&conn, None, 0, db::sql_int(cap_bytes), LRU_BATCH_ENFORCE);
     drop(conn);
     db::remove_files(&files);
     if dropped > 0 {
         log::info!(
             "library: {dropped} previews evicted to fit the {} MB cap",
-            cap / MIB as i64
+            cap_bytes / MIB
         );
         lib.bump();
     }

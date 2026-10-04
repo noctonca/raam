@@ -295,7 +295,7 @@ impl Live {
 
     /// Everything that needs the window's GL context or the screen's size.
     fn start(&mut self, gl: Gl, screen: [u32; 2]) -> Result<(), String> {
-        let [w, h] = screen.map(|v| v as i32);
+        let [w, h] = screen.map(raam_core::gl::gl_sizei);
         let size = gl.window.inner_size();
         if (size.width, size.height) != (w as u32, h as u32) {
             log::warn!(

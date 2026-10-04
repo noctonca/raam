@@ -21,7 +21,7 @@ use crate::{Args, Gl, Step, save_png};
 use glutin::surface::GlSurface;
 use raam_core::app::{App, Deps, Event, Inputs, KeyEvent as FrameKey, Overrides, Stage, Touch};
 use raam_core::frame_ui::AppState;
-use raam_core::gl::glDisableVertexAttribArray;
+use raam_core::gl::{from_gl_size, glDisableVertexAttribArray};
 use raam_core::network::Network;
 use raam_core::overlay::ClockOverlay;
 use raam_core::painter::Painter;
@@ -297,7 +297,7 @@ impl Live {
     fn start(&mut self, gl: Gl, screen: [u32; 2]) -> Result<(), String> {
         let [w, h] = screen.map(raam_core::gl::gl_sizei);
         let size = gl.window.inner_size();
-        if (size.width, size.height) != (w as u32, h as u32) {
+        if [size.width, size.height] != screen {
             log::warn!(
                 "the window came up {}x{}, not {w}x{h}; drawing {w}x{h}",
                 size.width,
@@ -389,7 +389,7 @@ impl Live {
         }
         if let Some(run) = &self.run {
             let (w, h) = run.screen;
-            if (size.width, size.height) != (w as u32, h as u32) {
+            if (size.width, size.height) != (from_gl_size(w), from_gl_size(h)) {
                 log::warn!(
                     "the window is now {}x{}; still drawing {w}x{h}",
                     size.width,

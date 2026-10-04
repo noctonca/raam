@@ -5,6 +5,7 @@
 //! every frame is a transition frame - the frame's heaviest case under
 //! the chrome.
 use raam_core::gl::*;
+use raam_core::num;
 use raam_core::transitions::TransitionProgram;
 use std::ffi::c_void;
 
@@ -99,7 +100,7 @@ impl Backdrop {
 /// A photo-like RGBA texture: broad colour gradients with fine detail, so
 /// sampling isn't flattered by a flat image.
 unsafe fn texture(w: i32, h: i32, seed: u32) -> GlUint {
-    let (wu, hu) = (w as usize, h as usize);
+    let (wu, hu): (usize, usize) = (from_gl_size(w), from_gl_size(h));
     let mut px = vec![0u8; wu * hu * 4];
     let mut rng = 0x9E37_79B9u32.wrapping_mul(seed + 1);
     for y in 0..hu {
@@ -123,9 +124,9 @@ unsafe fn texture(w: i32, h: i32, seed: u32) -> GlUint {
                 )
             };
             let i = (y * wu + x) * 4;
-            px[i] = (r + n).clamp(0.0, 255.0) as u8;
-            px[i + 1] = (g + n).clamp(0.0, 255.0) as u8;
-            px[i + 2] = (b + n).clamp(0.0, 255.0) as u8;
+            px[i] = num::sat_u8(r + n);
+            px[i + 1] = num::sat_u8(g + n);
+            px[i + 2] = num::sat_u8(b + n);
             px[i + 3] = 255;
         }
     }

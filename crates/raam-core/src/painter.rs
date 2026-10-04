@@ -440,13 +440,17 @@ mod tests {
             cmds.len()
         );
         let drawn: i32 = cmds.iter().map(|c| c.idx_count).sum();
-        assert_eq!(drawn as u32, tris * 3, "every triangle is drawn");
+        assert_eq!(
+            from_gl_size::<_, u32>(drawn),
+            tris * 3,
+            "every triangle is drawn"
+        );
         let vsize = std::mem::size_of::<GpuVertex>();
         let mut ends: Vec<usize> = cmds.iter().map(|c| c.vert_byte_offset / vsize).collect();
         ends.push(verts.len());
         for (k, cmd) in cmds.iter().enumerate() {
             let start = cmd.idx_byte_offset / 2;
-            let part = &indices[start..start + cmd.idx_count as usize];
+            let part = &indices[start..start + from_gl_size::<_, usize>(cmd.idx_count)];
             let len = ends[k + 1] - ends[k];
             assert!(
                 part.iter().all(|&i| usize::from(i) < len),

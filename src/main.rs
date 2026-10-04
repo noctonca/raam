@@ -364,13 +364,18 @@ fn parse_args() -> Result<Args, String> {
             "--hold" => {
                 let v = val()?;
                 let bad = || format!("--hold wants X,Y,MS, got {v:?}");
-                let mut n = v.split(',').map(|s| s.parse::<f32>());
-                let (Some(Ok(x)), Some(Ok(y)), Some(Ok(ms)), None) =
-                    (n.next(), n.next(), n.next(), n.next())
+                let mut n = v.split(',');
+                let (Some(x), Some(y), Some(ms), None) = (n.next(), n.next(), n.next(), n.next())
                 else {
                     return Err(bad());
                 };
-                a.hold = Some((egui::pos2(x, y), Duration::from_millis(ms as u64)));
+                // The point in egui's points, the time in whole milliseconds.
+                let (Ok(x), Ok(y), Ok(ms)) =
+                    (x.parse::<f32>(), y.parse::<f32>(), ms.parse::<u64>())
+                else {
+                    return Err(bad());
+                };
+                a.hold = Some((egui::pos2(x, y), Duration::from_millis(ms)));
             }
             "--scroll" => a.scroll = val()?.parse().map_err(|e| format!("--scroll: {e}"))?,
             _ => {
@@ -519,7 +524,8 @@ fn create_gl(
 
 /// The back buffer, bottom-up in GL, as a top-down RGB image.
 fn read_pixels(w: i32, h: i32) -> golden::Image {
-    let mut rgba = vec![0u8; (w * h * 4) as usize];
+    let (wu, hu): (usize, usize) = (from_gl_size(w), from_gl_size(h));
+    let mut rgba = vec![0u8; wu * hu * 4];
     // SAFETY: the callers draw under the window's context, current on this
     // thread; `rgba` holds w * h RGBA bytes, all GL writes at the default
     // pack alignment of 4 (an RGBA row is always a multiple of 4).
@@ -534,9 +540,9 @@ fn read_pixels(w: i32, h: i32) -> golden::Image {
             rgba.as_mut_ptr() as *mut c_void,
         )
     };
-    let row = (w * 4) as usize;
-    let mut rgb = Vec::with_capacity((w * h * 3) as usize);
-    for y in (0..h as usize).rev() {
+    let row = wu * 4;
+    let mut rgb = Vec::with_capacity(wu * hu * 3);
+    for y in (0..hu).rev() {
         rgb.extend(
             rgba[y * row..(y + 1) * row]
                 .as_chunks::<4>()
@@ -546,8 +552,8 @@ fn read_pixels(w: i32, h: i32) -> golden::Image {
         );
     }
     golden::Image {
-        w: w as u32,
-        h: h as u32,
+        w: from_gl_size(w),
+        h: from_gl_size(h),
         rgb,
     }
 }

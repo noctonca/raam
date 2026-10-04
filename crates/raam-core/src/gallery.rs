@@ -3,9 +3,9 @@
 //! chosen one on the right). The design system's QA surface, not one of the
 //! product's screens. Host-agnostic: it takes a `ProbeInfo` from the host
 //! and hands back `Request`s, and never touches GL or Android.
-use crate::icons;
 use crate::kit::{self, ButtonKind, ListItem, Tone, Trailing};
 use crate::theme::{self, Scheme, TextMode, Type, scheme, size, space};
+use crate::{icons, num};
 use egui::{Align, Color32, CornerRadius, Rect, Sense, Theme, Ui, vec2};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -688,7 +688,7 @@ fn colours(ui: &mut Ui, s: &Scheme) {
     const MIN_W: f32 = 200.0;
     const TILE_H: f32 = 72.0;
     let avail = ui.available_width();
-    let cols = ((avail + space::S) / (MIN_W + space::S)).floor().max(1.0) as usize;
+    let cols = num::sat_usize(((avail + space::S) / (MIN_W + space::S)).floor().max(1.0));
     let tile_w = ((avail - space::S * (cols - 1) as f32) / cols as f32).floor();
     ui.spacing_mut().item_spacing = vec2(space::S, space::S);
     for row in tiles.chunks(cols) {
@@ -817,7 +817,7 @@ fn icons_page(ui: &mut Ui, s: &Scheme) {
     // and every icon lands on a pixel.
     const MIN_CELL: f32 = 120.0;
     let avail = ui.available_width();
-    let cols = (avail / MIN_CELL).floor().max(1.0) as usize;
+    let cols = num::sat_usize((avail / MIN_CELL).floor().max(1.0));
     let cell = vec2((avail / cols as f32).floor(), 72.0);
     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
     for row in icons::ALL.chunks(cols) {

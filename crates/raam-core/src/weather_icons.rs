@@ -7,6 +7,7 @@
 //! distance shapes (circles, capsules, a polygon) in a unit box, rendered
 //! with a 1px anti-aliased edge. Monochrome, like the text.
 use crate::atlas::Raster;
+use crate::num;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {
@@ -183,7 +184,7 @@ pub fn raster(icon: Icon, size: usize, cap_height: f32, gap: f32) -> Raster {
         for x in 0..size {
             let p = ((x as f32 + 0.5) * px, (y as f32 + 0.5) * px);
             let d = sdf(icon, p) / px; // in pixels
-            bitmap[y * size + x] = ((0.5 - d).clamp(0.0, 1.0) * 255.0) as u8;
+            bitmap[y * size + x] = num::sat_u8((0.5 - d).clamp(0.0, 1.0) * 255.0);
         }
     }
     Raster {

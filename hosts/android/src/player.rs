@@ -250,7 +250,8 @@ impl Shared {
                 if now >= media_us {
                     return true;
                 }
-                let wait = Duration::from_micros((media_us - now).min(50_000) as u64);
+                let ahead = u64::try_from(media_us - now).expect("now < media_us here");
+                let wait = Duration::from_micros(ahead.min(50_000));
                 ctl = self.cond.wait_timeout(ctl, wait).unwrap().0;
             } else {
                 ctl = self
@@ -723,26 +724,30 @@ fn video_thread(path: &str, window: NativeWindow, sh: &Shared) -> Result<(), Pla
             if !input_eos {
                 match codec.dequeue_input_buffer(Duration::from_millis(10)) {
                     Ok(DequeuedInputBufferResult::Buffer(mut input)) => {
-                        let n = ex.read_sample_data(input.buffer_mut());
-                        if n < 0 {
-                            codec
-                                .queue_input_buffer(
-                                    input,
-                                    0,
-                                    0,
-                                    0,
-                                    ndk_sys::AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM,
-                                )
-                                .map_err(|e| format!("queue EOS: {e:?}"))?;
-                            input_eos = true;
-                        } else {
-                            let pts = ex.sample_time_us().max(0) as u64;
-                            codec
-                                .queue_input_buffer(input, 0, n as usize, pts, 0)
-                                .map_err(|e| format!("queue input: {e:?}"))?;
-                            ex.advance();
-                            queued_in += 1;
-                            in_pass += 1;
+                        // Negative: the extractor has no sample left.
+                        match usize::try_from(ex.read_sample_data(input.buffer_mut())) {
+                            Err(_) => {
+                                codec
+                                    .queue_input_buffer(
+                                        input,
+                                        0,
+                                        0,
+                                        0,
+                                        ndk_sys::AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM,
+                                    )
+                                    .map_err(|e| format!("queue EOS: {e:?}"))?;
+                                input_eos = true;
+                            }
+                            Ok(len) => {
+                                // A sample before the start (or none) is stamped 0.
+                                let pts = u64::try_from(ex.sample_time_us()).unwrap_or(0);
+                                codec
+                                    .queue_input_buffer(input, 0, len, pts, 0)
+                                    .map_err(|e| format!("queue input: {e:?}"))?;
+                                ex.advance();
+                                queued_in += 1;
+                                in_pass += 1;
+                            }
                         }
                     }
                     Ok(DequeuedInputBufferResult::TryAgainLater) => {}
@@ -929,12 +934,21 @@ fn video_thread(path: &str, window: NativeWindow, sh: &Shared) -> Result<(), Pla
     Ok(())
 }
 
+/// A sample rate or channel count from a clip's audio format. Android
+/// reports them as int; a negative one is a broken file, and its sound is
+/// dropped like any other undecodable track's.
+fn audio_param(v: i32, what: &str) -> Result<u32, String> {
+    u32::try_from(v).map_err(|_| format!("audio {what} {v} is negative"))
+}
+
 fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
     // THREAD_PRIORITY_AUDIO (-16), so decoding the sound keeps up while a
     // 1080p clip and the render loop load the CPU. Android lets an app
     // raise its own threads' priority this far (RLIMIT_NICE).
-    // SAFETY: plain syscalls on this thread's own id; no pointers.
-    let prio = unsafe { libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, -16) };
+    // SAFETY: gettid takes nothing and can't fail.
+    let tid = libc::id_t::try_from(unsafe { libc::gettid() }).expect("a thread id is positive");
+    // SAFETY: a plain syscall on this thread's own id; no pointers.
+    let prio = unsafe { libc::setpriority(libc::PRIO_PROCESS, tid, -16) };
     log::info!(
         "{}: audio thread priority -16: {}",
         sh.label,
@@ -947,8 +961,8 @@ fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
         ex.seek_to(start_us)?;
     }
     let mime = format.str("mime").unwrap_or("?").to_string();
-    let mut rate = format.i32("sample-rate").unwrap_or(44100) as u32;
-    let mut channels = format.i32("channel-count").unwrap_or(1) as u32;
+    let mut rate = audio_param(format.i32("sample-rate").unwrap_or(44100), "sample rate")?;
+    let mut channels = audio_param(format.i32("channel-count").unwrap_or(1), "channel count")?;
     let codec =
         MediaCodec::from_decoder_type(&mime).ok_or_else(|| format!("no decoder for {mime}"))?;
     codec
@@ -1063,24 +1077,28 @@ fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
             if !input_eos {
                 match codec.dequeue_input_buffer(Duration::from_millis(10)) {
                     Ok(DequeuedInputBufferResult::Buffer(mut input)) => {
-                        let n = ex.read_sample_data(input.buffer_mut());
-                        if n < 0 {
-                            codec
-                                .queue_input_buffer(
-                                    input,
-                                    0,
-                                    0,
-                                    0,
-                                    ndk_sys::AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM,
-                                )
-                                .map_err(|e| format!("queue EOS: {e:?}"))?;
-                            input_eos = true;
-                        } else {
-                            let pts = ex.sample_time_us().max(0) as u64;
-                            codec
-                                .queue_input_buffer(input, 0, n as usize, pts, 0)
-                                .map_err(|e| format!("queue input: {e:?}"))?;
-                            ex.advance();
+                        // Negative: the extractor has no sample left.
+                        match usize::try_from(ex.read_sample_data(input.buffer_mut())) {
+                            Err(_) => {
+                                codec
+                                    .queue_input_buffer(
+                                        input,
+                                        0,
+                                        0,
+                                        0,
+                                        ndk_sys::AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM,
+                                    )
+                                    .map_err(|e| format!("queue EOS: {e:?}"))?;
+                                input_eos = true;
+                            }
+                            Ok(len) => {
+                                // A sample before the start (or none) is stamped 0.
+                                let pts = u64::try_from(ex.sample_time_us()).unwrap_or(0);
+                                codec
+                                    .queue_input_buffer(input, 0, len, pts, 0)
+                                    .map_err(|e| format!("queue input: {e:?}"))?;
+                                ex.advance();
+                            }
                         }
                     }
                     Ok(DequeuedInputBufferResult::TryAgainLater) => {}
@@ -1093,8 +1111,8 @@ fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
                     let eos = info.flags() & (ndk_sys::AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) != 0;
                     // buffer() is the whole allocation; the PCM is
                     // [offset, offset + size).
-                    let off = info.offset().max(0) as usize;
-                    let sz = info.size().max(0) as usize;
+                    let off = usize::try_from(info.offset()).unwrap_or(0);
+                    let sz = usize::try_from(info.size()).unwrap_or(0);
                     let raw = output.buffer();
                     if info.presentation_time_us() >= skip_before_us {
                         pending
@@ -1130,8 +1148,12 @@ fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
                 }
                 Ok(DequeuedOutputBufferInfoResult::OutputFormatChanged) => {
                     let f = codec.output_format();
-                    rate = f.i32("sample-rate").map_or(rate, |r| r as u32);
-                    channels = f.i32("channel-count").map_or(channels, |c| c as u32);
+                    if let Some(r) = f.i32("sample-rate") {
+                        rate = audio_param(r, "sample rate")?;
+                    }
+                    if let Some(c) = f.i32("channel-count") {
+                        channels = audio_param(c, "channel count")?;
+                    }
                 }
                 Ok(_) => {}
                 Err(e) => return Err(format!("dequeue output: {e:?}")),

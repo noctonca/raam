@@ -71,6 +71,25 @@ pub fn gl_byte_len<T>(data: &[T]) -> isize {
     isize::try_from(size_of_val(data)).expect("a slice spans at most isize::MAX bytes")
 }
 
+/// `gl_sizei` the other way: a size, count or length GL hands back or
+/// takes as a signed GLsizei/GLint (a target's side, an info-log length,
+/// an index count), as the unsigned type Rust indexes and sizes with. A
+/// GL size is never negative, so the value is unchanged; where GL's
+/// contract allows a negative (an error the call ignores), the caller
+/// clamps first.
+///
+/// # Panics
+/// On a negative value: a negative size is a bug upstream.
+#[must_use]
+#[track_caller]
+pub fn from_gl_size<N, U>(n: N) -> U
+where
+    N: TryInto<U> + Copy + std::fmt::Display,
+{
+    n.try_into()
+        .unwrap_or_else(|_| panic!("GL size {n} negative"))
+}
+
 pub const GL_COLOR_BUFFER_BIT: GlBitfield = 0x4000;
 pub const GL_VERTEX_SHADER: GlEnum = 0x8B31;
 pub const GL_FRAGMENT_SHADER: GlEnum = 0x8B30;
@@ -517,14 +536,14 @@ pub unsafe fn link_program(label: &str, vs_src: &str, fs_src: &str) -> GlUint {
         if status == 0 {
             let mut len = 0i32;
             glGetProgramiv(program, GL_INFO_LOG_LENGTH, &mut len);
-            let mut buf = vec![0u8; len.max(1) as usize];
+            let mut buf = vec![0u8; from_gl_size(len.max(1))];
             let mut written = 0i32;
             // SAFETY: `buf` holds at least `len` bytes, the most the driver
             // writes (log and NUL), and `written` is a valid i32 to fill.
             glGetProgramInfoLog(program, len, &mut written, buf.as_mut_ptr() as *mut c_char);
             panic!(
                 "[{label}] program link failed: {}",
-                String::from_utf8_lossy(&buf[..written.max(0) as usize])
+                String::from_utf8_lossy(&buf[..from_gl_size::<_, usize>(written.max(0))])
             );
         }
         program
@@ -552,14 +571,14 @@ unsafe fn compile(label: &str, kind: GlEnum, src: &str) -> GlUint {
         if status == 0 {
             let mut len = 0i32;
             glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &mut len);
-            let mut buf = vec![0u8; len.max(1) as usize];
+            let mut buf = vec![0u8; from_gl_size(len.max(1))];
             let mut written = 0i32;
             // SAFETY: `buf` holds at least `len` bytes, the most the driver
             // writes (log and NUL), and `written` is a valid i32 to fill.
             glGetShaderInfoLog(shader, len, &mut written, buf.as_mut_ptr() as *mut c_char);
             panic!(
                 "[{label}] shader compile failed (type 0x{kind:x}): {}\n--- source ---\n{src}",
-                String::from_utf8_lossy(&buf[..written.max(0) as usize])
+                String::from_utf8_lossy(&buf[..from_gl_size::<_, usize>(written.max(0))])
             );
         }
         shader
@@ -580,8 +599,7 @@ pub unsafe fn attrib_loc(program: GlUint, name: &str) -> GlUint {
     unsafe {
         let c = std::ffi::CString::new(name).unwrap();
         let loc = glGetAttribLocation(program, c.as_ptr());
-        assert!(loc >= 0, "attribute {name} not found/active");
-        loc as GlUint
+        GlUint::try_from(loc).unwrap_or_else(|_| panic!("attribute {name} not found/active"))
     }
 }
 

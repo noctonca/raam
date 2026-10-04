@@ -41,10 +41,15 @@ pub fn parse_hm(s: &str) -> Option<u32> {
 }
 
 /// Local seconds after midnight, and the matching unix time (via the Clock).
+///
+/// # Panics
+/// If the Clock's local time has a negative field: a broken clock.
 pub fn local_now() -> (u32, i64) {
     let epoch = crate::clock::wall_secs();
     let t = crate::clock::local(epoch);
-    ((t.hour * 3600 + t.min * 60 + t.sec) as u32, epoch)
+    let secs = u32::try_from(t.hour * 3600 + t.min * 60 + t.sec)
+        .expect("a local time of day is never negative");
+    (secs, epoch)
 }
 
 /// Seconds from `now_sod` (seconds after midnight) to the next

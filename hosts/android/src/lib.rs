@@ -713,8 +713,8 @@ fn read_touches(app: &AndroidApp) -> Vec<Touch> {
                         out.push(Touch {
                             phase,
                             pos: egui::pos2(p.x(), p.y()),
-                            device_id: u64::from(motion.device_id() as u32),
-                            touch_id: u64::from(p.pointer_id() as u32),
+                            device_id: u64::from(motion.device_id().cast_unsigned()),
+                            touch_id: u64::from(p.pointer_id().cast_unsigned()),
                             force: p.pressure().clamp(0.0, 1.0),
                         });
                     }

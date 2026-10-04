@@ -3,7 +3,7 @@
 //! `table`, so their tests run natively, and under Miri (CI's miri job),
 //! which can't run the linkage itself.
 
-use super::{GlSizei, gl_sizei};
+use super::{GlSizei, from_gl_size, gl_sizei};
 use std::ffi::{c_char, c_void};
 
 /// `len` bytes at `ptr`, or none for a null pointer.
@@ -44,7 +44,7 @@ pub(super) unsafe fn mat4s<'a>(value: *const f32, count: GlSizei) -> &'a [f32] {
 /// `out` must be valid for writing `max_len` bytes (at least one), and
 /// `len` null or valid for one write, as glGet*InfoLog require.
 pub(super) unsafe fn write_log(log: &str, max_len: GlSizei, len: *mut GlSizei, out: *mut c_char) {
-    let n = log.len().min((max_len.max(1) - 1) as usize);
+    let n = log.len().min(from_gl_size(max_len.max(1) - 1));
     // SAFETY: `n` + 1 <= max(max_len, 1) bytes go to `out`, which holds
     // `max_len`; `log` can't overlap the caller's buffer, and `len` is
     // written only when non-null.
@@ -88,7 +88,7 @@ mod tests {
     /// Runs `write_log` into a buffer of `max_len` bytes (one for 0, as
     /// GL's contract asks), returning what landed and the reported length.
     fn log_into(log: &str, max_len: GlSizei) -> (Vec<u8>, GlSizei) {
-        let mut out = vec![0x55u8; max_len.max(1) as usize];
+        let mut out = vec![0x55u8; from_gl_size(max_len.max(1))];
         let mut len: GlSizei = -1;
         // SAFETY: `out` holds max(max_len, 1) bytes and `len` is one write.
         unsafe { write_log(log, max_len, &mut len, out.as_mut_ptr().cast()) };

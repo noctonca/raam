@@ -61,7 +61,8 @@ pub fn prop(name: &str) -> String {
     let n = unsafe {
         libc::__system_property_get(name.as_ptr(), buf.as_mut_ptr() as *mut libc::c_char)
     };
-    String::from_utf8_lossy(&buf[..n.max(0) as usize]).into_owned()
+    // The value's length; negative never happens, and would mean empty.
+    String::from_utf8_lossy(&buf[..usize::try_from(n).unwrap_or(0)]).into_owned()
 }
 
 /// TEST-ONLY overrides, set with `adb shell setprop` (they last until the

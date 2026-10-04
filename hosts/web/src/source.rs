@@ -236,7 +236,7 @@ impl WebSource {
         s.seq += 1;
         plan.seq = s.seq;
         for a in &plan.assets {
-            let i = (a.asset.get() - 1) as usize;
+            let i = sample_index(a.asset.get());
             if matches!(s.images[i], Image::Idle) {
                 s.images[i] = Image::Loading(load(&s.samples[i].file));
             }
@@ -289,7 +289,7 @@ impl WebSource {
         }
         let (slot, rect, is_request) = (b.next, b.rects[b.next], b.is_request);
         let entry = b.plan.assets[slot].clone();
-        let i = (entry.asset.get() - 1) as usize;
+        let i = sample_index(entry.asset.get());
         let Image::Loading(img) = &s.images[i] else {
             // Parking the plan asks for every photo in it; this one was
             // decoded for an earlier plan since, so ask again.
@@ -521,9 +521,15 @@ fn sample_id(i: usize) -> i64 {
     i64::try_from(i + 1).expect("a bundled sample's index, one of a handful, fits i64")
 }
 
+/// `sample_id` the other way: the sample an asset id names. Every id this
+/// host plans comes from `sample_id`, so it's 1 or more.
+fn sample_index(id: i64) -> usize {
+    usize::try_from(id - 1).expect("a sample's asset id counts from 1")
+}
+
 /// splitmix64 of the seed and the asset id (fetch.rs's keyed shuffle).
 fn rank(seed: u64, asset: i64) -> u64 {
-    let mut z = seed ^ (asset as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut z = seed ^ asset.cast_unsigned().wrapping_mul(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)

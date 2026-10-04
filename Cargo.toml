@@ -80,6 +80,9 @@ cast_lossless = "warn"
 # A cast that can turn a big unsigned value negative says why it can't,
 # or wraps on purpose under an `expect` with its reason.
 cast_possible_wrap = "warn"
+# A cast that can drop a negative value's sign says why the value is
+# never negative, or clamps it first where saturating at 0 is the point.
+cast_sign_loss = "warn"
 
 # Profiles live at the workspace root only (Cargo ignores them in
 # members). Release: LTO earns its keep on the frame (binary size and the

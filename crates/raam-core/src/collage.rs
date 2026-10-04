@@ -226,7 +226,7 @@ impl Rect {
 
 /// A guideline's pixel position: its fraction of the size, rounded half up.
 fn guide_px(fraction: f32, size: i32) -> i32 {
-    (0.5 + fraction * size as f32) as i32
+    crate::num::sat_i32(0.5 + fraction * size as f32)
 }
 
 fn edge_px(edge: Edge, size: i32) -> i32 {

@@ -17,7 +17,7 @@
 
 use raam_core::collage::{self, Orientation, Rect};
 use raam_core::source::{TileSource, shrink_to_cover};
-use raam_core::{clock, collage::LARGEST_LAYOUT};
+use raam_core::{clock, collage::LARGEST_LAYOUT, num};
 use raam_model::{
     AssetId, CurationKey, Focus, MediaItem, Photo, Plan, RemoteId, SourceKind, TilePhoto,
 };
@@ -56,6 +56,10 @@ pub fn catalogue() -> Vec<Sample> {
             .unwrap_or(file)
             .to_string()
     };
+    let side = |v: &serde_json::Value| {
+        let px = v.as_u64().expect("faces.json: width and height");
+        u32::try_from(px).expect("faces.json: a side fits u32")
+    };
     faces
         .as_array()
         .expect("faces.json is a list")
@@ -67,7 +71,7 @@ pub fn catalogue() -> Vec<Sample> {
                 .expect("faces.json: faces")
                 .iter()
                 .map(|b| {
-                    let v = |i: usize| b[i].as_f64().expect("faces.json: box") as f32;
+                    let v = |i: usize| num::to_f32(b[i].as_f64().expect("faces.json: box"));
                     let (x1, y1, x2, y2) = (v(0), v(1), v(2), v(3));
                     ((x2 - x1) * (y2 - y1), ((x1 + x2) / 2.0, (y1 + y2) / 2.0))
                 })
@@ -75,8 +79,8 @@ pub fn catalogue() -> Vec<Sample> {
             Sample {
                 key: format!("sample-{}", file.trim_end_matches(".jpg")),
                 title: title(&file),
-                width: e["width"].as_u64().expect("faces.json: width") as u32,
-                height: e["height"].as_u64().expect("faces.json: height") as u32,
+                width: side(&e["width"]),
+                height: side(&e["height"]),
                 focus: Focus::from_faces(&boxes),
                 file,
             }
@@ -537,15 +541,17 @@ fn rank(seed: u64, asset: i64) -> u64 {
 
 fn new_seed(counter: u64) -> u64 {
     // Wall time, so each page load shuffles differently.
-    rank(clock::wall().as_nanos() as u64, counter.cast_signed())
+    let nanos = u64::try_from(clock::wall().as_nanos()).expect("ns since 1970 fit u64 until 2554");
+    rank(nanos, counter.cast_signed())
 }
 
 /// fetch.rs's xorshift64 draw, seeded from the clock plus a counter.
 fn pseudo_random_below(n: u32, counter: u64) -> u32 {
-    let nanos = clock::now().as_nanos() as u64;
+    let nanos =
+        u64::try_from(clock::now().as_nanos()).expect("584 years of uptime fit u64 nanoseconds");
     let mut x = (nanos ^ counter.wrapping_mul(0x9E3779B97F4A7C15)) | 1;
     x ^= x << 13;
     x ^= x >> 7;
     x ^= x << 17;
-    (x % u64::from(n.max(1))) as u32
+    u32::try_from(x % u64::from(n.max(1))).expect("below n, a u32")
 }

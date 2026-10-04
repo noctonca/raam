@@ -1194,9 +1194,9 @@ impl<'a> TextField<'a> {
             space::L
         };
         let (top, bottom) = if self.label.is_empty() {
-            (16.0, 16.0)
+            (16, 16)
         } else {
-            (24.0, 8.0)
+            (24, 8)
         };
         // The container goes behind the text, but its colour depends on
         // this frame's focus and hover, which the TextEdit decides.
@@ -1214,10 +1214,10 @@ impl<'a> TextField<'a> {
             TextEdit::singleline(self.text)
                 .id(id)
                 .frame(Frame::new().inner_margin(Margin {
-                    left: left as i8,
-                    right: right as i8,
-                    top: top as i8,
-                    bottom: bottom as i8,
+                    left: num::sat_i8(left),
+                    right: num::sat_i8(right),
+                    top,
+                    bottom,
                 }))
                 .font(Type::BodyLarge.font())
                 .text_color(s.on_surface)
@@ -2063,7 +2063,7 @@ pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     Frame::new()
         .fill(s.surface_container_highest)
         .corner_radius(CornerRadius::same(shape::M))
-        .inner_margin(Margin::same(space::L as i8))
+        .inner_margin(Margin::same(num::sat_i8(space::L)))
         .show(ui, add)
         .inner
 }
@@ -2557,7 +2557,7 @@ pub fn time_picker(ui: &mut Ui, minutes: &mut u32, step: u32) -> bool {
     const DAY: i32 = 24 * 60;
     let step = i32::try_from(step).expect("a time step, minutes within a day, fits i32");
     let mut v = *minutes as f32;
-    let wrap = |v: f32, dir: i32| ((v as i32 + dir * step).rem_euclid(DAY)) as f32;
+    let wrap = |v: f32, dir: i32| ((num::sat_i32(v) + dir * step).rem_euclid(DAY)) as f32;
     let changed = number_picker(
         ui,
         &mut v,
@@ -2590,7 +2590,7 @@ pub fn dialog(
             Frame::new()
                 .fill(s.surface_container_high)
                 .corner_radius(CornerRadius::same(shape::XL))
-                .inner_margin(Margin::same(space::XL as i8)),
+                .inner_margin(Margin::same(num::sat_i8(space::XL))),
         )
         .show(ctx, |ui| {
             ui.set_width(400.0);

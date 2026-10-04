@@ -445,7 +445,7 @@ fn list_media(dir: &Path, out: &mut Vec<(String, (i64, i64))>) -> std::io::Resul
                 .modified()
                 .ok()
                 .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_millis() as i64);
+                .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
             out.push((
                 e.path().to_string_lossy().into_owned(),
                 (crate::db::sql_int(meta.len()), mtime_ms),
@@ -475,8 +475,10 @@ fn make_preview(path: &Path, short_side: u32) -> Result<Preview, String> {
     let short = src_w.min(src_h).max(1);
     let (req_w, req_h) = if short > short_side {
         (
-            (src_w * short_side).div_ceil(short) as u16,
-            (src_h * short_side).div_ceil(short) as u16,
+            // Scaled down (short_side < short), so no larger than the
+            // u16 side it came from.
+            u16::try_from((src_w * short_side).div_ceil(short)).expect("a scaled-down u16 side"),
+            u16::try_from((src_h * short_side).div_ceil(short)).expect("a scaled-down u16 side"),
         )
     } else {
         (info.width, info.height)
@@ -486,23 +488,22 @@ fn make_preview(path: &Path, short_side: u32) -> Result<Preview, String> {
         .map_err(|e| format!("jpeg scale: {e}"))?;
     let pixels = dec.decode().map_err(|e| format!("jpeg decode: {e}"))?;
     let info = dec.info().ok_or("no jpeg info")?;
-    let (w, h) = (u32::from(w), u32::from(h));
     let rgb = match info.pixel_format {
         jpeg_decoder::PixelFormat::RGB24 => pixels,
         jpeg_decoder::PixelFormat::L8 => pixels.iter().flat_map(|&l| [l, l, l]).collect(),
         other => return Err(format!("unsupported pixel format {other:?}")),
     };
-    if rgb.len() != (w * h * 3) as usize {
+    if rgb.len() != usize::from(w) * usize::from(h) * 3 {
         return Err("decoded size mismatch".into());
     }
     let (ow, oh, rgb) = apply_orientation(orientation, w, h, rgb);
     let mut jpeg = Vec::new();
     jpeg_encoder::Encoder::new(&mut jpeg, 88)
-        .encode(&rgb, ow as u16, oh as u16, jpeg_encoder::ColorType::Rgb)
+        .encode(&rgb, ow, oh, jpeg_encoder::ColorType::Rgb)
         .map_err(|e| format!("jpeg encode: {e}"))?;
     Ok(Preview {
         jpeg,
-        size: (ow, oh),
+        size: (u32::from(ow), u32::from(oh)),
         src: (src_w, src_h),
         note: format!("orientation {orientation}, decoded at {w}x{h}"),
     })
@@ -510,13 +511,15 @@ fn make_preview(path: &Path, short_side: u32) -> Result<Preview, String> {
 
 /// The eight EXIF orientations applied to raw RGB rows (forty lines beat
 /// the `image` crate's whole dependency tree).
-fn apply_orientation(orientation: u8, w: u32, h: u32, rgb: Vec<u8>) -> (u32, u32, Vec<u8>) {
+/// Sides are u16, as JPEG's are.
+fn apply_orientation(orientation: u8, w: u16, h: u16, rgb: Vec<u8>) -> (u16, u16, Vec<u8>) {
     if orientation <= 1 || orientation > 8 {
         return (w, h, rgb);
     }
-    let (w, h) = (w as usize, h as usize);
     let swap = matches!(orientation, 5..=8);
-    let (ow, oh) = if swap { (h, w) } else { (w, h) };
+    let sides = if swap { (h, w) } else { (w, h) };
+    let (w, h) = (usize::from(w), usize::from(h));
+    let ow = usize::from(sides.0);
     let mut out = vec![0u8; w * h * 3];
     for y in 0..h {
         for x in 0..w {
@@ -535,7 +538,7 @@ fn apply_orientation(orientation: u8, w: u32, h: u32, rgb: Vec<u8>) -> (u32, u32
             out[dst..dst + 3].copy_from_slice(&rgb[src..src + 3]);
         }
     }
-    (ow as u32, oh as u32, out)
+    (sides.0, sides.1, out)
 }
 
 /// (EXIF orientation, DateTimeOriginal as UTC epoch ms). EXIF times are

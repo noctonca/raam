@@ -104,7 +104,12 @@ pub(crate) mod fake {
     }
 
     pub fn advance(d: Duration) {
-        NOW_MS.with(|c| c.set(c.get() + d.as_millis() as u64));
+        NOW_MS.with(|c| {
+            c.set(
+                c.get()
+                    + u64::try_from(d.as_millis()).expect("a test step under 584 million years"),
+            )
+        });
         WALL_S.with(|c| c.set(c.get() + d.as_secs()));
     }
 

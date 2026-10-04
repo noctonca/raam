@@ -18,7 +18,7 @@ use crate::schedule::{self, Schedule};
 use crate::seams::Power;
 use crate::slideshow::SlideshowSettings;
 use crate::source::TileSource;
-use crate::{clock, store, theme, weather_icons};
+use crate::{clock, num, store, theme, weather_icons};
 use raam_model::limits::{
     ALARM_RETRY, AUTO_DISMISS, DEFAULT_MANUAL_IDLE, MAX_EGUI_WAIT, MAX_QUEUED_KEYS, SAVE_DEBOUNCE,
     SLEEP_CONFIRM, TAP_SLOP_PX, UNDO_HIDE, WIFI_RESCAN,
@@ -714,7 +714,7 @@ impl App {
                 let (description, icon) = weather_icons::describe(c.code, c.is_day);
                 overlay::Weather {
                     icon: icon.ch(),
-                    temp: format!("{}\u{b0}", c.temp_c.round() as i64),
+                    temp: format!("{}\u{b0}", num::sat_i64(c.temp_c.round())),
                     description,
                     city: city.clone(),
                 }

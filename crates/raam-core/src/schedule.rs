@@ -175,7 +175,8 @@ mod tests {
 
         /// The minute of the day `secs` after `now_sod`, wrapping midnight.
         fn minute_after(now_sod: u32, secs: u64) -> u32 {
-            ((u64::from(now_sod) + secs) % u64::from(DAY_SECS)) as u32 / 60
+            u32::try_from((u64::from(now_sod) + secs) % u64::from(DAY_SECS)).expect("below a day")
+                / 60
         }
 
         proptest! {

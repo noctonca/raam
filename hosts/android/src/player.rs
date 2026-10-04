@@ -141,12 +141,14 @@ struct Ctl {
 /// If the sound hasn't started by then, the picture starts without it.
 use raam_model::limits::AUDIO_ALIGN_TIMEOUT as ALIGN_TIMEOUT;
 
+/// Microseconds since `t` on the monotonic clock.
+fn elapsed_us(t: Duration) -> i64 {
+    i64::try_from(clock::elapsed(t).as_micros()).expect("292,000 years fit i64 microseconds")
+}
+
 impl Ctl {
     fn now_us(&self) -> i64 {
-        self.clock_acc_us
-            + self
-                .clock_since
-                .map_or(0, |t| clock::elapsed(t).as_micros() as i64)
+        self.clock_acc_us + self.clock_since.map_or(0, elapsed_us)
     }
 
     /// Playing: the sound plays (and the clock runs, unless aligning).
@@ -172,7 +174,7 @@ impl Ctl {
         match (self.clock_running(), self.clock_since) {
             (true, None) => self.clock_since = Some(clock::now()),
             (false, Some(t)) => {
-                self.clock_acc_us += clock::elapsed(t).as_micros() as i64;
+                self.clock_acc_us += elapsed_us(t);
                 self.clock_since = None;
             }
             _ => {}
@@ -266,7 +268,12 @@ impl Shared {
     /// The time the picture should be at: the media clock, moved to where
     /// the sound is when there is sound.
     fn media_now_us(&self, ctl: &Ctl) -> i64 {
-        ctl.now_us() + self.av_offset_us.lock().unwrap().map_or(0, |o| o as i64)
+        ctl.now_us()
+            + self
+                .av_offset_us
+                .lock()
+                .unwrap()
+                .map_or(0, raam_core::num::sat_i64)
     }
 
     fn volume(&self) -> f32 {

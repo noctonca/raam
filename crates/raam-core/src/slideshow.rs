@@ -32,6 +32,7 @@
 use crate::clock;
 use crate::collage::{self, Rect};
 use crate::gl::*;
+use crate::num;
 use crate::source::{Photo, Plan, TileSource, VideoClip};
 use crate::transitions::TransitionProgram;
 use crate::video::{ClipFrame, LiveCue, ProbePlayer, ProbeStatus, Tick, Video, VideoPlayer};
@@ -284,7 +285,9 @@ fn pseudo_random_f32(seed: u64) -> f32 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static DRAWS: AtomicU64 = AtomicU64::new(0);
     let n = DRAWS.fetch_add(1, Ordering::Relaxed);
-    let nanos = clock::now().as_nanos() as u64 ^ n.wrapping_mul(0x2545_F491_4F6C_DD1D);
+    let nanos = u64::try_from(clock::now().as_nanos())
+        .expect("584 years of uptime fit u64 nanoseconds")
+        ^ n.wrapping_mul(0x2545_F491_4F6C_DD1D);
     let mut x = (nanos ^ seed.wrapping_mul(0x9E3779B97F4A7C15)) | 1;
     x ^= x << 13;
     x ^= x >> 7;
@@ -757,9 +760,11 @@ impl<P: VideoPlayer> Pipeline<P> {
             glBindTexture(GL_TEXTURE_2D, photo_tex);
             set_linear_clamp();
 
-            let blur_h = ((BLUR_WIDTH_PX as f32) * screen_h as f32 / screen_w as f32)
-                .round()
-                .max(1.0) as i32;
+            let blur_h = num::sat_i32(
+                ((BLUR_WIDTH_PX as f32) * screen_h as f32 / screen_w as f32)
+                    .round()
+                    .max(1.0),
+            );
             let blur_targets = [
                 RenderTarget::new(BLUR_WIDTH_PX, blur_h),
                 RenderTarget::new(BLUR_WIDTH_PX, blur_h),
@@ -776,7 +781,7 @@ impl<P: VideoPlayer> Pipeline<P> {
                     .join(", ")
             );
             // Android's dp: px = dp * densityDpi / 160.
-            let dp = |v: f32| ((v * density_dpi as f32 / 160.0) + 0.5) as i32;
+            let dp = |v: f32| num::sat_i32((v * density_dpi as f32 / 160.0) + 0.5);
             let margin_px = dp(HALF_SEPARATOR_DP).max(1);
             let highlight_px = dp(HIGHLIGHT_DP).max(1);
             log::info!(
@@ -1456,8 +1461,8 @@ impl<P: VideoPlayer> Pipeline<P> {
         let s = (rect.w as f32 / meta.width as f32)
             .max(rect.h as f32 / meta.height as f32)
             .min(1.0);
-        let sw = ((meta.width as f32 * s).round() as i32).max(1);
-        let sh = ((meta.height as f32 * s).round() as i32).max(1);
+        let sw = num::sat_i32((meta.width as f32 * s).round()).max(1);
+        let sh = num::sat_i32((meta.height as f32 * s).round()).max(1);
         // The source already box-halves previews to within 2x of this
         // size (source.rs `shrink_to_cover`), so this is normally one draw.
         // If a photo ever arrives larger, one bilinear draw at 3-4x would
@@ -1557,8 +1562,8 @@ impl<P: VideoPlayer> Pipeline<P> {
         let s = (rect.w as f32 / w as f32)
             .max(rect.h as f32 / h as f32)
             .min(1.0);
-        let sw = ((w as f32 * s).round() as i32).max(1);
-        let sh = ((h as f32 * s).round() as i32).max(1);
+        let sw = num::sat_i32((w as f32 * s).round()).max(1);
+        let sh = num::sat_i32((h as f32 * s).round()).max(1);
         // SAFETY: a Pipeline lives on the render thread with its context
         // current (gl.rs # Safety).
         let source = unsafe { RenderTarget::try_new(sw, sh) }?;

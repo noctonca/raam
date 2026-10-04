@@ -424,6 +424,10 @@ impl Keyboard {
 }
 
 /// LOCAL ADDITION: `b` over `a` at `t`, keeping `a`'s alpha.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a mix of two bytes at t in 0..=1 is a byte; `as` saturates past it"
+)]
 fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     Color32::from_rgba_unmultiplied(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()), a.a())

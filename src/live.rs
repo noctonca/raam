@@ -28,7 +28,7 @@ use raam_core::painter::Painter;
 use raam_core::seams::{DebugSwitches, MediaProbe};
 use raam_core::slideshow::{Pipeline, SlideshowSettings};
 use raam_core::video::NoVideo;
-use raam_core::{clock, collage, switches};
+use raam_core::{clock, collage, num, switches};
 use raam_engine::{db, fetch, library, weather};
 use raam_model::limits::LARGEST_LAYOUT;
 use raam_model::{ClipInfo, CurationKey, FitBackground, GapColour, ScaleMode, SourceKind};
@@ -314,7 +314,7 @@ impl Live {
             s.collage_max = default_max.min(LARGEST_LAYOUT);
         }
         s.screen_default_max = default_max;
-        let margin = ((2.0 * DENSITY_DPI as f32 / 160.0) + 0.5) as i32;
+        let margin = num::sat_i32((2.0 * DENSITY_DPI as f32 / 160.0) + 0.5);
         let fetch = fetch::spawn(
             self.host.clone(),
             s.collage_max,
@@ -354,7 +354,7 @@ impl Live {
             self.controller.ctx.clone(),
             egui::ViewportId::ROOT,
             &gl.window,
-            Some(gl.window.scale_factor() as f32),
+            Some(num::to_f32(gl.window.scale_factor())),
             None,
             None,
         );
@@ -417,7 +417,7 @@ impl Live {
         if matches!(t.phase, P::Ended | P::Cancelled) {
             self.finger = None;
         }
-        let pos = egui::pos2(t.location.x as f32, t.location.y as f32);
+        let pos = egui::pos2(num::to_f32(t.location.x), num::to_f32(t.location.y));
         self.touch(phase, pos);
     }
 
@@ -724,7 +724,7 @@ impl ApplicationHandler<Wake> for Live {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::RedrawRequested => self.pass(el),
             WindowEvent::CursorMoved { position, .. } => {
-                self.pointer = egui::pos2(position.x as f32, position.y as f32);
+                self.pointer = egui::pos2(num::to_f32(position.x), num::to_f32(position.y));
                 if self.down {
                     self.touch(egui::TouchPhase::Move, self.pointer);
                 }

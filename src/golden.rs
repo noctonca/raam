@@ -100,7 +100,8 @@ fn compare(a: &Image, b: &Image, tolerance: u8, mut mark: impl FnMut(usize, bool
         mark(i, d > tolerance);
         if d > tolerance {
             r.over += 1;
-            let (x, y) = ((i % a.w as usize) as u32, (i / a.w as usize) as u32);
+            let i = u32::try_from(i).expect("a shot's pixel index fits u32");
+            let (x, y) = (i % a.w, i / a.w);
             r.bbox = Some(match r.bbox {
                 None => [x, y, x, y],
                 Some([x0, y0, x1, y1]) => [x0.min(x), y0.min(y), x1.max(x), y1.max(y)],
@@ -134,7 +135,7 @@ pub fn run_diff(a: &Path, b: &Path, tolerance: u8, out: Option<&Path>) -> i32 {
                 p.copy_from_slice(&[255, 0, 255]);
             } else {
                 let luma = (u32::from(p[0]) * 3 + u32::from(p[1]) * 6 + u32::from(p[2])) / 10;
-                p.fill(64 + (luma / 4) as u8);
+                p.fill(64 + u8::try_from(luma / 4).expect("a luma byte over 4"));
             }
         }
     });

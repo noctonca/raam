@@ -15,10 +15,10 @@ use crate::{Args, Gl, PageArg, backdrop, golden, read_pixels};
 use egui::Theme;
 use glutin::surface::GlSurface;
 use raam_core::frame_ui::{self, SHOT_PASS, SHOT_SETTLED};
-use raam_core::gallery;
 use raam_core::gl::*;
 use raam_core::painter::Painter;
 use raam_core::theme::{self, Options, TextMode};
+use raam_core::{gallery, num};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -147,7 +147,7 @@ impl Preset {
     /// window's scale factor, so `--exact` divides that back out.
     fn zoom(&self, ppp: f32) -> f32 {
         match (&self.gl, self.args.exact) {
-            (Some(gl), true) => ppp / gl.window.scale_factor() as f32,
+            (Some(gl), true) => ppp / num::to_f32(gl.window.scale_factor()),
             _ => ppp,
         }
     }
@@ -174,7 +174,7 @@ impl Preset {
             self.ctx.clone(),
             egui::ViewportId::ROOT,
             &gl.window,
-            Some(gl.window.scale_factor() as f32),
+            Some(num::to_f32(gl.window.scale_factor())),
             None,
             // Not a desktop GPU's 16384: the device leaves egui at its default,
             // and the atlas's shape should match.

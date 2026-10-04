@@ -101,7 +101,7 @@ impl Live {
         s.immich_enabled = false;
         s.local_enabled = true;
         s.sleep_enabled = false;
-        let margin = ((2.0 * DENSITY_DPI as f32 / 160.0) + 0.5) as i32;
+        let margin = raam_core::num::sat_i32((2.0 * DENSITY_DPI as f32 / 160.0) + 0.5);
         let source = WebSource::new(s.collage_max, (w, h, margin.max(1)))?;
         let samples = i64::try_from(source.len()).expect("the bundled samples, a handful, fit i64");
         let library = WebLibrary {

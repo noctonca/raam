@@ -42,8 +42,14 @@ pub fn local_time(epoch: i64) -> LocalTime {
 }
 
 /// Bionic's `localtime_r`, which applies `persist.sys.timezone` itself.
+// `allow`, not `expect`: time_t is i64 on a 64-bit Android target, where
+// the cast truncates nothing and the lint stays quiet.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "time_t is i32 on armv7: fine until 2038, and the frame's libc can't go past it"
+)]
 fn local_tm(t: i64) -> libc::tm {
-    let t = t as libc::time_t; // i32 on armv7 (fine until 2038; the frame is 32-bit anyway)
+    let t = t as libc::time_t;
     // SAFETY: an all-zero `tm` is a valid value (the zone pointer is just
     // null), and both pointers are to locals that outlive the call.
     unsafe {

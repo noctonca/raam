@@ -163,7 +163,7 @@ impl Power {
                 .call_method(&am, "getStreamMaxVolume", "(I)I", &[JValue::Int(3)])
                 .and_then(|r| r.i())
                 .map_err(|e| check(env, "getStreamMaxVolume", e))?;
-            let index = (v.clamp(0.0, 1.0) * max as f32).round() as i32;
+            let index = raam_core::num::sat_i32((v.clamp(0.0, 1.0) * max as f32).round());
             env.call_method(
                 &am,
                 "setStreamVolume",

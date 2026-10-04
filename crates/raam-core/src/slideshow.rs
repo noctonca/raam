@@ -389,6 +389,7 @@ impl OesProgram {
     /// # Safety
     /// Requires a current GL context.
     unsafe fn new() -> Self {
+        // SAFETY: the caller's contract: a current GL context.
         unsafe {
             let program = link_program("oes", VS_OES_SRC, FS_OES_SRC);
             Self {
@@ -424,6 +425,9 @@ impl OesProgram {
         } else {
             frame.matrix
         };
+        // SAFETY: the caller's contract: a current GL context, the pipeline's
+        // quad in the buffers bound here (so the attribute offsets and the
+        // six-index draw stay inside it), and a live `frame.texture`.
         unsafe {
             glUseProgram(self.program);
             glBindBuffer(GL_ARRAY_BUFFER, quad_vbo);
@@ -462,6 +466,7 @@ impl QuadProgram {
     /// # Safety
     /// Requires a current GL context.
     unsafe fn new(label: &str, fs_src: &str) -> Self {
+        // SAFETY: the caller's contract: a current GL context.
         unsafe {
             let program = link_program(label, VS_SRC, fs_src);
             Self {
@@ -484,6 +489,9 @@ impl QuadProgram {
     /// Requires a current GL context and the pipeline's quad buffers (four
     /// pos+uv vertices, six u16 indices).
     unsafe fn bind(&self, quad_vbo: GlUint, quad_ibo: GlUint) {
+        // SAFETY: the caller's contract: a current GL context, and the
+        // pipeline's quad in the buffers bound here, so the attribute offsets
+        // fall inside its four pos+uv vertices.
         unsafe {
             glUseProgram(self.program);
             glBindBuffer(GL_ARRAY_BUFFER, quad_vbo);
@@ -509,6 +517,9 @@ impl QuadProgram {
         uv: UvWindow,
         texel: Option<(f32, f32)>,
     ) {
+        // SAFETY: the caller's contract: a current GL context, this program
+        // bound over the quad (the six u16 indices the draw reads), and
+        // `texture` live.
         unsafe {
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, texture);
@@ -558,6 +569,9 @@ impl Tile {
     /// # Safety
     /// Requires a current GL context; nothing may draw from the tile after.
     unsafe fn destroy(self) {
+        // SAFETY: the caller's contract: a current GL context and no draw from
+        // the tile after; `self` is consumed, so each target is destroyed
+        // once.
         unsafe {
             self.source.destroy();
             self.target.destroy();
@@ -591,6 +605,8 @@ impl Collage {
     /// after.
     unsafe fn destroy(self) {
         for t in self.tiles {
+            // SAFETY: the caller's contract, passed on; each tile is moved out
+            // of `self.tiles`, so it is destroyed once.
             unsafe { t.destroy() };
         }
     }
@@ -711,6 +727,8 @@ impl<P: VideoPlayer> Pipeline<P> {
         player: P,
         mem_free_kb: fn() -> Option<u64>,
     ) -> Self {
+        // SAFETY: the caller's contract: a current GL context. The two uploads
+        // say why their pointers hold.
         unsafe {
             let mut vbo = 0;
             glGenBuffers(1, &mut vbo);
@@ -973,6 +991,9 @@ impl<P: VideoPlayer> Pipeline<P> {
                 "dropping built plan {} (it holds the hidden photo)",
                 r.plan.seq
             );
+            // SAFETY: a Pipeline lives on the render thread with its context
+            // current (gl.rs # Safety); `r` was taken out of `ready` unshown,
+            // so nothing draws from it after.
             unsafe { r.destroy() };
             source.consumed();
         }
@@ -1101,6 +1122,9 @@ impl<P: VideoPlayer> Pipeline<P> {
             }
             if let Some(r) = self.ready.take() {
                 log::info!("dropping built but unshown plan {}", r.plan.seq);
+                // SAFETY: a Pipeline lives on the render thread with its
+                // context current (gl.rs # Safety); `r` was taken out of
+                // `ready` unshown, so nothing draws from it after.
                 unsafe { r.destroy() };
             }
             let rects = match plan.layout {
@@ -1209,11 +1233,16 @@ impl<P: VideoPlayer> Pipeline<P> {
     /// Requires a current GL context.
     unsafe fn destroy_building_tiles(b: &mut Building<P>) {
         for t in b.tiles.iter_mut().filter_map(Option::take) {
+            // SAFETY: the caller's contract: a current GL context; `take`
+            // leaves `None` behind, so no tile is destroyed twice.
             unsafe { t.destroy() };
         }
     }
 
     fn destroy_building(mut b: Building<P>) {
+        // SAFETY: only the Pipeline's methods call this, on the render thread
+        // with its context current (gl.rs # Safety); `b` is consumed, so its
+        // tiles are drawn from nowhere else.
         unsafe { Self::destroy_building_tiles(&mut b) };
         if let Some(p) = b.probe.take() {
             p.player.stop();
@@ -1320,6 +1349,9 @@ impl<P: VideoPlayer> Pipeline<P> {
         if b.plan.assets.iter().any(|a| self.hidden.contains(&a.key)) {
             log::info!("dropping plan {}: it holds a hidden photo", b.plan.seq);
             for t in tiles {
+                // SAFETY: a Pipeline lives on the render thread with its
+                // context current (gl.rs # Safety); the tiles were moved out
+                // of the finished plan and go unshown.
                 unsafe { t.destroy() };
             }
             source.consumed();
@@ -1434,6 +1466,10 @@ impl<P: VideoPlayer> Pipeline<P> {
         // photo's top), so the compose code treats `source` like photo_tex.
         let mut halvings: Vec<RenderTarget> = Vec::new();
         let (mut cur_tex, mut cw, mut ch) = (self.photo_tex, meta.width as i32, meta.height as i32);
+        // SAFETY: a Pipeline lives on the render thread with its context
+        // current (gl.rs # Safety). `blit` stays bound through the loop
+        // (making a target uses no program), and on failure each halving is
+        // drained, so destroyed once.
         unsafe {
             self.blit.bind(self.quad_vbo, self.quad_ibo);
             while cw / 2 >= sw && ch / 2 >= sh {
@@ -1455,7 +1491,12 @@ impl<P: VideoPlayer> Pipeline<P> {
             }
         }
         let steps = halvings.len();
+        // SAFETY: a Pipeline lives on the render thread with its context
+        // current (gl.rs # Safety).
         let source = unsafe { RenderTarget::try_new(sw, sh) };
+        // SAFETY: as above; `blit` is still bound from the block above, and
+        // the halvings, drained, are each destroyed once, after their last
+        // draw.
         unsafe {
             if let Ok(source) = &source {
                 source.bind_and_viewport();
@@ -1468,9 +1509,13 @@ impl<P: VideoPlayer> Pipeline<P> {
             self.release_photo();
         }
         let source = source?;
+        // SAFETY: a Pipeline lives on the render thread with its context
+        // current (gl.rs # Safety).
         let target = match unsafe { RenderTarget::try_new(rect.w, rect.h) } {
             Ok(target) => target,
             Err(e) => {
+                // SAFETY: as above; `source` is consumed on the way out, never
+                // drawn from.
                 unsafe { source.destroy() };
                 return Err(e);
             }
@@ -1512,7 +1557,11 @@ impl<P: VideoPlayer> Pipeline<P> {
             .min(1.0);
         let sw = ((w as f32 * s).round() as i32).max(1);
         let sh = ((h as f32 * s).round() as i32).max(1);
+        // SAFETY: a Pipeline lives on the render thread with its context
+        // current (gl.rs # Safety).
         let source = unsafe { RenderTarget::try_new(sw, sh) }?;
+        // SAFETY: as above; the probe's player runs until `poll_probe` stops
+        // it after this, so the frame's texture is live.
         unsafe {
             source.bind_and_viewport();
             self.draw_clip_frame(&self.video.probe_frame(&probe.player), (1.0, 1.0), false);
@@ -1521,7 +1570,11 @@ impl<P: VideoPlayer> Pipeline<P> {
         let bg = if self.settings.fit_background == FitBackground::Blurred {
             self.run_blur_chain(source.texture, w, h, rect.w, rect.h);
             let blurred = &self.blur_targets[1];
+            // SAFETY: a Pipeline lives on the render thread with its context
+            // current (gl.rs # Safety).
             match unsafe { RenderTarget::try_new(blurred.width, blurred.height) } {
+                // SAFETY: as above; `blit` is bound before its draw, from the
+                // blur target `run_blur_chain` just filled.
                 Ok(bg) => unsafe {
                     bg.bind_and_viewport();
                     self.blit.bind(self.quad_vbo, self.quad_ibo);
@@ -1534,6 +1587,8 @@ impl<P: VideoPlayer> Pipeline<P> {
                     Some(bg)
                 },
                 Err(e) => {
+                    // SAFETY: as above; `source` is consumed on the way out,
+                    // never drawn from.
                     unsafe { source.destroy() };
                     return Err(e);
                 }
@@ -1541,8 +1596,12 @@ impl<P: VideoPlayer> Pipeline<P> {
         } else {
             None
         };
+        // SAFETY: a Pipeline lives on the render thread with its context
+        // current (gl.rs # Safety).
         let target = match unsafe { RenderTarget::try_new(rect.w, rect.h) } {
             Ok(target) => target,
+            // SAFETY: as above; `source` and `bg` are consumed on the way out,
+            // never drawn from.
             Err(e) => unsafe {
                 source.destroy();
                 if let Some(bg) = bg {
@@ -1579,7 +1638,11 @@ impl<P: VideoPlayer> Pipeline<P> {
     /// # Safety
     /// Requires a current GL context.
     unsafe fn draw_clip_frame(&self, frame: &ClipFrame, scale: (f32, f32), upright: bool) {
+        // SAFETY: the caller's contract: a current GL context.
         let oes = self.oes.get_or_init(|| unsafe { OesProgram::new() });
+        // SAFETY: the caller's contract: a current GL context; the quad is the
+        // pipeline's own, and every caller passes the frame of a player not
+        // yet stopped.
         unsafe { oes.draw(self.quad_vbo, self.quad_ibo, frame, scale, upright) };
     }
 
@@ -1591,6 +1654,8 @@ impl<P: VideoPlayer> Pipeline<P> {
         meta: &PhotoMeta,
         bg: Option<&RenderTarget>,
     ) {
+        // SAFETY: a Pipeline lives on the render thread with its context
+        // current (gl.rs # Safety); `blit` is bound before its draws.
         unsafe {
             target.bind_and_viewport();
             self.blit.bind(self.quad_vbo, self.quad_ibo);
@@ -1665,6 +1730,9 @@ impl<P: VideoPlayer> Pipeline<P> {
         {
             let t0 = clock::now();
             let tile = &mut current.tiles[0];
+            // SAFETY: a Pipeline lives on the render thread with its context
+            // current (gl.rs # Safety); the clip is stopped only after this
+            // draw, so its frame's texture is live.
             unsafe {
                 tile.source.bind_and_viewport();
                 self.draw_clip_frame(&frame, (1.0, 1.0), false);
@@ -1797,6 +1865,8 @@ impl<P: VideoPlayer> Pipeline<P> {
         comp: Composition,
     ) {
         match comp {
+            // SAFETY: a Pipeline lives on the render thread with its context
+            // current (gl.rs # Safety); `blit` is bound before its draw.
             Composition::Fill => unsafe {
                 let window = fill_uv(
                     meta.width,
@@ -1819,6 +1889,9 @@ impl<P: VideoPlayer> Pipeline<P> {
                         target.height,
                     );
                 }
+                // SAFETY: a Pipeline lives on the render thread with its
+                // context current (gl.rs # Safety); `blit` is bound after the
+                // blur chain's program, before its draws.
                 unsafe {
                     target.bind_and_viewport();
                     self.blit.bind(self.quad_vbo, self.quad_ibo);
@@ -1838,6 +1911,8 @@ impl<P: VideoPlayer> Pipeline<P> {
                 }
             }
         }
+        // SAFETY: a Pipeline lives on the render thread with its context
+        // current (gl.rs # Safety).
         unsafe {
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             glFinish();
@@ -1851,6 +1926,9 @@ impl<P: VideoPlayer> Pipeline<P> {
         let cover = cover_uv(photo_w, photo_h, tile_w as u32, tile_h as u32);
         let texel_h = (1.0 / a.width as f32, 0.0);
         let texel_v = (0.0, 1.0 / a.height as f32);
+        // SAFETY: a Pipeline lives on the render thread with its context
+        // current (gl.rs # Safety); `blur` is bound before its draws, and both
+        // blur targets live as long as the Pipeline.
         unsafe {
             self.blur.bind(self.quad_vbo, self.quad_ibo);
             a.bind_and_viewport();
@@ -1885,6 +1963,8 @@ impl<P: VideoPlayer> Pipeline<P> {
     /// # Safety
     /// Requires a current GL context and `c`'s tiles not yet destroyed.
     unsafe fn draw_collage(&self, c: &Collage, highlight: Option<usize>) {
+        // SAFETY: the caller's contract: a current GL context and `c`'s tiles
+        // live; `blit` is bound before the tile draws.
         unsafe {
             glViewport(0, 0, self.screen_w, self.screen_h);
             if !c.is_single() {
@@ -1933,6 +2013,8 @@ impl<P: VideoPlayer> Pipeline<P> {
     /// If a collage transition reaches its shader without the scratch
     /// pair (one that can't get it is cut instead, at the top).
     pub fn draw_frame(&mut self) {
+        // SAFETY: a Pipeline lives on the render thread with its context
+        // current (gl.rs # Safety).
         unsafe {
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             glViewport(0, 0, self.screen_w, self.screen_h);
@@ -1948,10 +2030,15 @@ impl<P: VideoPlayer> Pipeline<P> {
         // becomes a cut to the incoming collage.
         let mut cut = false;
         if needs_scratch && self.scratch.is_none() {
+            // SAFETY: a Pipeline lives on the render thread with its context
+            // current (gl.rs # Safety).
             let pair = unsafe { RenderTarget::try_new(self.screen_w, self.screen_h) }.and_then(
+                // SAFETY: as above.
                 |a| match unsafe { RenderTarget::try_new(self.screen_w, self.screen_h) } {
                     Ok(b) => Ok([a, b]),
                     Err(e) => {
+                        // SAFETY: as above; `a` is consumed here and the pair
+                        // is never made.
                         unsafe { a.destroy() };
                         Err(e)
                     }
@@ -1981,6 +2068,9 @@ impl<P: VideoPlayer> Pipeline<P> {
 
         let mut finished = false;
         match &self.state {
+            // SAFETY: a Pipeline lives on the render thread with its context
+            // current (gl.rs # Safety); `current` is the live collage, `blit`
+            // is bound before its draw, and the frame is the playing clip's.
             State::Idle { .. } => unsafe {
                 // The playing clip, over its static background
                 // (`live_frame` is None while `debug.video.show_still=1`
@@ -2016,6 +2106,9 @@ impl<P: VideoPlayer> Pipeline<P> {
                 }
             },
             State::Transitioning { incoming, .. } if cut => {
+                // SAFETY: a Pipeline lives on the render thread with its
+                // context current (gl.rs # Safety); `incoming` is not
+                // destroyed until the transition ends.
                 unsafe { self.draw_collage(incoming, None) };
                 finished = true;
             }
@@ -2043,6 +2136,10 @@ impl<P: VideoPlayer> Pipeline<P> {
                         )
                     } else {
                         let [sa, sb] = self.scratch.as_ref().unwrap();
+                        // SAFETY: a Pipeline lives on the render thread with
+                        // its context current (gl.rs # Safety); the scratch
+                        // pair is held in `self.scratch`, and neither collage
+                        // is destroyed yet.
                         unsafe {
                             glBindFramebuffer(GL_FRAMEBUFFER, sa.fbo);
                             self.draw_collage(current, None);
@@ -2058,6 +2155,10 @@ impl<P: VideoPlayer> Pipeline<P> {
                             in_shader_uv(IDENTITY_WINDOW),
                         )
                     };
+                // SAFETY: a Pipeline lives on the render thread with its
+                // context current (gl.rs # Safety); the quad is the pipeline's
+                // own, and both textures belong to live tiles or the scratch
+                // pair.
                 unsafe {
                     self.transitions[*transition_idx].draw(
                         self.quad_vbo,
@@ -2091,8 +2192,14 @@ impl<P: VideoPlayer> Pipeline<P> {
                         self.history.pop_front();
                     }
                 }
+                // SAFETY: a Pipeline lives on the render thread with its
+                // context current (gl.rs # Safety); `old` was replaced as
+                // current and only its plan is kept, so nothing draws from its
+                // tiles again.
                 unsafe { old.destroy() };
                 if let Some([a, b]) = self.scratch.take() {
+                    // SAFETY: as above; the pair was taken out of
+                    // `self.scratch`, so nothing draws from it again.
                     unsafe {
                         a.destroy();
                         b.destroy();

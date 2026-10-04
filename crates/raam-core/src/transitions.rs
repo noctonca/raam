@@ -289,6 +289,7 @@ impl TransitionProgram {
     /// # Safety
     /// Requires a current GL context.
     unsafe fn new(name: &'static str, body: &str, extra: impl FnOnce(GlUint)) -> Self {
+        // SAFETY: the caller's contract: a current GL context.
         unsafe {
             let src = wrap(body);
             let program = link_program(name, VS_SRC, &src);
@@ -320,6 +321,8 @@ impl TransitionProgram {
     /// # Safety
     /// Requires a current GL context.
     pub unsafe fn all() -> Vec<TransitionProgram> {
+        // SAFETY: the caller's contract: a current GL context, under which
+        // the closures run too (`new` calls them before returning).
         unsafe {
             vec![
                 TransitionProgram::new(NAMES[0], TRANSITION_FADE_SRC, |_p| {}),
@@ -367,6 +370,9 @@ impl TransitionProgram {
         from_kb: ((f32, f32), (f32, f32)),
         to_kb: ((f32, f32), (f32, f32)),
     ) {
+        // SAFETY: the caller's contract: a current GL context and the
+        // pipeline's quad bound, so the attribute offsets (within its
+        // 16-byte vertices) and the six indices GL reads are in bounds.
         unsafe {
             glUseProgram(self.program);
             glBindBuffer(GL_ARRAY_BUFFER, quad_vbo);

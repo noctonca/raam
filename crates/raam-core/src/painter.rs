@@ -76,6 +76,8 @@ struct Program {
 
 impl Program {
     unsafe fn new(label: &str, fs: &str) -> Self {
+        // SAFETY: only `Painter::new` calls this, under its contract: a
+        // current GL context.
         unsafe {
             let id = link_program(label, VS_SRC, fs);
             Self {
@@ -116,6 +118,7 @@ impl Painter {
     /// # Safety
     /// Requires a current GL context.
     pub unsafe fn new() -> Self {
+        // SAFETY: the caller's contract: a current GL context.
         unsafe {
             let mut vbo = 0;
             glGenBuffers(1, &mut vbo);
@@ -136,6 +139,8 @@ impl Painter {
     pub fn set_texture(&mut self, id: egui::TextureId, delta: &egui::epaint::ImageDelta) {
         let [w, h] = delta.image.size();
         let rgba = image_to_rgba_bytes(&delta.image);
+        // SAFETY: a Painter lives on the render thread with its context
+        // current (gl.rs, # Safety); the upload has its own note below.
         unsafe {
             let tex = *self.textures.entry(id).or_insert_with(|| {
                 let mut t = 0;
@@ -177,6 +182,8 @@ impl Painter {
 
     pub fn free_texture(&mut self, id: egui::TextureId) {
         if let Some(tex) = self.textures.remove(&id) {
+            // SAFETY: a Painter lives on the render thread with its context
+            // current (gl.rs, # Safety); `tex` is one GLuint to read.
             unsafe { glDeleteTextures(1, &tex) };
         }
     }
@@ -235,6 +242,8 @@ impl Painter {
         } else {
             &self.plain
         };
+        // SAFETY: a Painter lives on the render thread with its context
+        // current (gl.rs, # Safety); the draw's offsets have their own note.
         unsafe {
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             glViewport(0, 0, screen_w, screen_h);

@@ -33,6 +33,10 @@ fn system_wall() -> Duration {
 
 fn local_time(epoch: i64) -> LocalTime {
     let t = epoch as libc::time_t;
+    // SAFETY: `t` and `tm` are live locals of the right types, and an
+    // all-zero `libc::tm` is a valid value (its one pointer field null);
+    // localtime_r writes only into `tm`, so it is thread-safe where
+    // localtime is not. Should it fail, `tm` stays zeroed, still valid.
     let tm = unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
         libc::localtime_r(&t, &mut tm);

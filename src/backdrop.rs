@@ -23,6 +23,9 @@ impl Backdrop {
     /// Needs a current GL context. `w`×`h` is the screen, so the textures
     /// sample 1:1 like the pipeline's composed slides.
     pub unsafe fn new(w: i32, h: i32) -> Self {
+        // SAFETY: the caller's context is current (this fn's contract);
+        // `bufs` takes the two names asked for, and each glBufferData reads
+        // `size_of_val` bytes of a local array that outlives the call.
         unsafe {
             let progs = TransitionProgram::all();
             // Fullscreen quad: aPos (x, y), aUV (u, v) per vertex, as the
@@ -68,6 +71,8 @@ impl Backdrop {
         let progress = (t_s / PERIOD_S).fract();
         let zoom = 0.9 + 0.05 * (t_s * 0.3).sin();
         let kb = ((zoom, zoom), ((1.0 - zoom) * 0.5, (1.0 - zoom) * 0.5));
+        // SAFETY: the caller's context is current (this fn's contract), the
+        // one `self`'s buffers, textures and programs were made under.
         unsafe {
             p.draw(
                 self.vbo,
@@ -124,6 +129,9 @@ unsafe fn texture(w: i32, h: i32, seed: u32) -> GlUint {
             px[i + 3] = 255;
         }
     }
+    // SAFETY: the caller's context is current (this fn's contract); `px`
+    // holds w * h RGBA bytes, all GL reads at the default unpack alignment
+    // of 4 (an RGBA row is always a multiple of 4).
     unsafe {
         let mut tex = 0;
         glGenTextures(1, &mut tex);

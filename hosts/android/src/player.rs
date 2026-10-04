@@ -76,6 +76,8 @@ impl Drop for DecoderSlot {
 /// Keeps the process's JavaVM for the render thread's and the reaper's JNI.
 pub fn init_jvm(vm_ptr: *mut std::ffi::c_void) {
     if VM.get().is_none()
+        // SAFETY: `vm_ptr` is the glue's JavaVM, non-null and alive for
+        // the whole process.
         && let Ok(vm) = unsafe { JavaVM::from_raw(vm_ptr as *mut jni::sys::JavaVM) }
     {
         let _ = VM.set(vm);
@@ -301,6 +303,8 @@ impl Player {
     ) -> Result<Self, String> {
         let mut env = env()?;
         let mut oes = 0;
+        // SAFETY: on the GL thread with the host's context current (the
+        // gl.rs invariant); `oes` is a live local for GenTextures to fill.
         unsafe {
             glGenTextures(1, &mut oes);
             glBindTexture(GL_TEXTURE_EXTERNAL_OES, oes);
@@ -329,6 +333,8 @@ impl Player {
         let (texture, window) = match VideoTexture::new(&mut env, oes) {
             Ok(v) => v,
             Err(e) => {
+                // SAFETY: still on the GL thread; `oes` is the one texture
+                // made above, which nothing else holds yet.
                 unsafe { glDeleteTextures(1, &oes) };
                 return Err(e);
             }
@@ -605,6 +611,9 @@ impl OpenClip for Player {
             self.summary()
         );
         self.with_ctl(|c| c.stop = true);
+        // SAFETY: `stop` runs on the GL thread and takes `self`, so this
+        // player's texture is deleted once; the decoder only feeds it
+        // through the SurfaceTexture, never by GL name.
         unsafe { glDeleteTextures(1, &self.oes) };
         let threads = std::mem::take(&mut self.threads);
         let texture = self.texture.take();
@@ -924,6 +933,7 @@ fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
     // THREAD_PRIORITY_AUDIO (-16), so decoding the sound keeps up while a
     // 1080p clip and the render loop load the CPU. Android lets an app
     // raise its own threads' priority this far (RLIMIT_NICE).
+    // SAFETY: plain syscalls on this thread's own id; no pointers.
     let prio = unsafe { libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, -16) };
     log::info!(
         "{}: audio thread priority -16: {}",

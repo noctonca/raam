@@ -165,6 +165,8 @@ impl Preset {
     fn create_window(&mut self, el: &ActiveEventLoop) -> Result<(), String> {
         let gl = crate::create_gl(el, self.args.size, self.args.exact, !self.hermetic, None)?;
         self.info.gl_max_texture = gl.max_texture;
+        // SAFETY: create_gl made the window's context current on this
+        // thread, the event loop's, and nothing makes it not current.
         let mut painter = unsafe { Painter::new() };
         painter.text_boost = self.opts.text_mode == TextMode::Shader;
         self.painter = Some(painter);
@@ -401,6 +403,8 @@ impl Preset {
             Some("white") => 1.0,
             _ => 0.0,
         };
+        // SAFETY: the window's context, made current in create_gl on this
+        // thread (the event loop's) for the window's life.
         unsafe {
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             glViewport(0, 0, w, h);
@@ -413,6 +417,7 @@ impl Preset {
             Some(name) => {
                 let b = self
                     .backdrop
+                    // SAFETY: the window's context is current, as above.
                     .get_or_insert_with(|| unsafe { backdrop::Backdrop::new(w, h) });
                 let (prog, t) = if name == "still" {
                     ("fade", 0.0)
@@ -420,6 +425,7 @@ impl Preset {
                     (name, now.as_secs_f32())
                 };
                 animating = name != "still";
+                // SAFETY: the context `b` was made under, still current.
                 unsafe { b.draw(prog, t, w, h) };
                 true
             }

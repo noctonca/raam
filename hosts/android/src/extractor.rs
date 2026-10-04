@@ -39,7 +39,9 @@ pub struct Extractor {
     _file: File,
 }
 
-// Only ever touched from the one thread that owns it.
+// SAFETY: an AMediaExtractor has no thread affinity, and moving the
+// value moves sole ownership with it; it isn't Sync, so it is only ever
+// touched from the one thread that owns it.
 unsafe impl Send for Extractor {}
 
 impl Extractor {
@@ -52,9 +54,12 @@ impl Extractor {
             .metadata()
             .map_err(|e| OpenError::File(format!("stat {path}: {e}")))?
             .len();
+        // SAFETY: no arguments; a null result is caught just below.
         let ptr = unsafe { ndk_sys::AMediaExtractor_new() };
         let ptr = NonNull::new(ptr)
             .ok_or_else(|| OpenError::Media("AMediaExtractor_new returned null".into()))?;
+        // SAFETY: `ptr` is the live extractor just made, and the fd is
+        // `file`'s, open for this call (and kept open in `_file` after it).
         let status = unsafe {
             ndk_sys::AMediaExtractor_setDataSourceFd(
                 ptr.as_ptr(),
@@ -64,6 +69,8 @@ impl Extractor {
             )
         };
         if status != ndk_sys::media_status_t::AMEDIA_OK {
+            // SAFETY: `ptr` is ours alone and no `Extractor` was built from
+            // it, so no Drop deletes it a second time.
             unsafe { ndk_sys::AMediaExtractor_delete(ptr.as_ptr()) };
             return Err(OpenError::Media(format!(
                 "AMediaExtractor_setDataSourceFd({path}): {status:?}"
@@ -73,11 +80,15 @@ impl Extractor {
     }
 
     pub fn track_count(&self) -> usize {
+        // SAFETY: `ptr` is non-null and live until Drop, which runs once.
         unsafe { ndk_sys::AMediaExtractor_getTrackCount(self.ptr.as_ptr()) }
     }
 
     pub fn track_format(&self, idx: usize) -> Option<MediaFormat> {
+        // SAFETY: `ptr` is live until Drop; an out-of-range `idx` gives null.
         let fmt_ptr = unsafe { ndk_sys::AMediaExtractor_getTrackFormat(self.ptr.as_ptr(), idx) };
+        // SAFETY: getTrackFormat hands back a new format the caller owns,
+        // so `MediaFormat` may take it and delete it on drop.
         NonNull::new(fmt_ptr).map(|p| unsafe { MediaFormat::from_ptr(p) })
     }
 
@@ -94,6 +105,7 @@ impl Extractor {
     }
 
     pub fn select_track(&self, idx: usize) -> Result<(), String> {
+        // SAFETY: `ptr` is live until Drop; a bad `idx` is an error status.
         let status = unsafe { ndk_sys::AMediaExtractor_selectTrack(self.ptr.as_ptr(), idx) };
         (status == ndk_sys::media_status_t::AMEDIA_OK)
             .then_some(())
@@ -116,16 +128,19 @@ impl Extractor {
     }
 
     pub fn sample_time_us(&self) -> i64 {
+        // SAFETY: `ptr` is non-null and live until Drop, which runs once.
         unsafe { ndk_sys::AMediaExtractor_getSampleTime(self.ptr.as_ptr()) }
     }
 
     /// Advances to the next sample; false once exhausted.
     pub fn advance(&self) -> bool {
+        // SAFETY: `ptr` is non-null and live until Drop, which runs once.
         unsafe { ndk_sys::AMediaExtractor_advance(self.ptr.as_ptr()) }
     }
 
     /// To the sync sample at or before `us` (0 = the start, for a loop).
     pub fn seek_to(&self, us: i64) -> Result<(), String> {
+        // SAFETY: `ptr` is non-null and live until Drop, which runs once.
         let status = unsafe {
             ndk_sys::AMediaExtractor_seekTo(
                 self.ptr.as_ptr(),
@@ -141,6 +156,8 @@ impl Extractor {
 
 impl Drop for Extractor {
     fn drop(&mut self) {
+        // SAFETY: `open` made `ptr` and only this Drop frees it, once;
+        // nothing borrowed from it (track formats are copies) outlives `self`.
         unsafe { ndk_sys::AMediaExtractor_delete(self.ptr.as_ptr()) };
     }
 }

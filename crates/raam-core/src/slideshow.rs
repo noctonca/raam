@@ -1316,6 +1316,35 @@ impl<P: VideoPlayer> Pipeline<P> {
         }
     }
 
+    /// Frees every render target the pipeline holds, for a host that drops
+    /// it while its context still lives (the desktop window closing): a
+    /// target dropped unfreed panics (gl.rs). Its other GL objects go with
+    /// the context.
+    ///
+    /// # Safety
+    /// Requires the pipeline's GL context current.
+    pub unsafe fn destroy(mut self) {
+        if let Some(b) = self.building.take() {
+            self.destroy_building(b);
+        }
+        // SAFETY: the caller's contract: the context current; each target
+        // is moved out of `self`, so destroyed once.
+        unsafe {
+            for c in [self.current.take(), self.ready.take()]
+                .into_iter()
+                .flatten()
+            {
+                c.destroy();
+            }
+            for t in self.scratch.take().into_iter().flatten() {
+                t.destroy();
+            }
+            let [a, b] = self.blur_targets;
+            a.destroy();
+            b.destroy();
+        }
+    }
+
     /// The plan being built can't be (a fetch failed, or a clip wouldn't
     /// open): drop it, and a Prev request for it with it.
     fn drop_building(&mut self) {
@@ -1405,12 +1434,13 @@ impl<P: VideoPlayer> Pipeline<P> {
         let tiles: Vec<Tile> = b.tiles.into_iter().map(Option::unwrap).collect();
         let bytes: usize = tiles.iter().map(Tile::bytes).sum();
         log::info!(
-            "plan {} ready: {} tiles in {:?} (render-thread compose {:?} total), {:.1} MB of tile textures, MemFree {:?}KB",
+            "plan {} ready: {} tiles in {:?} (render-thread compose {:?} total), {:.1} MB of tile textures, {:.1} MB in all live render targets, MemFree {:?}KB",
             b.plan.seq,
             tiles.len(),
             clock::elapsed(b.started),
             b.compose_total,
             bytes as f64 / 1_048_576.0,
+            live_target_bytes() as f64 / 1_048_576.0,
             (self.mem_free_kb)(),
         );
         if b.plan.assets.iter().any(|a| self.hidden.contains(&a.key)) {

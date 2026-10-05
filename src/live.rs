@@ -717,6 +717,17 @@ impl ApplicationHandler<Wake> for Live {
         }
     }
 
+    /// The pipeline frees its render targets while the window's context is
+    /// still current: a target dropped unfreed panics (gl.rs).
+    fn exiting(&mut self, _el: &ActiveEventLoop) {
+        if let Some(run) = self.run.take() {
+            // SAFETY: `run.gl`'s context is current on this thread, as for
+            // the whole run, and outlives the call (it drops at the end of
+            // this block).
+            unsafe { run.pipeline.destroy() };
+        }
+    }
+
     fn user_event(&mut self, _el: &ActiveEventLoop, _wake: Wake) {
         self.next_run = Some(Instant::now());
     }

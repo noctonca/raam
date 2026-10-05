@@ -152,6 +152,7 @@ unsafe extern "C" {
     pub fn glClearColor(r: f32, g: f32, b: f32, a: f32);
     pub fn glClear(mask: GlBitfield);
     pub fn glFinish();
+    pub fn glFlush();
     pub fn glViewport(x: GlInt, y: GlInt, w: GlSizei, h: GlSizei);
     pub fn glCreateShader(shader_type: GlEnum) -> GlUint;
     pub fn glShaderSource(

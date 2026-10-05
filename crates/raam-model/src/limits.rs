@@ -87,6 +87,13 @@ pub const TRANSITION_DURATION: Duration = Duration::from_millis(1300);
 pub const BLUR_WIDTH_PX: i32 = 128;
 /// How many shown collages Prev can walk back through. Chosen.
 pub const HISTORY_LEN: usize = 10;
+/// How many pixels of a tile's photo the render thread uploads per frame
+/// while the slideshow dwells: a 1920x1440 preview goes up in 29 strips of
+/// 51 rows. Measured on the frame's Mali-400: the driver reorders every
+/// texel on the CPU (about 18 ms per MP offscreen), and strips cost the
+/// same in total as one upload, so this bounds a frame's share to about
+/// 2 ms instead of a 50-150 ms stall.
+pub const UPLOAD_STRIP_PIXELS: u32 = 98_304;
 /// After a GPU allocation failed (Mali out of memory), the next plan is
 /// asked for this much later. Chosen: long enough for pressure to pass.
 pub const GPU_RETRY: Duration = Duration::from_secs(5);

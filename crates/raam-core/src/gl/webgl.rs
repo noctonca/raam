@@ -121,6 +121,10 @@ pub unsafe fn glFinish() {
     with(|s| s.gl.finish())
 }
 
+pub unsafe fn glFlush() {
+    with(|s| s.gl.flush())
+}
+
 pub unsafe fn glViewport(x: GlInt, y: GlInt, w: GlSizei, h: GlSizei) {
     with(|s| s.gl.viewport(x, y, w, h))
 }

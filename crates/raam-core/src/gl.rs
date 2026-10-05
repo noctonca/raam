@@ -23,6 +23,8 @@
 //! methods rely on it. A block that does more than pass plain values to
 //! GL (a pointer with a length the driver will read or write, a C string
 //! read back) says why its pointer holds in a `SAFETY:` note.
+use raam_model::limits::MALI_PEAK_MB;
+use std::cell::Cell;
 use std::ffi::{CStr, c_char, c_void};
 
 pub type GlUint = u32;
@@ -622,12 +624,67 @@ pub unsafe fn uniform_loc(program: GlUint, name: &str) -> GlInt {
     }
 }
 
+/// Live render targets can't hold more than the whole Mali budget: every
+/// target is Mali memory, alongside the photo, egui and glyph textures.
+/// Hitting it means targets are being made and not destroyed.
+const TARGET_BYTES_MAX: usize = MALI_PEAK_MB as usize * 1024 * 1024;
+
+thread_local! {
+    /// The bytes of every live render target on this thread's GL context.
+    /// GL objects belong to a context, current on one thread, so this
+    /// mirrors the driver's own per-context state; it is where the Mali
+    /// budget is spent, so where it is asserted.
+    static TARGET_BYTES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// What a `width` x `height` target's texture holds: RGBA, a byte a channel.
+fn target_bytes(width: i32, height: i32) -> usize {
+    4 * from_gl_size::<_, usize>(width) * from_gl_size::<_, usize>(height)
+}
+
+/// Counts a new target's bytes in.
+///
+/// # Panics
+/// If live targets would pass `TARGET_BYTES_MAX`: a target is leaking.
+fn count_target(bytes: usize) {
+    let live = TARGET_BYTES.get();
+    assert!(
+        live + bytes <= TARGET_BYTES_MAX,
+        "render targets would hold {} bytes, past the {MALI_PEAK_MB} MB Mali budget ({live} live, {bytes} more): a target isn't being destroyed",
+        live + bytes
+    );
+    TARGET_BYTES.set(live + bytes);
+}
+
+/// Counts a destroyed target's bytes out.
+///
+/// # Panics
+/// If more is destroyed than was made.
+fn uncount_target(bytes: usize) {
+    let live = TARGET_BYTES.get();
+    assert!(
+        bytes <= live,
+        "a {bytes}-byte render target destroyed with only {live} bytes live"
+    );
+    TARGET_BYTES.set(live - bytes);
+}
+
+/// The bytes the live render targets hold on this thread's context.
+#[must_use]
+pub fn live_target_bytes() -> usize {
+    TARGET_BYTES.get()
+}
+
 /// A small offscreen render target: a texture plus the FBO that renders into
 /// it. NPOT-safe (CLAMP_TO_EDGE + non-mipmapped LINEAR filtering, matching
 /// GLES2's NPOT texture rules). Used both at the tiny blur working
 /// resolution (`BLUR_WIDTH_PX` wide) and at up to full screen resolution,
 /// for each tile's `source` and composed `target` and a transition's
 /// scratch pair.
+///
+/// It must be freed with `destroy`, under the context: dropping one
+/// panics, since a drop can't free GPU memory (no context need be
+/// current), and a leaked target is about 4 MB the frame doesn't have.
 pub struct RenderTarget {
     pub texture: GlUint,
     pub fbo: GlUint,
@@ -640,7 +697,8 @@ impl RenderTarget {
     ///
     /// # Panics
     /// If the target can't be made (`alloc`'s error): a failure there is
-    /// fatal. Also on a side that isn't positive.
+    /// fatal. Also on a side that isn't positive, or past the budget for
+    /// live targets (`alloc`).
     ///
     /// # Safety
     /// Requires a current GL context.
@@ -656,6 +714,7 @@ impl RenderTarget {
     ///
     /// # Panics
     /// On a side that isn't positive: a bug upstream, not a GPU failure.
+    /// Also when live targets would pass the Mali budget: a leak.
     ///
     /// # Safety
     /// Requires a current GL context.
@@ -676,7 +735,8 @@ impl RenderTarget {
     /// On a side that isn't positive. The callers' sizes never are (the
     /// screen's, a tile's, at least 1 px when scaled), so one would be a
     /// bug upstream; returned as an error, the pipeline would take it for
-    /// the GPU running out of memory and retry it every `GPU_RETRY`.
+    /// the GPU running out of memory and retry it every `GPU_RETRY`. Also
+    /// when live targets would pass the Mali budget (`count_target`).
     unsafe fn alloc(width: i32, height: i32) -> Result<Self, String> {
         assert!(
             width > 0,
@@ -741,6 +801,9 @@ impl RenderTarget {
                 width,
                 height,
             };
+            // Counted in once made, so the failure path's destroy counts it
+            // out again.
+            count_target(target_bytes(width, height));
             if tex_error != GL_NO_ERROR || status != GL_FRAMEBUFFER_COMPLETE {
                 target.destroy();
                 return Err(format!(
@@ -780,5 +843,66 @@ impl RenderTarget {
             glDeleteFramebuffers(1, &self.fbo);
             glDeleteTextures(1, &self.texture);
         }
+        uncount_target(target_bytes(self.width, self.height));
+        // Freed: the drop guard below is for targets that weren't.
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for RenderTarget {
+    /// Only a target dropped without `destroy` gets here (`destroy`
+    /// forgets it). Not while a panic unwinds: that panic is the one to see.
+    fn drop(&mut self) {
+        assert!(
+            std::thread::panicking(),
+            "a {}x{} render target (texture {}, FBO {}) was dropped, not destroyed: its GPU memory leaks",
+            self.width,
+            self.height,
+            self.texture,
+            self.fbo
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "was dropped, not destroyed")]
+    fn a_dropped_render_target_panics() {
+        // No GL here: the guard only looks at the struct.
+        drop(RenderTarget {
+            texture: 7,
+            fbo: 8,
+            width: 4,
+            height: 4,
+        });
+    }
+
+    #[test]
+    fn live_targets_are_counted_in_and_out() {
+        let before = live_target_bytes();
+        count_target(target_bytes(1280, 800));
+        assert_eq!(live_target_bytes() - before, 4 * 1280 * 800);
+        uncount_target(target_bytes(1280, 800));
+        assert_eq!(live_target_bytes(), before);
+    }
+
+    #[test]
+    #[should_panic(expected = "a target isn't being destroyed")]
+    fn leaking_targets_hit_the_mali_budget() {
+        // 16 screen-sized targets at 1280x800 are 62.5 MB; the 17th passes
+        // the 64 MB budget, as a target leaked every slide would within
+        // minutes.
+        for _ in 0..17 {
+            count_target(target_bytes(1280, 800));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "destroyed with only")]
+    fn destroying_more_than_was_made_panics() {
+        uncount_target(target_bytes(2, 2));
     }
 }

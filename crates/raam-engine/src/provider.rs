@@ -212,6 +212,26 @@ impl LocalFolder {
     }
 }
 
+impl LocalFolder {
+    /// Creates the folder on first use. One that photos were found in is
+    /// never made again, empty: gone, it's unmounted or moved, and an
+    /// empty listing would make the sync drop every photo and preview.
+    /// Missing, it's an error that drops nothing.
+    fn create_if_new(&self, dir: &Path) -> std::io::Result<()> {
+        if self.memo.is_empty() {
+            std::fs::create_dir_all(dir)
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "gone, with {} photos known there: not mounted?",
+                    self.memo.len()
+                ),
+            ))
+        }
+    }
+}
+
 impl Provider for LocalFolder {
     fn kind(&self) -> SourceKind {
         SourceKind::Local
@@ -219,7 +239,7 @@ impl Provider for LocalFolder {
 
     fn list(&mut self) -> Result<Vec<MediaRef>, ProviderError> {
         let dir = Path::new(&self.dir);
-        if !dir.is_dir() && std::fs::create_dir_all(dir).is_ok() {
+        if !dir.is_dir() && self.create_if_new(dir).is_ok() {
             log::info!("local: created {}", dir.display());
         }
         let mut files = Vec::new();
@@ -245,10 +265,9 @@ impl Provider for LocalFolder {
             // The remount after a grant lands asynchronously.
             std::thread::sleep(limits::STORAGE_GRANT_SETTLE);
             if !dir.is_dir() {
-                match std::fs::create_dir_all(dir) {
-                    Ok(()) => log::info!("local: created {}", dir.display()),
-                    Err(e) => log::warn!("local: create {}: {e}", dir.display()),
-                }
+                self.create_if_new(dir)
+                    .map_err(|e| ProviderError::Failed(format!("{}: {e}", dir.display())))?;
+                log::info!("local: created {}", dir.display());
             }
             files.clear();
             list_media(dir, &mut files).map_err(|e| {
@@ -675,6 +694,48 @@ mod tests {
             .encode(&data, 4, 2, colour)
             .unwrap();
         out
+    }
+
+    /// A folder photos were found in that is gone (a drive not mounted
+    /// yet) is an error, not an empty folder made in its place, which the
+    /// sync would take as every photo deleted.
+    #[test]
+    fn a_folder_that_is_gone_is_an_error_not_made_again() {
+        let dir = std::env::temp_dir().join(format!("raam-gone-{}", std::process::id()));
+        drop(std::fs::remove_dir_all(&dir));
+        let photo = dir.join("a.jpg").to_string_lossy().into_owned();
+        let known = MediaRef {
+            id: RemoteId::new("ab12".to_string()),
+            sha1: Some("ab12".into()),
+            location: Some(photo),
+            width: 4,
+            height: 2,
+            taken_at_ms: None,
+            kind: MediaKind::Photo,
+            focus: None,
+            stamp: Some((1, 2)),
+            collections: Vec::new(),
+        };
+        let mut folder = LocalFolder::new(
+            dir.to_string_lossy().into_owned(),
+            vec![known],
+            Arc::new(Probe(Ok(()))),
+            Arc::new(|| false),
+        );
+        let e = folder.list().unwrap_err();
+        assert!(e.to_string().contains("not mounted?"), "{e}");
+        assert!(!dir.exists(), "made again, empty");
+
+        // First use: nothing known there, so it's made.
+        let mut fresh = LocalFolder::new(
+            dir.to_string_lossy().into_owned(),
+            Vec::new(),
+            Arc::new(Probe(Ok(()))),
+            Arc::new(|| false),
+        );
+        assert!(fresh.list().unwrap().is_empty());
+        assert!(dir.is_dir());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A file the folder can't use says why, as its own variant, and is

@@ -147,7 +147,11 @@ mod webgl;
 pub use webgl::*;
 
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(non_snake_case, dead_code)]
+#[allow(
+    non_snake_case,
+    dead_code,
+    reason = "GL's own C names; each linkage calls a different subset, so which go unused depends on the target"
+)]
 unsafe extern "C" {
     pub fn glGetString(name: GlEnum) -> *const u8;
     pub fn glGetError() -> GlEnum;
@@ -335,7 +339,11 @@ mod desktop {
     ///
     /// # Safety
     /// Requires a current GL context, and `pixels` as glTexImage2D does.
-    #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[expect(
+        non_snake_case,
+        clippy::too_many_arguments,
+        reason = "stands in for the GLES2 entry point: its name and signature"
+    )]
     pub unsafe fn glTexImage2D(
         target: GlEnum,
         level: GlInt,
@@ -387,7 +395,11 @@ mod desktop {
     ///
     /// # Safety
     /// Requires a current GL context, and `pixels` as glTexSubImage2D does.
-    #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[expect(
+        non_snake_case,
+        clippy::too_many_arguments,
+        reason = "stands in for the GLES2 entry point: its name and signature"
+    )]
     pub unsafe fn glTexSubImage2D(
         target: GlEnum,
         level: GlInt,

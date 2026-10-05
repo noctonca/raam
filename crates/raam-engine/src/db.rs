@@ -581,11 +581,13 @@ pub fn update_albums(
         log::info!("db: first album list, {picked} album named {DEFAULT_ALBUM:?} picked");
     }
     tx.commit()?;
-    Ok(selected_albums(conn))
+    selected_albums(conn)
 }
 
-/// The picked albums that are on the server (as last listed).
-pub fn selected_albums(conn: &Connection) -> Vec<AlbumId> {
+/// The picked albums that are on the server (as last listed). An error,
+/// never an empty list: a sync takes an empty pick to mean every Immich
+/// asset is gone, and deletes them with their files.
+pub fn selected_albums(conn: &Connection) -> rusqlite::Result<Vec<AlbumId>> {
     conn.prepare(
         "SELECT c.remote_id FROM collection c JOIN source s ON s.id = c.source_id
          WHERE s.kind = 'immich' AND c.selected = 1 AND c.missing_since_ms IS NULL ORDER BY c.name",
@@ -594,7 +596,6 @@ pub fn selected_albums(conn: &Connection) -> Vec<AlbumId> {
         s.query_map([], |r| r.get::<_, String>(0).map(AlbumId::new))?
             .collect()
     })
-    .unwrap_or_default()
 }
 
 pub fn albums(conn: &Connection) -> Vec<AlbumRow> {
@@ -1159,16 +1160,18 @@ pub fn mark_unplayable(conn: &Connection, asset: AssetId, reason: &str) -> Vec<P
 /// The host has no player (`MediaProbe::no_player`): every clip not yet
 /// marked is marked unplayable for `reason`, without its file. Returns
 /// how many were marked and the files to remove.
-pub fn mark_clips_unplayable(conn: &Connection, reason: &str) -> (usize, Vec<PathBuf>) {
+pub fn mark_clips_unplayable(
+    conn: &Connection,
+    reason: &str,
+) -> rusqlite::Result<(usize, Vec<PathBuf>)> {
     let ids: Vec<AssetId> = conn
         .prepare("SELECT id FROM asset WHERE kind = 'video' AND COALESCE(playable, 1) = 1")
-        .and_then(|mut s| s.query_map([], |r| asset_id(r, 0))?.collect())
-        .unwrap_or_default();
+        .and_then(|mut s| s.query_map([], |r| asset_id(r, 0))?.collect())?;
     let files = ids
         .iter()
         .flat_map(|&id| mark_unplayable(conn, id, reason))
         .collect();
-    (ids.len(), files)
+    Ok((ids.len(), files))
 }
 
 pub fn set_playable(conn: &Connection, asset: AssetId) -> rusqlite::Result<usize> {
@@ -1226,9 +1229,17 @@ pub fn cached_bytes(conn: &Connection, kind: SourceKind) -> i64 {
 /// in between leaves files no row points at, which the startup sweep
 /// deletes; asset ids are never reused (AUTOINCREMENT), so no new asset can
 /// take such a file for its own first. A failed delete gives back no
-/// paths: the rows still point at their files, so they must stay.
+/// paths: the rows still point at their files, so they must stay. Nor
+/// does one whose paths can't be read: its files would stay on disk with
+/// no row, past the cap, until the next start's sweep.
 pub fn drop_cached(conn: &Connection, asset: AssetId) -> Vec<PathBuf> {
-    let paths = cached_paths(conn, asset);
+    let paths = match cached_paths(conn, asset) {
+        Ok(paths) => paths,
+        Err(e) => {
+            log::error!("db: the cached files of asset {asset} can't be read, kept: {e}");
+            return Vec::new();
+        }
+    };
     match conn.execute("DELETE FROM cached_file WHERE asset_id = ?1", [asset.get()]) {
         Ok(_) => paths,
         Err(e) => {
@@ -1238,16 +1249,12 @@ pub fn drop_cached(conn: &Connection, asset: AssetId) -> Vec<PathBuf> {
     }
 }
 
-fn cached_paths(conn: &Connection, asset: AssetId) -> Vec<PathBuf> {
+fn cached_paths(conn: &Connection, asset: AssetId) -> rusqlite::Result<Vec<PathBuf>> {
     conn.prepare_cached("SELECT path FROM cached_file WHERE asset_id = ?1")
         .and_then(|mut s| {
-            s.query_map([asset.get()], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()
+            s.query_map([asset.get()], |r| r.get::<_, String>(0).map(PathBuf::from))?
+                .collect()
         })
-        .unwrap_or_default()
-        .into_iter()
-        .map(PathBuf::from)
-        .collect()
 }
 
 /// The single way assets leave: the rows go (the cascade takes
@@ -1257,7 +1264,7 @@ pub fn delete_assets(conn: &Connection, assets: &[AssetId]) -> rusqlite::Result<
     let mut paths = Vec::new();
     let mut delete = conn.prepare_cached("DELETE FROM asset WHERE id = ?1")?;
     for &id in assets {
-        paths.extend(cached_paths(conn, id));
+        paths.extend(cached_paths(conn, id)?);
         delete.execute([id.get()])?;
     }
     Ok(paths)
@@ -1466,6 +1473,30 @@ mod tests {
             .unwrap()
     }
 
+    /// raam#38's pattern: a picked album that can't be read is an error,
+    /// never left out. An empty pick makes the next sync delete every
+    /// Immich asset with its files.
+    #[test]
+    fn a_picked_album_that_cant_be_read_is_an_error_not_none() {
+        install_clock();
+        let db = open(Path::new(":memory:"), "").unwrap();
+        let conn = db.lock().unwrap();
+        let pick = |remote_id: &str| {
+            format!(
+                "INSERT INTO collection (source_id, remote_id, name, selected, listed_at_ms)
+                 SELECT id, {remote_id}, 'Family', 1, 0 FROM source WHERE kind = 'immich'"
+            )
+        };
+        conn.execute(&pick("'album-1'"), []).unwrap();
+        assert_eq!(
+            selected_albums(&conn).unwrap(),
+            [AlbumId::new("album-1".to_string())]
+        );
+        // A row the read can't decode: a stand-in for an I/O error.
+        conn.execute(&pick("X'00'"), []).unwrap();
+        assert!(selected_albums(&conn).is_err());
+    }
+
     /// A prototype export seeds an empty curation table; an export Raam
     /// can't read says why, as its own variant, and imports nothing.
     #[test]
@@ -1604,7 +1635,7 @@ mod tests {
         // A clip nobody has tried yet is queued, as on the frame.
         assert_eq!(queued(&conn), ["clip", "photo"]);
 
-        let (marked, files) = mark_clips_unplayable(&conn, "no video player on this host");
+        let (marked, files) = mark_clips_unplayable(&conn, "no video player on this host").unwrap();
         assert_eq!((marked, files.len()), (1, 0));
         assert_eq!(queued(&conn), ["photo"]);
         let reason = |id: &str| -> String {
@@ -1619,7 +1650,7 @@ mod tests {
         // A clip already out keeps the reason it had.
         assert_eq!(reason("big"), "1920x1088 at most");
         // Nothing left to mark the second time.
-        assert_eq!(mark_clips_unplayable(&conn, "again").0, 0);
+        assert_eq!(mark_clips_unplayable(&conn, "again").unwrap().0, 0);
     }
 
     #[test]
@@ -1973,9 +2004,9 @@ mod tests {
         let stray = file("stray.jpg", 10);
 
         assert_eq!(sweep(&conn, &[&dir]), (3, 3));
-        assert_eq!(cached_paths(&conn, ids[0]), vec![paths[0].clone()]);
+        assert_eq!(cached_paths(&conn, ids[0]).unwrap(), vec![paths[0].clone()]);
         for id in &ids[1..] {
-            assert!(cached_paths(&conn, *id).is_empty());
+            assert!(cached_paths(&conn, *id).unwrap().is_empty());
         }
         assert!(paths[0].is_file());
         assert!(!paths[1].exists() && !paths[2].exists() && !stray.exists());
@@ -2068,7 +2099,7 @@ mod tests {
             (cleared, files),
             (1, vec![PathBuf::from("/cache/photo.jpg")])
         );
-        assert!(cached_paths(&conn, photo).is_empty());
+        assert!(cached_paths(&conn, photo).unwrap().is_empty());
         let playable: Option<bool> = conn
             .query_row(
                 "SELECT playable FROM asset WHERE remote_id = 'big'",
@@ -2126,10 +2157,13 @@ mod tests {
         )
         .unwrap();
         assert!(drop_cached(&conn, id).is_empty());
-        assert_eq!(cached_paths(&conn, id), [PathBuf::from("/cache/kept.jpg")]);
+        assert_eq!(
+            cached_paths(&conn, id).unwrap(),
+            [PathBuf::from("/cache/kept.jpg")]
+        );
 
         conn.execute_batch("DROP TRIGGER no_delete;").unwrap();
         assert_eq!(drop_cached(&conn, id), [PathBuf::from("/cache/kept.jpg")]);
-        assert!(cached_paths(&conn, id).is_empty());
+        assert!(cached_paths(&conn, id).unwrap().is_empty());
     }
 }

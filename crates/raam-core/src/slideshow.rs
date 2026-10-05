@@ -38,7 +38,9 @@ use crate::num;
 use crate::source::{Photo, Plan, TileSource, VideoClip};
 use crate::transitions::TransitionProgram;
 use crate::video::{ClipFrame, LiveCue, ProbePlayer, ProbeStatus, Tick, Video, VideoPlayer};
-use raam_model::limits::{BLUR_WIDTH_PX, GPU_RETRY, HISTORY_LEN, TRANSITION_DURATION};
+use raam_model::limits::{
+    BLUR_WIDTH_PX, GPU_RETRY, HISTORY_LEN, TRANSITION_DURATION, UPLOAD_STRIP_PIXELS,
+};
 use raam_model::{AssetId, CurationKey, FitBackground, GapColour, ScaleMode, VideoPlayback};
 use std::cell::OnceCell;
 use std::collections::{HashMap, VecDeque};
@@ -663,6 +665,25 @@ struct Building<P: VideoPlayer> {
     started: Duration,
     compose_total: Duration,
     probe: Option<Probe<P>>,
+    /// A tile's photo going up to `photo_tex` a strip per frame.
+    upload: Option<Upload>,
+}
+
+/// A tile's photo uploaded to `photo_tex` over several frames, so no frame
+/// stalls for the whole upload (`UPLOAD_STRIP_PIXELS`). The CPU pixels are
+/// held until the last strip is up.
+struct Upload {
+    photo: Photo,
+    slot: usize,
+    rect: Rect,
+    /// The next row to upload.
+    row: u32,
+    started: Duration,
+    mem_before: Option<u64>,
+    /// GL time over the strips so far, the slowest strip, and how many.
+    gl: Duration,
+    worst: Duration,
+    strips: u32,
 }
 
 enum State {
@@ -1050,10 +1071,14 @@ impl<P: VideoPlayer> Pipeline<P> {
     }
 
     /// Needs `update` every frame: a transition, a first frame on its way,
-    /// or a clip playing (not paused). Ken Burns is `ken_burns_moving`.
+    /// a photo going up in strips, or a clip playing (not paused). Ken
+    /// Burns is `ken_burns_moving`.
     pub fn is_animating(&self) -> bool {
         self.is_transitioning()
-            || self.building.as_ref().is_some_and(|b| b.probe.is_some())
+            || self
+                .building
+                .as_ref()
+                .is_some_and(|b| b.probe.is_some() || b.upload.is_some())
             || self.video.animating(self.video_paused())
     }
 
@@ -1144,7 +1169,7 @@ impl<P: VideoPlayer> Pipeline<P> {
             self.gpu_retry_at = None;
             if let Some(b) = self.building.take() {
                 log::info!("dropping unfinished plan {}", b.plan.seq);
-                Self::destroy_building(b);
+                self.destroy_building(b);
             }
             if let Some(r) = self.ready.take() {
                 log::info!("dropping built but unshown plan {}", r.plan.seq);
@@ -1176,6 +1201,7 @@ impl<P: VideoPlayer> Pipeline<P> {
                 started: clock::now(),
                 compose_total: Duration::ZERO,
                 probe: None,
+                upload: None,
             });
         }
         if let Some(failed) = source.take_failed()
@@ -1186,6 +1212,10 @@ impl<P: VideoPlayer> Pipeline<P> {
         }
         if self.building.as_ref().is_some_and(|b| b.probe.is_some()) {
             self.poll_probe(source);
+            return;
+        }
+        if self.building.as_ref().is_some_and(|b| b.upload.is_some()) {
+            self.continue_upload(source);
             return;
         }
         let Some(seq) = self.building.as_ref().map(|b| b.plan.seq) else {
@@ -1239,6 +1269,13 @@ impl<P: VideoPlayer> Pipeline<P> {
             }
             return;
         }
+        // Nothing on screen yet, or Next/Prev waiting on this collage: no
+        // dwell to hide strips behind, so the photo goes up whole.
+        if self.current.is_some() && self.skip.is_none() {
+            self.start_upload(tile_photo.photo, tile_photo.slot, rect);
+            self.continue_upload(source);
+            return;
+        }
         let start = clock::now();
         let tile = match self.make_tile(tile_photo.photo, rect) {
             Ok(tile) => tile,
@@ -1265,11 +1302,15 @@ impl<P: VideoPlayer> Pipeline<P> {
         }
     }
 
-    fn destroy_building(mut b: Building<P>) {
+    fn destroy_building(&self, mut b: Building<P>) {
         // SAFETY: only the Pipeline's methods call this, on the render thread
         // with its context current (gl.rs # Safety); `b` is consumed, so its
         // tiles are drawn from nowhere else.
         unsafe { Self::destroy_building_tiles(&mut b) };
+        // A half-uploaded photo: free its texture now, not at the next one.
+        if b.upload.take().is_some() {
+            self.release_photo();
+        }
         if let Some(p) = b.probe.take() {
             p.player.stop();
         }
@@ -1285,7 +1326,7 @@ impl<P: VideoPlayer> Pipeline<P> {
             log::warn!("that was the prev request, dropping it too");
             self.skip = None;
         }
-        Self::destroy_building(b);
+        self.destroy_building(b);
     }
 
     /// A tile couldn't get its render targets (GPU out of memory, seen at
@@ -1466,6 +1507,129 @@ impl<P: VideoPlayer> Pipeline<P> {
         )
     }
 
+    /// Sizes `photo_tex` for a tile's photo and parks the photo in the plan
+    /// being built, to go up a strip per frame (`continue_upload`).
+    fn start_upload(&mut self, photo: Photo, slot: usize, rect: Rect) {
+        let mem_before = (self.mem_free_kb)();
+        let started = clock::now();
+        let (w, h) = upload_size(&photo);
+        // SAFETY: a Pipeline lives on the render thread with its context
+        // current (gl.rs # Safety). The null pixels are GL's "storage, no
+        // upload", so the driver reads nothing through them.
+        unsafe {
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, self.photo_tex);
+            glTexImage2D(
+                GL_TEXTURE_2D,
+                0,
+                gl_enum_param(GL_RGBA),
+                w,
+                h,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                std::ptr::null(),
+            );
+        }
+        let b = self
+            .building
+            .as_mut()
+            .expect("an upload belongs to a plan being built");
+        b.upload = Some(Upload {
+            photo,
+            slot,
+            rect,
+            row: 0,
+            started,
+            mem_before,
+            gl: clock::elapsed(started),
+            worst: Duration::ZERO,
+            strips: 0,
+        });
+    }
+
+    /// Uploads the next strip of the pending photo (all that's left if
+    /// Next or Prev is now waiting on this collage), and composes its tile
+    /// once the last strip is up.
+    fn continue_upload(&mut self, source: &dyn TileSource) {
+        let b = self.building.as_mut().unwrap();
+        let mut up = b
+            .upload
+            .take()
+            .expect("continue_upload with an upload pending");
+        let (w, h) = (up.photo.width, up.photo.height);
+        let left = h - up.row;
+        let rows = if self.skip.is_some() {
+            left
+        } else {
+            (UPLOAD_STRIP_PIXELS / w.max(1)).max(1).min(left)
+        };
+        let t = clock::now();
+        if rows > 0 {
+            let start = up.row as usize * w as usize * 4;
+            let strip = &up.photo.rgba[start..start + rows as usize * w as usize * 4];
+            // SAFETY: a Pipeline lives on the render thread with its context
+            // current (gl.rs # Safety). `strip` is exactly w * rows * 4
+            // bytes (sliced above, inside rgba, which upload_size checked is
+            // w * h * 4), what GL reads for a w x rows RGBA/UNSIGNED_BYTE
+            // sub-image, and rows <= h - row keeps it inside the texture
+            // `start_upload` sized; GL copies it.
+            unsafe {
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, self.photo_tex);
+                glTexSubImage2D(
+                    GL_TEXTURE_2D,
+                    0,
+                    0,
+                    gl_sizei(up.row),
+                    gl_sizei(w),
+                    gl_sizei(rows),
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE,
+                    strip.as_ptr().cast::<c_void>(),
+                );
+            }
+        }
+        let took = clock::elapsed(t);
+        up.gl += took;
+        up.worst = up.worst.max(took);
+        up.strips += 1;
+        up.row += rows;
+        if up.row < h {
+            self.building.as_mut().unwrap().upload = Some(up);
+            return;
+        }
+        let Upload {
+            photo,
+            slot,
+            rect,
+            started,
+            mem_before,
+            gl,
+            worst,
+            strips,
+            ..
+        } = up;
+        let meta = PhotoMeta::of(&photo);
+        drop(photo);
+        let t0 = clock::now();
+        let how = format!(
+            "{strips} strips, worst {worst:?}, over {:?}",
+            clock::elapsed(started)
+        );
+        let tile = match self.compose_uploaded(meta, rect, t0, gl, mem_before, &how) {
+            Ok(tile) => tile,
+            Err(e) => {
+                self.drop_building_gpu(&e);
+                return;
+            }
+        };
+        let b = self.building.as_mut().unwrap();
+        b.compose_total += gl + clock::elapsed(t0);
+        b.tiles[slot] = Some(tile);
+        self.finish_building(source);
+    }
+
     /// Uploads a tile's photo, keeps a cover-scale copy of it as the tile's
     /// `source`, composes the tile, and drops the CPU pixels. Fails when the
     /// GPU can't give a render target (out of memory), with nothing leaked.
@@ -1476,6 +1640,23 @@ impl<P: VideoPlayer> Pipeline<P> {
         self.upload_photo(&photo);
         drop(photo);
         let t_upload = clock::elapsed(t0);
+        self.compose_uploaded(meta, rect, t0, t_upload, mem_before, "whole")
+    }
+
+    /// The rest of `make_tile` once the photo is on `photo_tex`: the
+    /// cover-scale `source`, the composed `target`, and the tile's Ken
+    /// Burns. `t0` is when this tile's render-thread work started (the
+    /// upload for a whole one), `t_upload` the upload's GL time, `how` how
+    /// it went up, for the log.
+    fn compose_uploaded(
+        &mut self,
+        meta: PhotoMeta,
+        rect: Rect,
+        t0: Duration,
+        t_upload: Duration,
+        mem_before: Option<u64>,
+        how: &str,
+    ) -> Result<Tile, String> {
         // Cover scale for this tile, never above the preview's own size:
         // enough for Fill's crop and for Fit (which is smaller).
         let s = (rect.w as f32 / meta.width as f32)
@@ -1551,7 +1732,7 @@ impl<P: VideoPlayer> Pipeline<P> {
         self.compose_tile(source.texture, &target, &meta, comp);
         let kb = self.new_kb(&meta, comp, rect.w, rect.h);
         log::info!(
-            "tile {} {}x{} -> source {sw}x{sh} ({steps} halvings), tile {}x{} as {comp:?} in {:?} (upload {:?}) - MemFree {mem_before:?}KB -> {:?}KB",
+            "tile {} {}x{} -> source {sw}x{sh} ({steps} halvings), tile {}x{} as {comp:?} in {:?} (upload {:?}, {how}) - MemFree {mem_before:?}KB -> {:?}KB",
             meta.asset_id,
             meta.width,
             meta.height,

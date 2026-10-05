@@ -678,8 +678,14 @@ impl RenderTarget {
     /// bug upstream; returned as an error, the pipeline would take it for
     /// the GPU running out of memory and retry it every `GPU_RETRY`.
     unsafe fn alloc(width: i32, height: i32) -> Result<Self, String> {
-        assert!(width > 0, "render target {width}x{height}: width not positive");
-        assert!(height > 0, "render target {width}x{height}: height not positive");
+        assert!(
+            width > 0,
+            "render target {width}x{height}: width not positive"
+        );
+        assert!(
+            height > 0,
+            "render target {width}x{height}: height not positive"
+        );
         // GLES2 has five error codes and WebGL a sixth (context lost), and
         // GL keeps at most one flag for each, so this many reads clear them.
         const GL_ERROR_CODES: usize = 6;

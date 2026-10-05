@@ -661,15 +661,18 @@ fn video_thread(path: &str, window: NativeWindow, sh: &Shared) -> Result<(), Pla
     let t0 = clock::now();
     let ex = Extractor::open(path).map_err(|e| match e {
         OpenError::File(why) => PlayerError::File(why),
-        OpenError::Media(why) => PlayerError::Decoder(why),
+        OpenError::Media(why) => PlayerError::Refused(why),
     })?;
     let (track, mut format) = ex
         .find_track("video/")
-        .ok_or_else(|| PlayerError::Decoder("no video track".into()))?;
-    ex.select_track(track).map_err(PlayerError::Decoder)?;
+        .ok_or_else(|| PlayerError::Refused("no video track".into()))?;
+    ex.select_track(track).map_err(PlayerError::Refused)?;
     let mime = format.str("mime").unwrap_or("video/avc").to_string();
     // Declared before the codec, so it's dropped (uncounted) after it.
     let _slot = DecoderSlot::take();
+    // A clip of a type with no decoder never gets here (the library's
+    // probe leaves it out), so a null here is the decoder's state: a
+    // mediaserver that can't make one now.
     let codec = MediaCodec::from_decoder_type(&mime)
         .ok_or_else(|| PlayerError::Decoder(format!("no decoder for {mime}")))?;
 

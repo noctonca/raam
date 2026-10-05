@@ -34,14 +34,24 @@ pub enum PlayerError {
     /// The clip's file couldn't be opened (gone from the cache, say): not
     /// the decoder's doing, so no backoff and no verdict on the clip.
     File(String),
-    /// The decoder refused the clip, or failed while playing it.
+    /// The clip itself can't be decoded here: no video track, or media
+    /// the extractor can't read. Asking again gives the same answer, so a
+    /// probe that fails this way marks the clip unplayable.
+    Refused(String),
+    /// The decoder failed: it couldn't be created, configured or started,
+    /// or it broke while decoding. That is the device's state as much as
+    /// the clip's (the VPU out of ion memory, or still held by a killed
+    /// process after a restart, raam#110), so clips back off and none is
+    /// marked: marking deletes the clip's file and drops it for good.
     Decoder(String),
 }
 
 impl fmt::Display for PlayerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PlayerError::File(why) | PlayerError::Decoder(why) => f.write_str(why),
+            PlayerError::File(why) | PlayerError::Refused(why) | PlayerError::Decoder(why) => {
+                f.write_str(why)
+            }
         }
     }
 }
@@ -403,14 +413,12 @@ impl<P: VideoPlayer> Video<P> {
         if let Phase::Failed(e) = &phase {
             match e {
                 PlayerError::File(why) => log::error!("clip {asset_id}: {why}"),
+                PlayerError::Refused(why) => {
+                    // The clip itself: not something a retry fixes.
+                    self.unplayable.push((asset_id, why.clone()));
+                    self.record_failure(&format!("clip {asset_id} probe: {why}"));
+                }
                 PlayerError::Decoder(why) => {
-                    // The decoder refused it: not something a retry fixes.
-                    // Only when it was the one decoder open (a second
-                    // instance failing next to a playing clip may be
-                    // contention, not the clip).
-                    if self.live.is_none() {
-                        self.unplayable.push((asset_id, why.clone()));
-                    }
                     self.record_failure(&format!("clip {asset_id} probe: {why}"));
                 }
             }
@@ -927,7 +935,7 @@ mod tests {
         let fake = Fake::new();
         let mut video = Video::new(fake.clone());
         let mut probe = video.open_probe(&clip(), AssetId::new(42)).unwrap();
-        fake.with(|s| s.probe_phase = Phase::Failed(PlayerError::Decoder("refused".into())));
+        fake.with(|s| s.probe_phase = Phase::Failed(PlayerError::Refused("refused".into())));
         assert_eq!(
             video.poll_probe(&mut probe, AssetId::new(42)),
             ProbeStatus::Failed
@@ -937,6 +945,26 @@ mod tests {
             video.take_unplayable(),
             vec![(AssetId::new(42), "refused".to_string())]
         );
+        assert!(video.backing_off());
+    }
+
+    /// A decoder fault is the device's state as much as the clip's: the
+    /// clip backs off but stays playable, and keeps its file. Before, a
+    /// probe failing alone this way (ion out of memory, or the VPU still
+    /// held after a restart) marked a good clip unplayable for good, and
+    /// `debug.video.fail=probe` marked every clip it touched.
+    #[test]
+    fn a_probe_whose_decoder_fails_backs_off_without_marking() {
+        let fake = Fake::new();
+        let mut video = Video::new(fake.clone());
+        let mut probe = video.open_probe(&clip(), AssetId::new(42)).unwrap();
+        fake.with(|s| s.probe_phase = Phase::Failed(PlayerError::Decoder("ion".into())));
+        assert_eq!(
+            video.poll_probe(&mut probe, AssetId::new(42)),
+            ProbeStatus::Failed
+        );
+        probe.stop();
+        assert!(video.take_unplayable().is_empty());
         assert!(video.backing_off());
     }
 

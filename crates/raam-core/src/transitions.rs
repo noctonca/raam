@@ -1,313 +1,264 @@
-//! Ported gl-transitions (<https://github.com/gl-transitions/gl-transitions>)
-//! shaders, adapted to this project's raw GLES2 pipeline. gl-transitions
-//! itself only defines the *body* of each effect - `vec4 transition(vec2
-//! uv)` plus whatever extra uniforms that effect declares - and assumes a
-//! runtime (normally a JS/WebGL harness) supplies `progress`, `ratio`, and
-//! `getFromColor`/`getToColor` helpers around it. Each `TRANSITION_*_SRC`
-//! constant below is the real upstream `.glsl` file's body, fetched
-//! verbatim from the gl-transitions repo (not rewritten), with only the
-//! license/author header kept as-is since it's a plain GLSL comment. `wrap()`
-//! prepends the fixed preamble supplying that runtime contract and appends a
-//! fixed `main()` - the same body works unmodified whether it came from
-//! gl-transitions.com's WebGL demo or this GLES2 pipeline.
+//! The slide transitions: five gl-transitions effects
+//! (<https://github.com/gl-transitions/gl-transitions>, MIT; fade,
+//! directionalwipe, cube and swap by gre, crosswarp by Eke Péter),
+//! re-expressed for the frame's GPU. Each draws what its upstream `.glsl`
+//! draws, with the same fixed parameters, but not the way upstream does.
+//!
+//! Upstream runs everything per pixel in the fragment shader, and on the
+//! Mali-400 that costs twice. Its fragment shader has no `highp`
+//! (`mediump` is fp16, a 10-bit mantissa), so a texture coordinate
+//! computed there lands up to 1.2 texels off at 1280 wide, where the
+//! desktop and web compute in fp32: the frame drew differently from the
+//! other hosts. And per-pixel arithmetic is paid on a million pixels, on a
+//! GPU whose budget is mostly gone to memory traffic and the compositor.
+//! So anything linear in the screen position (the Ken Burns windows, the
+//! wipe's edge distance, crosswarp's offsets) is computed in the vertex
+//! shader, which runs in fp32 and is interpolated, and anything that is the
+//! same for every pixel moves to the CPU. Cube and swap, whose faces are
+//! projective maps of the slides, are drawn as geometry: each face is a
+//! quad whose texture v is `base + num / den`, with u, num and den linear
+//! across it, so one division per pixel replaces upstream's branches and
+//! bounds tests. Measured on the frame against the upstream shaders
+//! (offscreen, 1280x800): fade 13.7 -> 10.0 ms, directionalwipe 24.6 ->
+//! 13.8, crosswarp 23.5 -> 12.0, cube 49.9 -> 10.9, swap 51.4 -> 13.0;
+//! against an fp32 render every one is closer than upstream's on the
+//! frame, and on the desktop they match upstream to 1/255 (cube and swap
+//! but for a few edge pixels, where rasterisation decides instead of
+//! upstream's strict `inBounds`).
+//!
+//! `from`/`to` are composed tiles or scratch collages, both render
+//! targets, so every coordinate below starts from `(aUV.x, 1 - aUV.y)`:
+//! a render-to-texture hop flips rows relative to the upload convention
+//! (v = 0 is the top of a decoded photo), and a tile goes through one.
+//! Without the flip the first screenshot came back upside-down.
 use super::gl::*;
 use std::ffi::c_void;
-
-/// Shared vertex shader for every transition program - a plain fullscreen
-/// quad, no per-photo UV transform needed here (each slide's own
-/// blur+photo composite already baked the cover-crop/aspect-fit into its
-/// FBO texture; the transition pass just blends two already-composited
-/// full-frame textures).
-// vUV flips the V axis (1.0 - aUV.y) rather than passing aUV straight
-// through - `from`/`to` are always RenderTargets (a tile's composed
-// `target`, or a scratch target a collage was drawn into), never a
-// directly-uploaded texture, and composing a tile is itself one GL
-// render-to-texture pass. Every render-to-texture hop toggles which v
-// value ends up at the "top" of the content relative to the v=0-is-top
-// convention this codebase uses for directly-uploaded JPEG textures
-// (chosen so decoded rows go up as they are, with no CPU-side flip); a
-// tile goes through exactly one such hop (slideshow.rs `compose_tile`),
-// an odd count, so reading it back needs exactly one compensating flip.
-// Found on the frame: without it the first screenshot came back
-// upside-down, because GL writes NDC y=-1 (the bottom of whatever is
-// drawn) to texel row 0 of an FBO's texture, the opposite of the upload
-// convention. slideshow.rs's on-screen `draw_collage` needs the identical
-// correction (`with_v_flip`).
-pub const VS_SRC: &str = "attribute vec2 aPos; attribute vec2 aUV; varying vec2 vUV; \
-     void main() { vUV = vec2(aUV.x, 1.0 - aUV.y); gl_Position = vec4(aPos, 0.0, 1.0); }";
-
-// uFromScale/uFromOffset/uToScale/uToOffset carry each slide's own
-// independent Ken Burns pan/zoom window - applied at the sampling
-// boundary inside getFromColor/getToColor rather than to `vUV` itself, so
-// every transition body above keeps working completely unmodified:
-// cube/crosswarp/swap already distort the `uv` argument they pass into
-// these two helpers (that distortion IS the transition effect), and this
-// composes Ken Burns on top of whatever distorted coordinate each shader
-// computes, exactly the way it would compose on top of an undistorted
-// straight sample for `fade`/`directionalwipe`. `vUV` (and thus every
-// `uv` derived from it) is already in the fixed-V-flip space this file's
-// own `VS_SRC` applies, so no further flip composition is needed here -
-// see slideshow.rs's `draw_collage` for the call site that *does* need to
-// compose Ken Burns with that flip by hand (`with_v_flip`: it draws
-// through the shared blit program, which has no flip of its own).
-const PREAMBLE: &str = "precision mediump float;\nvarying vec2 vUV;\n\
-     uniform sampler2D from;\nuniform sampler2D to;\n\
-     uniform float progress;\nuniform float ratio;\n\
-     uniform vec2 uFromScale;\nuniform vec2 uFromOffset;\n\
-     uniform vec2 uToScale;\nuniform vec2 uToOffset;\n\
-     vec4 getFromColor(vec2 uv) { return texture2D(from, uv * uFromScale + uFromOffset); }\n\
-     vec4 getToColor(vec2 uv) { return texture2D(to, uv * uToScale + uToOffset); }\n";
-
-const TAIL: &str = "\nvoid main() { gl_FragColor = transition(vUV); }\n";
 
 /// Every transition's name, in the order [`TransitionProgram::all`] builds
 /// them; each `TransitionChoice::shader_name` is one of these.
 pub const NAMES: [&str; 5] = ["fade", "directionalwipe", "cube", "crosswarp", "swap"];
 
-fn wrap(body: &str) -> String {
-    format!("{PREAMBLE}{body}{TAIL}")
+/// A Ken Burns window: (scale, offset) applied to a slide's uv.
+pub type UvWindow = ((f32, f32), (f32, f32));
+
+// fade: mix(from, to, progress), both windows in the vertex shader.
+const VS_FADE: &str = "attribute vec2 aPos; attribute vec2 aUV; \
+     uniform vec2 uFromScale; uniform vec2 uFromOffset; uniform vec2 uToScale; uniform vec2 uToOffset; \
+     varying vec4 vUVs; \
+     void main() { vec2 uv = vec2(aUV.x, 1.0 - aUV.y); \
+         vUVs = vec4(uv * uFromScale + uFromOffset, uv * uToScale + uToOffset); \
+         gl_Position = vec4(aPos, 0.0, 1.0); }";
+const FS_FADE: &str = "precision mediump float; varying vec4 vUVs; \
+     uniform sampler2D from; uniform sampler2D to; uniform float progress; \
+     void main() { gl_FragColor = mix(texture2D(from, vUVs.xy), texture2D(to, vUVs.zw), progress); }";
+
+// directionalwipe (direction (1, -1), smoothness 0.5): the edge distance
+// `dot(v, uv) - edge` is linear in uv; v (the direction, normalised and
+// then divided by its L1 norm) and the edge are the same for every pixel.
+const VS_WIPE: &str = "attribute vec2 aPos; attribute vec2 aUV; \
+     uniform vec2 uFromScale; uniform vec2 uFromOffset; uniform vec2 uToScale; uniform vec2 uToOffset; \
+     uniform vec2 uDir; uniform float uEdge; \
+     varying vec4 vUVs; varying float vDist; \
+     void main() { vec2 uv = vec2(aUV.x, 1.0 - aUV.y); \
+         vUVs = vec4(uv * uFromScale + uFromOffset, uv * uToScale + uToOffset); \
+         vDist = dot(uDir, uv) - uEdge; \
+         gl_Position = vec4(aPos, 0.0, 1.0); }";
+const FS_WIPE: &str = "precision mediump float; varying vec4 vUVs; varying float vDist; \
+     uniform sampler2D from; uniform sampler2D to; uniform float uGate; uniform float uSmoothness; \
+     void main() { float m = uGate * (1.0 - smoothstep(-uSmoothness, 0.0, vDist)); \
+         gl_FragColor = mix(texture2D(from, vUVs.xy), texture2D(to, vUVs.zw), m); }";
+const WIPE_DIRECTION: (f32, f32) = (1.0, -1.0);
+const WIPE_SMOOTHNESS: f32 = 0.5;
+
+// crosswarp: x = smoothstep(0, 1, 2 progress + p.x - 1); upstream samples
+// from at ((p - .5)(1 - x) + .5) S + O = (pS + O) - x (p - .5) S and to at
+// ((p - .5) x + .5) S' + O' = x (p - .5) S' + (.5 S' + O'). Only x is not
+// linear in p.
+const VS_CROSS: &str = "attribute vec2 aPos; attribute vec2 aUV; \
+     uniform vec2 uFromScale; uniform vec2 uFromOffset; uniform vec2 uToScale; uniform float progress; \
+     varying vec4 vFrom; varying vec3 vTo; \
+     void main() { vec2 p = vec2(aUV.x, 1.0 - aUV.y); \
+         vFrom = vec4(p * uFromScale + uFromOffset, (p - 0.5) * uFromScale); \
+         vTo = vec3((p - 0.5) * uToScale, progress * 2.0 + p.x - 1.0); \
+         gl_Position = vec4(aPos, 0.0, 1.0); }";
+const FS_CROSS: &str = "precision mediump float; varying vec4 vFrom; varying vec3 vTo; \
+     uniform sampler2D from; uniform sampler2D to; uniform vec2 uToCentre; \
+     void main() { float x = smoothstep(0.0, 1.0, vTo.z); \
+         gl_FragColor = mix(texture2D(from, vFrom.xy - x * vFrom.zw), \
+                            texture2D(to, x * vTo.xy + uToCentre), x); }";
+
+// cube and swap: faces and their reflections as quads. aQ is (u, num,
+// den), each linear across the quad; the texture coordinate is
+// (u, base + num / den). A reflection samples at y = -1.2 v + c and is
+// weighted by reflection * (1 - y), upstream's `bgColor`.
+const VS_GEOM: &str = "attribute vec2 aPos; attribute vec3 aQ; varying vec3 vQ; \
+     void main() { vQ = aQ; gl_Position = vec4(aPos, 0.0, 1.0); }";
+const FS_FACE: &str = "precision mediump float; varying vec3 vQ; uniform sampler2D uTex; \
+     uniform float uBase; uniform vec2 uScale; uniform vec2 uOffset; \
+     void main() { vec2 t = vec2(vQ.x, uBase + vQ.y / vQ.z); \
+         gl_FragColor = texture2D(uTex, t * uScale + uOffset); }";
+const FS_REFLECTION: &str = "precision mediump float; varying vec3 vQ; uniform sampler2D uTex; \
+     uniform float uBase; uniform vec2 uScale; uniform vec2 uOffset; \
+     uniform float uReflectC; uniform float uReflection; \
+     void main() { float y = -1.2 * (uBase + vQ.y / vQ.z) + uReflectC; \
+         gl_FragColor = vec4(vec3(uReflection * (1.0 - y)), 0.0) \
+             * texture2D(uTex, vec2(vQ.x, y) * uScale + uOffset); }";
+
+// cube's upstream parameters.
+const CUBE_PERSP: f32 = 0.7;
+const CUBE_UNZOOM: f32 = 0.3;
+const CUBE_REFLECTION: f32 = 0.4;
+const CUBE_FLOATING: f32 = 3.0;
+// swap's upstream parameters.
+const SWAP_REFLECTION: f32 = 0.4;
+const SWAP_PERSPECTIVE: f32 = 0.2;
+const SWAP_DEPTH: f32 = 3.0;
+// Upstream's `project`: a reflection's y is -1.2 v + c.
+const REFLECT_SCALE: f32 = -1.2;
+const SWAP_REFLECT_C: f32 = -0.02;
+
+/// One corner of a face: its point in the transition's uv space (origin
+/// bottom-left, as upstream's `uv`) and its (u, num, den).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Corner {
+    pub p: (f32, f32),
+    pub q: (f32, f32, f32),
 }
 
-// --- fade.glsl --- Author: gre --- License: MIT ---
-// The trivial baseline: a straight linear cross-dissolve between the two
-// textures. No extra uniforms.
-const TRANSITION_FADE_SRC: &str = "
-// Author: gre
-// License: MIT
-vec4 transition (vec2 uv) {
-  return mix(
-    getFromColor(uv),
-    getToColor(uv),
-    progress
-  );
-}
-";
+/// A face or reflection quad: four corners, counter-clockwise from the
+/// u = 0, v = v0 corner.
+pub type Quad = [Corner; 4];
 
-// --- directionalwipe.glsl --- Author: gre --- License: MIT ---
-// A hard-edged directional wipe with a soft (smoothstep) edge band.
-const TRANSITION_DIRECTIONALWIPE_SRC: &str = "
-// Author: gre
-// License: MIT
-uniform vec2 direction; // = vec2(1.0, -1.0)
-uniform float smoothness; // = 0.5
-
-const vec2 center = vec2(0.5, 0.5);
-
-vec4 transition (vec2 uv) {
-  vec2 v = normalize(direction);
-  v /= abs(v.x)+abs(v.y);
-  float d = v.x * center.x + v.y * center.y;
-  float m =
-    (1.0-step(progress, 0.0)) *
-    (1.0 - smoothstep(-smoothness, 0.0, v.x * uv.x + v.y * uv.y - (d-0.5+progress*(1.+smoothness))));
-  return mix(getFromColor(uv), getToColor(uv), m);
-}
-";
-
-// --- cube.glsl --- Author: gre --- License: MIT ---
-// A pseudo-3D perspective "page turn"/skew effect with a reflection.
-const TRANSITION_CUBE_SRC: &str = "
-// Author: gre
-// License: MIT
-uniform float persp; // = 0.7
-uniform float unzoom; // = 0.3
-uniform float reflection; // = 0.4
-uniform float floating; // = 3.0
-
-vec2 project (vec2 p) {
-  return p * vec2(1.0, -1.2) + vec2(0.0, -floating/100.);
+/// The v range a reflection covers: 0 < REFLECT_SCALE v + c < 1.
+fn reflection_v(c: f32) -> (f32, f32) {
+    (c / -REFLECT_SCALE, (c - 1.0) / -REFLECT_SCALE)
 }
 
-bool inBounds (vec2 p) {
-  return all(lessThan(vec2(0.0), p)) && all(lessThan(p, vec2(1.0)));
+/// Builds a quad over v in [v0, v1] from a per-(u, v) corner function.
+fn quad(v0: f32, v1: f32, corner: impl Fn(f32, f32) -> Corner) -> Quad {
+    [
+        corner(0.0, v0),
+        corner(1.0, v0),
+        corner(1.0, v1),
+        corner(0.0, v1),
+    ]
 }
 
-vec4 bgColor (vec2 p, vec2 pfr, vec2 pto) {
-  vec4 c = vec4(0.0, 0.0, 0.0, 1.0);
-  pfr = project(pfr);
-  if (inBounds(pfr)) {
-    c += mix(vec4(0.0), getFromColor(pfr), reflection * mix(1.0, 0.0, pfr.y));
-  }
-  pto = project(pto);
-  if (inBounds(pto)) {
-    c += mix(vec4(0.0), getToColor(pto), reflection * mix(1.0, 0.0, pto.y));
-  }
-  return c;
+/// The progress cube and swap draw at: their faces divide by progress
+/// and 1 - progress, so the ends are held just inside.
+fn held(progress: f32) -> f32 {
+    progress.clamp(1e-4, 1.0 - 1e-4)
 }
 
-vec2 xskew (vec2 p, float persp, float center) {
-  float x = mix(p.x, 1.0-p.x, center);
-  return (
+/// cube's geometry at `progress`: (from face, to face, from reflection,
+/// to reflection), and the unzoom that maps uv space to the screen.
+///
+/// Upstream samples from at xskew((p - (progress, 0)) / (1 - progress, 1),
+/// pf, 0) = (x, (p.y - (1 - pf) x / 2) / (1 + (pf - 1) x)) with
+/// x = (p.x - progress) / (1 - progress), and to at xskew(p / (progress,
+/// 1), pt, 1), the mirror image; inverting gives the corners below.
+#[must_use]
+pub fn cube_quads(progress: f32) -> ([Quad; 4], f32) {
+    let pr = held(progress);
+    let unzoom = CUBE_UNZOOM * 2.0 * (0.5 - (0.5 - progress).abs());
+    let pf = 1.0 - pr * (1.0 - CUBE_PERSP);
+    let pt = pr * pr + (1.0 - pr * pr) * CUBE_PERSP;
+    let from = |u: f32, v: f32| {
+        let den = 1.0 + (pf - 1.0) * u;
+        Corner {
+            p: (pr + u * (1.0 - pr), v * den + 0.5 * (1.0 - pf) * u),
+            q: (u, v * den, den),
+        }
+    };
+    let to = |u: f32, v: f32| {
+        let s = 1.0 - u;
+        let den = 1.0 + (pt - 1.0) * s;
+        Corner {
+            p: (u * pr, v * den + 0.5 * (1.0 - pt) * s),
+            q: (u, v * den, den),
+        }
+    };
+    let (r0, r1) = reflection_v(-CUBE_FLOATING / 100.0);
     (
-      vec2( x, (p.y - 0.5*(1.0-persp) * x) / (1.0+(persp-1.0)*x) )
-      - vec2(0.5-distance(center, 0.5), 0.0)
+        [
+            quad(0.0, 1.0, from),
+            quad(0.0, 1.0, to),
+            quad(r1, r0, from),
+            quad(r1, r0, to),
+        ],
+        unzoom,
     )
-    * vec2(0.5 / distance(center, 0.5) * (center<0.5 ? 1.0 : -1.0), 1.0)
-    + vec2(center<0.5 ? 0.0 : 1.0, 0.0)
-  );
 }
 
-vec4 transition(vec2 op) {
-  float uz = unzoom * 2.0*(0.5-distance(0.5, progress));
-  vec2 p = -uz*0.5+(1.0+uz) * op;
-  vec2 fromP = xskew(
-    (p - vec2(progress, 0.0)) / vec2(1.0-progress, 1.0),
-    1.0-mix(progress, 0.0, persp),
-    0.0
-  );
-  vec2 toP = xskew(
-    p / vec2(progress, 1.0),
-    mix(pow(progress, 2.0), 1.0, persp),
-    1.0
-  );
-  if (inBounds(fromP)) {
-    return getFromColor(fromP);
-  }
-  else if (inBounds(toP)) {
-    return getToColor(toP);
-  }
-  return bgColor(op, fromP, toP);
-}
-";
-
-// --- pixelize.glsl does NOT compile on this device: its ARM Mali-400
-// GLSL ES 1.00 compiler rejects two of its globals (`dist`, `squareSize`)
-// for reading the `progress`/`steps` uniforms in their *global-scope*
-// initializers - "S0012: Global variable initializer must be a constant
-// expression", the driver's log as `link_program`'s panic prints it to
-// logcat, labelled with the transition's name. That restriction is real
-// GLES2/WebGL divergence, not a bug in this port: gl-transitions targets
-// browsers' WebGL1 contexts (ANGLE on most desktops), which are more
-// permissive here than this embedded driver. crosswarp.glsl takes its
-// place, rather than forcing an incompatible shader to work.
-
-// --- crosswarp.glsl --- Author: Eke Péter <peterekepeter@gmail.com> --- License: MIT ---
-// A warped cross-dissolve: the wipe front is offset by each pixel's own x
-// position (smoothstep-shaped), so the dissolve boundary sweeps left-to-
-// right instead of fading uniformly like `fade`. No extra uniforms, and
-// no global-scope uniform reads - the same shape of shader as `fade` but
-// visually distinct, a safer 4th pick than another perspective-heavy one.
-const TRANSITION_CROSSWARP_SRC: &str = "
-// Author: Eke Péter <peterekepeter@gmail.com>
-// License: MIT
-vec4 transition(vec2 p) {
-  float x = progress;
-  x=smoothstep(.0,1.0,(x*2.0+p.x-1.0));
-  return mix(getFromColor((p-.5)*(1.-x)+.5), getToColor((p-.5)*x+.5), x);
-}
-";
-
-// --- swap.glsl --- Author: gre --- License: MIT ---
-// A pseudo-3D "card swap": the outgoing photo slides/scales back and down
-// while the incoming one slides in from the opposite side, each with its
-// own reflection - same `project`/`inBounds`/`bgColor` shape as `cube`
-// (same author, same style), so it was a safe bet to compile cleanly here
-// too, and did on the first try.
-const TRANSITION_SWAP_SRC: &str = "
-// Author: gre
-// License: MIT
-uniform float reflection; // = 0.4
-uniform float perspective; // = 0.2
-uniform float depth; // = 3.0
-
-const vec4 black = vec4(0.0, 0.0, 0.0, 1.0);
-const vec2 boundMin = vec2(0.0, 0.0);
-const vec2 boundMax = vec2(1.0, 1.0);
-
-bool inBounds (vec2 p) {
-  return all(lessThan(boundMin, p)) && all(lessThan(p, boundMax));
+/// swap's geometry at `progress`: (from card, to card, from reflection,
+/// to reflection).
+///
+/// Upstream samples from at ((p - (0, .5)) (size / (1 - persp_c progress),
+/// size / (1 - size persp p.x)) + (0, .5)): u is linear in p.x, and
+/// v - .5 = (p.y - .5) / den with den = (1 - size persp p.x) / size; to
+/// is the same about (1, .5).
+#[must_use]
+pub fn swap_quads(progress: f32) -> [Quad; 4] {
+    let size = 1.0 + (SWAP_DEPTH - 1.0) * progress;
+    let persp = SWAP_PERSPECTIVE * progress;
+    let from_stretch = size / (1.0 - SWAP_PERSPECTIVE * progress);
+    let from = |u: f32, v: f32| {
+        let x = u / from_stretch;
+        let den = (1.0 - size * persp * x) / size;
+        Corner {
+            p: (x, 0.5 + (v - 0.5) * den),
+            q: (u, (v - 0.5) * den, den),
+        }
+    };
+    let size_to = 1.0 + (SWAP_DEPTH - 1.0) * (1.0 - progress);
+    let persp_to = SWAP_PERSPECTIVE * (1.0 - progress);
+    let to_stretch = size_to / (1.0 - SWAP_PERSPECTIVE * (1.0 - progress));
+    let to = |u: f32, v: f32| {
+        let x = 1.0 + (u - 1.0) / to_stretch;
+        let den = (1.0 - size_to * persp_to * (0.5 - x)) / size_to;
+        Corner {
+            p: (x, 0.5 + (v - 0.5) * den),
+            q: (u, (v - 0.5) * den, den),
+        }
+    };
+    let (r0, r1) = reflection_v(SWAP_REFLECT_C);
+    [
+        quad(0.0, 1.0, from),
+        quad(0.0, 1.0, to),
+        quad(r1, r0, from),
+        quad(r1, r0, to),
+    ]
 }
 
-vec2 project (vec2 p) {
-  return p * vec2(1.0, -1.2) + vec2(0.0, -0.02);
-}
-
-vec4 bgColor (vec2 p, vec2 pfr, vec2 pto) {
-  vec4 c = black;
-  pfr = project(pfr);
-  if (inBounds(pfr)) {
-    c += mix(black, getFromColor(pfr), reflection * mix(1.0, 0.0, pfr.y));
-  }
-  pto = project(pto);
-  if (inBounds(pto)) {
-    c += mix(black, getToColor(pto), reflection * mix(1.0, 0.0, pto.y));
-  }
-  return c;
-}
-
-vec4 transition (vec2 p) {
-  vec2 pfr, pto = vec2(-1.);
-
-  float size = mix(1.0, depth, progress);
-  float persp = perspective * progress;
-  pfr = (p + vec2(-0.0, -0.5)) * vec2(size/(1.0-perspective*progress), size/(1.0-size*persp*p.x)) + vec2(0.0, 0.5);
-
-  size = mix(1.0, depth, 1.-progress);
-  persp = perspective * (1.-progress);
-  pto = (p + vec2(-1.0, -0.5)) * vec2(size/(1.0-perspective*(1.0-progress)), size/(1.0-size*persp*(0.5-p.x))) + vec2(1.0, 0.5);
-
-  if (progress < 0.5) {
-    if (inBounds(pfr)) {
-      return getFromColor(pfr);
-    }
-    if (inBounds(pto)) {
-      return getToColor(pto);
-    }
-  }
-  if (inBounds(pto)) {
-    return getToColor(pto);
-  }
-  if (inBounds(pfr)) {
-    return getFromColor(pfr);
-  }
-  return bgColor(p, pfr, pto);
-}
-";
-
-/// A linked transition program plus the uniform locations this pipeline
-/// needs to drive every frame (`progress`) and the ones it only needs to
-/// set once at creation (texture units, the effect's own tunables, at their
-/// gl-transitions-documented defaults, kept fixed rather than exposed as
-/// settings - each effect runs as upstream designed it, untuned).
-pub struct TransitionProgram {
-    pub name: &'static str,
+/// A linked program over the pipeline's quad (aPos, aUV), with its
+/// window uniforms.
+struct QuadProgram {
     program: GlUint,
     a_pos: GlUint,
     a_uv: GlUint,
     u_progress: GlInt,
-    u_ratio: GlInt,
     u_from_scale: GlInt,
     u_from_offset: GlInt,
     u_to_scale: GlInt,
     u_to_offset: GlInt,
 }
 
-impl TransitionProgram {
-    /// Links one transition shader and binds its two texture units;
-    /// `extra` sets the shader's own fixed uniforms.
-    ///
+impl QuadProgram {
     /// # Safety
     /// Requires a current GL context.
-    unsafe fn new(name: &'static str, body: &str, extra: impl FnOnce(GlUint)) -> Self {
+    unsafe fn new(name: &str, vs: &str, fs: &str) -> Self {
         // SAFETY: the caller's contract: a current GL context.
         unsafe {
-            let src = wrap(body);
-            let program = link_program(name, VS_SRC, &src);
+            let program = link_program(name, vs, fs);
             glUseProgram(program);
-            // Texture units are static for the life of the program - bind
-            // once here, not per-draw.
-            let u_from = uniform_loc(program, "from");
-            let u_to = uniform_loc(program, "to");
-            glUniform1i(u_from, 0);
-            glUniform1i(u_to, 1);
-            extra(program);
+            // The texture units are fixed for the program's life.
+            glUniform1i(uniform_loc(program, "from"), 0);
+            glUniform1i(uniform_loc(program, "to"), 1);
             Self {
-                name,
                 program,
                 a_pos: attrib_loc(program, "aPos"),
                 a_uv: attrib_loc(program, "aUV"),
                 u_progress: uniform_loc(program, "progress"),
-                u_ratio: uniform_loc(program, "ratio"),
                 u_from_scale: uniform_loc(program, "uFromScale"),
                 u_from_offset: uniform_loc(program, "uFromOffset"),
                 u_to_scale: uniform_loc(program, "uToScale"),
@@ -315,49 +266,199 @@ impl TransitionProgram {
             }
         }
     }
+}
 
+/// One of the two programs cube and swap draw with (aPos, aQ).
+struct GeomProgram {
+    program: GlUint,
+    a_pos: GlUint,
+    a_q: GlUint,
+    u_base: GlInt,
+    u_scale: GlInt,
+    u_offset: GlInt,
+    u_reflect_c: GlInt,
+    u_reflection: GlInt,
+}
+
+impl GeomProgram {
+    /// # Safety
+    /// Requires a current GL context.
+    unsafe fn new(name: &str, fs: &str) -> Self {
+        // SAFETY: the caller's contract: a current GL context.
+        unsafe {
+            let program = link_program(name, VS_GEOM, fs);
+            glUseProgram(program);
+            glUniform1i(uniform_loc(program, "uTex"), 0);
+            Self {
+                program,
+                a_pos: attrib_loc(program, "aPos"),
+                a_q: attrib_loc(program, "aQ"),
+                u_base: uniform_loc(program, "uBase"),
+                u_scale: uniform_loc(program, "uScale"),
+                u_offset: uniform_loc(program, "uOffset"),
+                // The face program has neither (-1, which GL ignores).
+                u_reflect_c: uniform_loc(program, "uReflectC"),
+                u_reflection: uniform_loc(program, "uReflection"),
+            }
+        }
+    }
+}
+
+enum Kind {
+    Fade(QuadProgram),
+    Wipe {
+        program: QuadProgram,
+        u_dir: GlInt,
+        u_edge: GlInt,
+        u_gate: GlInt,
+    },
+    Crosswarp(QuadProgram),
+    Cube(Geom),
+    Swap(Geom),
+}
+
+/// cube's and swap's programs and the buffer their corners stream through.
+struct Geom {
+    face: GeomProgram,
+    reflection: GeomProgram,
+    vbo: GlUint,
+}
+
+impl Geom {
+    /// # Safety
+    /// Requires a current GL context.
+    unsafe fn new(name: &str) -> Self {
+        // SAFETY: the caller's contract: a current GL context; `vbo` is a
+        // local the call fills with one name.
+        unsafe {
+            let mut vbo = 0;
+            glGenBuffers(1, &mut vbo);
+            Self {
+                face: GeomProgram::new(&format!("{name} face"), FS_FACE),
+                reflection: GeomProgram::new(&format!("{name} reflection"), FS_REFLECTION),
+                vbo,
+            }
+        }
+    }
+
+    /// Draws `quads` with `program`, each with its texture and window,
+    /// mapping uv space to NDC through `unzoom` (cube's pull-back).
+    ///
+    /// # Safety
+    /// Requires a current GL context and every texture live.
+    unsafe fn draw(
+        &self,
+        program: &GeomProgram,
+        quads: &[(&Quad, GlUint, UvWindow)],
+        base: f32,
+        reflect: (f32, f32),
+        unzoom: f32,
+    ) {
+        // SAFETY: the caller's contract: a current GL context and live
+        // textures. `vertices` is 20 floats (80 bytes), all of it handed to
+        // glBufferData, and the attribute offsets (0 and 8 of a 20-byte
+        // stride) and the six u16 indices the draw reads stay inside its
+        // four vertices.
+        unsafe {
+            glUseProgram(program.program);
+            glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
+            glUniform1f(program.u_base, base);
+            glUniform1f(program.u_reflect_c, reflect.0);
+            glUniform1f(program.u_reflection, reflect.1);
+            for (corners, texture, window) in quads {
+                let mut vertices = [0f32; 20];
+                for (v, c) in vertices
+                    .as_chunks_mut::<5>()
+                    .0
+                    .iter_mut()
+                    .zip(corners.iter())
+                {
+                    let ndc = |x: f32| 2.0 * (x + unzoom * 0.5) / (1.0 + unzoom) - 1.0;
+                    v.copy_from_slice(&[ndc(c.p.0), ndc(c.p.1), c.q.0, c.q.1, c.q.2]);
+                }
+                glBufferData(
+                    GL_ARRAY_BUFFER,
+                    gl_byte_len(&vertices),
+                    vertices.as_ptr() as *const c_void,
+                    GL_DYNAMIC_DRAW,
+                );
+                let stride = 5 * 4;
+                glVertexAttribPointer(program.a_pos, 2, GL_FLOAT, 0, stride, std::ptr::null());
+                glEnableVertexAttribArray(program.a_pos);
+                glVertexAttribPointer(
+                    program.a_q,
+                    3,
+                    GL_FLOAT,
+                    0,
+                    stride,
+                    (2 * 4) as *const c_void,
+                );
+                glEnableVertexAttribArray(program.a_q);
+                glUniform2f(program.u_scale, window.0.0, window.0.1);
+                glUniform2f(program.u_offset, window.1.0, window.1.1);
+                glBindTexture(GL_TEXTURE_2D, *texture);
+                glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, std::ptr::null());
+            }
+        }
+    }
+}
+
+pub struct TransitionProgram {
+    pub name: &'static str,
+    kind: Kind,
+}
+
+impl TransitionProgram {
     /// Every transition, in [`NAMES`]'s order.
     ///
     /// # Safety
     /// Requires a current GL context.
     pub unsafe fn all() -> Vec<TransitionProgram> {
-        // SAFETY: the caller's contract: a current GL context, under which
-        // the closures run too (`new` calls them before returning).
+        // SAFETY: the caller's contract: a current GL context.
         unsafe {
-            vec![
-                TransitionProgram::new(NAMES[0], TRANSITION_FADE_SRC, |_p| {}),
-                TransitionProgram::new(NAMES[1], TRANSITION_DIRECTIONALWIPE_SRC, |p| {
-                    glUniform2f(uniform_loc(p, "direction"), 1.0, -1.0);
-                    glUniform1f(uniform_loc(p, "smoothness"), 0.5);
-                }),
-                TransitionProgram::new(NAMES[2], TRANSITION_CUBE_SRC, |p| {
-                    glUniform1f(uniform_loc(p, "persp"), 0.7);
-                    glUniform1f(uniform_loc(p, "unzoom"), 0.3);
-                    glUniform1f(uniform_loc(p, "reflection"), 0.4);
-                    glUniform1f(uniform_loc(p, "floating"), 3.0);
-                }),
-                TransitionProgram::new(NAMES[3], TRANSITION_CROSSWARP_SRC, |_p| {}),
-                TransitionProgram::new(NAMES[4], TRANSITION_SWAP_SRC, |p| {
-                    glUniform1f(uniform_loc(p, "reflection"), 0.4);
-                    glUniform1f(uniform_loc(p, "perspective"), 0.2);
-                    glUniform1f(uniform_loc(p, "depth"), 3.0);
-                }),
-            ]
+            let wipe = QuadProgram::new(NAMES[1], VS_WIPE, FS_WIPE);
+            glUniform1f(uniform_loc(wipe.program, "uSmoothness"), WIPE_SMOOTHNESS);
+            let wipe = Kind::Wipe {
+                u_dir: uniform_loc(wipe.program, "uDir"),
+                u_edge: uniform_loc(wipe.program, "uEdge"),
+                u_gate: uniform_loc(wipe.program, "uGate"),
+                program: wipe,
+            };
+            let kinds = [
+                Kind::Fade(QuadProgram::new(NAMES[0], VS_FADE, FS_FADE)),
+                wipe,
+                Kind::Cube(Geom::new(NAMES[2])),
+                Kind::Crosswarp(QuadProgram::new(NAMES[3], VS_CROSS, FS_CROSS)),
+                Kind::Swap(Geom::new(NAMES[4])),
+            ];
+            NAMES
+                .iter()
+                .zip(kinds)
+                .map(|(&name, kind)| TransitionProgram { name, kind })
+                .collect()
         }
     }
 
-    /// Draws the transition into whatever framebuffer/viewport is currently
-    /// bound, sampling `from_tex`/`to_tex` (each a full-screen composited
-    /// slide) at the given `progress` (0.0-1.0) and screen `ratio`.
-    /// `from_kb`/`to_kb` are each slide's own independent Ken Burns
-    /// (scale, offset) UV-window transform - the outgoing slide keeps
-    /// animating on its own clock right up until this draw finishes it
-    /// off, it does not freeze the moment the transition began.
+    /// Fade blends; the pipeline can draw a collage fade as one collage
+    /// blended over the other, without composing either into a target.
+    #[must_use]
+    pub fn is_fade(&self) -> bool {
+        matches!(self.kind, Kind::Fade(_))
+    }
+
+    /// Draws the transition into the bound framebuffer and viewport (both
+    /// screen-sized), from `from_tex` to `to_tex` at `progress` (0.0-1.0).
+    /// `from_kb`/`to_kb` are each slide's Ken Burns window in this file's
+    /// uv space: the outgoing slide keeps moving until the draw finishes
+    /// it, it doesn't freeze when the transition starts.
+    ///
+    /// # Panics
+    /// If `progress` is outside 0..=1.
     ///
     /// # Safety
-    /// Requires a current GL context, `quad_vbo` holding the four
-    /// pos+uv vertices and `quad_ibo` the six u16 indices the draw reads
-    /// (the pipeline's quad), and both textures live.
+    /// Requires a current GL context, `quad_vbo` holding the four pos+uv
+    /// vertices and `quad_ibo` the six u16 indices every draw reads (the
+    /// pipeline's quad), and both textures live.
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn draw(
         &self,
@@ -366,44 +467,144 @@ impl TransitionProgram {
         from_tex: GlUint,
         to_tex: GlUint,
         progress: f32,
-        ratio: f32,
-        from_kb: ((f32, f32), (f32, f32)),
-        to_kb: ((f32, f32), (f32, f32)),
+        from_kb: UvWindow,
+        to_kb: UvWindow,
     ) {
-        // SAFETY: the caller's contract: a current GL context and the
-        // pipeline's quad bound, so the attribute offsets (within its
-        // 16-byte vertices) and the six indices GL reads are in bounds.
+        assert!(
+            (0.0..=1.0).contains(&progress),
+            "progress {progress} out of 0..=1"
+        );
+        // SAFETY: the caller's contract: a current GL context, the
+        // pipeline's quad (the attribute offsets within its 16-byte
+        // vertices and the six indices GL reads are in bounds) and live
+        // textures.
         unsafe {
-            glUseProgram(self.program);
-            glBindBuffer(GL_ARRAY_BUFFER, quad_vbo);
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, quad_ibo);
-            let stride = 4 * 4;
-            glVertexAttribPointer(self.a_pos, 2, GL_FLOAT, 0, stride, std::ptr::null());
-            glEnableVertexAttribArray(self.a_pos);
-            glVertexAttribPointer(self.a_uv, 2, GL_FLOAT, 0, stride, (2 * 4) as *const c_void);
-            glEnableVertexAttribArray(self.a_uv);
-
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, from_tex);
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, to_tex);
-            glActiveTexture(GL_TEXTURE0);
-
-            glUniform1f(self.u_progress, progress);
-            glUniform1f(self.u_ratio, ratio);
-            glUniform2f(self.u_from_scale, from_kb.0.0, from_kb.0.1);
-            glUniform2f(self.u_from_offset, from_kb.1.0, from_kb.1.1);
-            glUniform2f(self.u_to_scale, to_kb.0.0, to_kb.0.1);
-            glUniform2f(self.u_to_offset, to_kb.1.0, to_kb.1.1);
-
-            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, std::ptr::null());
+            match &self.kind {
+                Kind::Fade(p) | Kind::Crosswarp(p) => {
+                    bind_quad(p, quad_vbo, from_tex, to_tex, progress, from_kb, to_kb);
+                    if matches!(self.kind, Kind::Crosswarp(_)) {
+                        glUniform2f(
+                            uniform_loc(p.program, "uToCentre"),
+                            0.5 * to_kb.0.0 + to_kb.1.0,
+                            0.5 * to_kb.0.1 + to_kb.1.1,
+                        );
+                    }
+                    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, std::ptr::null());
+                }
+                Kind::Wipe {
+                    program,
+                    u_dir,
+                    u_edge,
+                    u_gate,
+                } => {
+                    bind_quad(
+                        program, quad_vbo, from_tex, to_tex, progress, from_kb, to_kb,
+                    );
+                    let (dx, dy) = WIPE_DIRECTION;
+                    let norm = (dx * dx + dy * dy).sqrt();
+                    let (nx, ny) = (dx / norm, dy / norm);
+                    let l1 = nx.abs() + ny.abs();
+                    let dir = (nx / l1, ny / l1);
+                    let centre = 0.5 * dir.0 + 0.5 * dir.1;
+                    glUniform2f(*u_dir, dir.0, dir.1);
+                    glUniform1f(*u_edge, centre - 0.5 + progress * (1.0 + WIPE_SMOOTHNESS));
+                    glUniform1f(*u_gate, if progress > 0.0 { 1.0 } else { 0.0 });
+                    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, std::ptr::null());
+                }
+                Kind::Cube(g) => {
+                    let ([from, to, from_r, to_r], unzoom) = cube_quads(progress);
+                    let c = -CUBE_FLOATING / 100.0;
+                    glClearColor(0.0, 0.0, 0.0, 1.0);
+                    glClear(GL_COLOR_BUFFER_BIT);
+                    glActiveTexture(GL_TEXTURE0);
+                    // The reflections and faces never overlap one another.
+                    g.draw(
+                        &g.reflection,
+                        &[(&from_r, from_tex, from_kb), (&to_r, to_tex, to_kb)],
+                        0.0,
+                        (c, CUBE_REFLECTION),
+                        unzoom,
+                    );
+                    g.draw(
+                        &g.face,
+                        &[(&from, from_tex, from_kb), (&to, to_tex, to_kb)],
+                        0.0,
+                        (0.0, 0.0),
+                        unzoom,
+                    );
+                }
+                Kind::Swap(g) => {
+                    let [from, to, from_r, to_r] = swap_quads(progress);
+                    glClearColor(0.0, 0.0, 0.0, 1.0);
+                    glClear(GL_COLOR_BUFFER_BIT);
+                    glActiveTexture(GL_TEXTURE0);
+                    // The cards' reflections can overlap: upstream adds them.
+                    glEnable(GL_BLEND);
+                    glBlendFunc(GL_ONE, GL_ONE);
+                    g.draw(
+                        &g.reflection,
+                        &[(&from_r, from_tex, from_kb), (&to_r, to_tex, to_kb)],
+                        0.5,
+                        (SWAP_REFLECT_C, SWAP_REFLECTION),
+                        0.0,
+                    );
+                    glDisable(GL_BLEND);
+                    // Upstream shows from over to until halfway, then to
+                    // over from: the one on top is drawn last.
+                    let from = (&from, from_tex, from_kb);
+                    let to = (&to, to_tex, to_kb);
+                    let order = if progress < 0.5 {
+                        [to, from]
+                    } else {
+                        [from, to]
+                    };
+                    g.draw(&g.face, &order, 0.5, (0.0, 0.0), 0.0);
+                }
+            }
         }
+    }
+}
+
+/// Binds a quad program over the pipeline's quad, both textures and the
+/// per-frame uniforms.
+///
+/// # Safety
+/// As [`TransitionProgram::draw`].
+unsafe fn bind_quad(
+    p: &QuadProgram,
+    quad_vbo: GlUint,
+    from_tex: GlUint,
+    to_tex: GlUint,
+    progress: f32,
+    from_kb: UvWindow,
+    to_kb: UvWindow,
+) {
+    // SAFETY: the caller's contract (as `draw`).
+    unsafe {
+        glUseProgram(p.program);
+        glBindBuffer(GL_ARRAY_BUFFER, quad_vbo);
+        let stride = 4 * 4;
+        glVertexAttribPointer(p.a_pos, 2, GL_FLOAT, 0, stride, std::ptr::null());
+        glEnableVertexAttribArray(p.a_pos);
+        glVertexAttribPointer(p.a_uv, 2, GL_FLOAT, 0, stride, (2 * 4) as *const c_void);
+        glEnableVertexAttribArray(p.a_uv);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, from_tex);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, to_tex);
+        glActiveTexture(GL_TEXTURE0);
+        glUniform1f(p.u_progress, progress);
+        glUniform2f(p.u_from_scale, from_kb.0.0, from_kb.0.1);
+        glUniform2f(p.u_from_offset, from_kb.1.0, from_kb.1.1);
+        glUniform2f(p.u_to_scale, to_kb.0.0, to_kb.0.1);
+        glUniform2f(p.u_to_offset, to_kb.1.0, to_kb.1.1);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::NAMES;
+    use super::*;
     use raam_model::TransitionChoice;
 
     #[test]
@@ -415,6 +616,116 @@ mod tests {
                     "{choice:?} names '{name}', which has no program"
                 );
             }
+        }
+    }
+
+    // Upstream's per-pixel maps, in f64, to check the corners against.
+
+    fn xskew(p: (f64, f64), persp: f64, centre: f64) -> (f64, f64) {
+        let x = p.0 + (1.0 - 2.0 * p.0) * centre;
+        let y = (p.1 - 0.5 * (1.0 - persp) * x) / (1.0 + (persp - 1.0) * x);
+        let d = (centre - 0.5).abs();
+        let sign = if centre < 0.5 { 1.0 } else { -1.0 };
+        let shift = if centre < 0.5 { 0.0 } else { 1.0 };
+        ((x - (0.5 - d)) * (0.5 / d * sign) + shift, y)
+    }
+
+    fn cube_upstream(p: (f64, f64), progress: f64) -> ((f64, f64), (f64, f64)) {
+        let persp = f64::from(CUBE_PERSP);
+        let from = xskew(
+            ((p.0 - progress) / (1.0 - progress), p.1),
+            1.0 - progress * (1.0 - persp),
+            0.0,
+        );
+        let to = xskew(
+            (p.0 / progress, p.1),
+            progress * progress + (1.0 - progress * progress) * persp,
+            1.0,
+        );
+        (from, to)
+    }
+
+    fn swap_upstream(p: (f64, f64), progress: f64) -> ((f64, f64), (f64, f64)) {
+        let (persp_c, depth) = (f64::from(SWAP_PERSPECTIVE), f64::from(SWAP_DEPTH));
+        let size = 1.0 + (depth - 1.0) * progress;
+        let persp = persp_c * progress;
+        let from = (
+            p.0 * size / (1.0 - persp_c * progress),
+            (p.1 - 0.5) * size / (1.0 - size * persp * p.0) + 0.5,
+        );
+        let size = 1.0 + (depth - 1.0) * (1.0 - progress);
+        let persp = persp_c * (1.0 - progress);
+        let to = (
+            (p.0 - 1.0) * size / (1.0 - persp_c * (1.0 - progress)) + 1.0,
+            (p.1 - 0.5) * size / (1.0 - size * persp * (0.5 - p.0)) + 0.5,
+        );
+        (from, to)
+    }
+
+    /// The texture coordinate a corner gives (u, base + num / den).
+    fn sampled(c: &Corner, base: f32) -> (f64, f64) {
+        (f64::from(c.q.0), f64::from(base + c.q.1 / c.q.2))
+    }
+
+    fn close(a: (f64, f64), b: (f64, f64)) -> bool {
+        (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4
+    }
+
+    fn p64(c: &Corner) -> (f64, f64) {
+        (f64::from(c.p.0), f64::from(c.p.1))
+    }
+
+    #[test]
+    fn cube_corners_sample_where_upstream_does() {
+        for i in 1..20 {
+            let progress = i as f32 / 20.0;
+            let ([from, to, from_r, to_r], _) = cube_quads(progress);
+            for (quads, side) in [([from, from_r], 0), ([to, to_r], 1)] {
+                for c in quads.iter().flatten() {
+                    let up = cube_upstream(p64(c), f64::from(progress));
+                    let want = if side == 0 { up.0 } else { up.1 };
+                    assert!(
+                        close(sampled(c, 0.0), want),
+                        "cube at {progress}: corner {c:?} samples {:?}, upstream {want:?}",
+                        sampled(c, 0.0)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn swap_corners_sample_where_upstream_does() {
+        for i in 1..20 {
+            let progress = i as f32 / 20.0;
+            let [from, to, from_r, to_r] = swap_quads(progress);
+            for (quads, side) in [([from, from_r], 0), ([to, to_r], 1)] {
+                for c in quads.iter().flatten() {
+                    let up = swap_upstream(p64(c), f64::from(progress));
+                    let want = if side == 0 { up.0 } else { up.1 };
+                    assert!(
+                        close(sampled(c, 0.5), want),
+                        "swap at {progress}: corner {c:?} samples {:?}, upstream {want:?}",
+                        sampled(c, 0.5)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_face_spans_its_whole_slide_and_a_reflection_upstreams_band() {
+        let ([from, _, from_r, _], _) = cube_quads(0.4);
+        let vs: Vec<f32> = from.iter().map(|c| c.q.1 / c.q.2).collect();
+        assert!(
+            vs.iter().all(|v| v.abs() < 1e-6 || (v - 1.0).abs() < 1e-6),
+            "{vs:?}"
+        );
+        // A reflection covers exactly 0 < -1.2 v + c < 1.
+        let c = -CUBE_FLOATING / 100.0;
+        for corner in &from_r {
+            let y = REFLECT_SCALE * (corner.q.1 / corner.q.2) + c;
+            assert!(y.abs() < 1e-5 || (y - 1.0).abs() < 1e-5, "reflection y {y}");
         }
     }
 }

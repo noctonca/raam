@@ -14,10 +14,12 @@
 //! Each frame draws every tile's `target` through its own Ken Burns UV
 //! window into the tile's rect (the viewport clips it, so motion never
 //! crosses a separator), over a clear in the gap colour. A transition
-//! renders both collages, still animating, into two screen-sized scratch
-//! targets and feeds those to the transition shader. A transition between
-//! two single photos skips the scratch targets: the shader samples the
-//! two tiles' `target`s directly, each through its Ken Burns window.
+//! between two single photos samples the two tiles' `target`s directly,
+//! each through its Ken Burns window. A fade with a collage on either side
+//! draws the outgoing collage and blends the incoming one over it. Any
+//! other transition with a collage renders both collages, still
+//! animating, into two screen-sized scratch targets and transitions
+//! between those.
 //!
 //! A slide can be a video clip (always alone). Transitions only ever blend
 //! two still slides: a clip's slide is composed from its real first frame
@@ -316,6 +318,14 @@ const VS_SRC: &str = "attribute vec2 aPos; attribute vec2 aUV; \
 const FS_BLIT_SRC: &str = "precision mediump float; varying vec2 vUV; uniform sampler2D uTex; \
      void main() { gl_FragColor = texture2D(uTex, vUV); }";
 
+/// The incoming collage of a collage fade, blended over the outgoing one
+/// at alpha `uAlpha`: a tile is its texture (`uMul` 1, `uAdd` 0), a gap
+/// is the gap colour (`uMul` 0, `uAdd` the colour), so one program draws
+/// both and the linker keeps aUV.
+const FS_OVER_SRC: &str = "precision mediump float; varying vec2 vUV; uniform sampler2D uTex; \
+     uniform float uMul; uniform vec4 uAdd; uniform float uAlpha; \
+     void main() { gl_FragColor = vec4(texture2D(uTex, vUV).rgb * uMul + uAdd.rgb, uAlpha); }";
+
 const FS_BLUR_SRC: &str = "precision mediump float; varying vec2 vUV; uniform sampler2D uTex; \
      uniform vec2 uTexel; \
      void main() { \
@@ -461,6 +471,10 @@ struct QuadProgram {
     u_uv_offset: GlInt,
     u_tex: GlInt,
     u_texel: GlInt,
+    /// The `over` program's three; -1 (ignored by GL) in the others.
+    u_mul: GlInt,
+    u_add: GlInt,
+    u_alpha: GlInt,
 }
 
 impl QuadProgram {
@@ -482,6 +496,9 @@ impl QuadProgram {
                 u_uv_offset: uniform_loc(program, "uUVOffset"),
                 u_tex: uniform_loc(program, "uTex"),
                 u_texel: uniform_loc(program, "uTexel"),
+                u_mul: uniform_loc(program, "uMul"),
+                u_add: uniform_loc(program, "uAdd"),
+                u_alpha: uniform_loc(program, "uAlpha"),
             }
         }
     }
@@ -670,6 +687,8 @@ pub struct Pipeline<P: VideoPlayer> {
     quad_ibo: GlUint,
     blit: QuadProgram,
     blur: QuadProgram,
+    /// A collage fade's incoming collage over the outgoing one.
+    over: QuadProgram,
     /// Linked on the first clip frame drawn (`draw_clip_frame`).
     oes: OnceCell<OesProgram>,
     /// The video orchestration over the host's decoders (video.rs). Public
@@ -681,8 +700,8 @@ pub struct Pipeline<P: VideoPlayer> {
     photo_tex: GlUint,
     blur_targets: [RenderTarget; 2],
     /// Screen-sized targets a multi-tile collage is rendered into for a
-    /// transition. Made when a transition needs them and freed when it
-    /// ends, so the 8 MB isn't held through the dwell.
+    /// transition other than fade. Made when a transition needs them and
+    /// freed when it ends, so the 8 MB isn't held through the dwell.
     scratch: Option<[RenderTarget; 2]>,
     transitions: Vec<TransitionProgram>,
     next_transition_idx: usize,
@@ -793,6 +812,7 @@ impl<P: VideoPlayer> Pipeline<P> {
                 quad_ibo: ibo,
                 blit: QuadProgram::new("blit", FS_BLIT_SRC),
                 blur: QuadProgram::new("blur", FS_BLUR_SRC),
+                over: QuadProgram::new("over", FS_OVER_SRC),
                 oes: OnceCell::new(),
                 video: Video::new(player),
                 gpu_retry_at: None,
@@ -2014,6 +2034,55 @@ impl<P: VideoPlayer> Pipeline<P> {
         }
     }
 
+    /// Draws collage `c` over what the bound framebuffer holds at `alpha`:
+    /// a collage fade without the scratch pair. The outgoing collage is
+    /// drawn first, as on any frame; this blends the incoming one's tiles
+    /// and, where it has gaps, its gap colour. Measured on the frame: 10.5
+    /// ms a frame against 26.9 for both collages into scratch targets and
+    /// the fade shader over them.
+    ///
+    /// # Safety
+    /// Requires a current GL context and `c`'s tiles not yet destroyed.
+    unsafe fn draw_collage_over(&self, c: &Collage, alpha: f32) {
+        assert!((0.0..=1.0).contains(&alpha), "alpha {alpha} out of 0..=1");
+        let Some(first) = c.tiles.first() else {
+            return;
+        };
+        // SAFETY: the caller's contract: a current GL context and `c`'s
+        // tiles live; `over` is bound before its draws, and blending is
+        // left off as every other draw expects.
+        unsafe {
+            self.over.bind(self.quad_vbo, self.quad_ibo);
+            glUniform1f(self.over.u_alpha, alpha);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            let rects: Vec<Rect> = c.tiles.iter().map(|t| t.rect).collect();
+            let (r, g, b) = gap_rgb(self.settings.gap_colour);
+            glUniform1f(self.over.u_mul, 0.0);
+            glUniform4f(self.over.u_add, r, g, b, 0.0);
+            for cell in gap_cells(&rects, self.screen_w, self.screen_h) {
+                glViewport(cell.x, self.screen_h - cell.y - cell.h, cell.w, cell.h);
+                // Any live texture: `uMul` 0 ignores what it samples.
+                self.over
+                    .draw(first.target.texture, (1.0, 1.0), IDENTITY_WINDOW, None);
+            }
+            glUniform1f(self.over.u_mul, 1.0);
+            glUniform4f(self.over.u_add, 0.0, 0.0, 0.0, 0.0);
+            for t in &c.tiles {
+                let r = t.rect;
+                glViewport(r.x, self.screen_h - r.y - r.h, r.w, r.h);
+                self.over.draw(
+                    t.target.texture,
+                    (1.0, 1.0),
+                    with_v_flip(self.kb_window(&t.kb)),
+                    None,
+                );
+            }
+            glDisable(GL_BLEND);
+            glViewport(0, 0, self.screen_w, self.screen_h);
+        }
+    }
+
     /// Draws the frame: the current collage, or the transition under way.
     ///
     /// # Panics
@@ -2028,10 +2097,13 @@ impl<P: VideoPlayer> Pipeline<P> {
             glClearColor(0.05, 0.06, 0.09, 1.0);
             glClear(GL_COLOR_BUFFER_BIT);
         }
+        // A fade blends the incoming collage over the outgoing one, so only
+        // the other transitions compose collages into scratch targets.
         let needs_scratch = matches!(
             (&self.state, &self.current),
-            (State::Transitioning { incoming, .. }, Some(c))
+            (State::Transitioning { incoming, transition_idx, .. }, Some(c))
                 if !(c.is_single() && incoming.is_single())
+                    && !self.transitions[*transition_idx].is_fade()
         );
         // Without its scratch pair (GPU out of memory) a collage transition
         // becomes a cut to the incoming collage.
@@ -2129,9 +2201,18 @@ impl<P: VideoPlayer> Pipeline<P> {
                 // next/prev while paused still completes and then holds.
                 let elapsed = clock::elapsed(*start);
                 let progress = (elapsed.as_secs_f32() / TRANSITION_DURATION.as_secs_f32()).min(1.0);
-                let ratio = self.screen_w as f32 / self.screen_h as f32;
-                let (from_tex, to_tex, from_kb, to_kb) =
-                    if current.is_single() && incoming.is_single() {
+                let transition = &self.transitions[*transition_idx];
+                let both_single = current.is_single() && incoming.is_single();
+                if !both_single && transition.is_fade() {
+                    // SAFETY: a Pipeline lives on the render thread with its
+                    // context current (gl.rs # Safety); neither collage is
+                    // destroyed until the transition ends.
+                    unsafe {
+                        self.draw_collage(current, None);
+                        self.draw_collage_over(incoming, progress);
+                    }
+                } else {
+                    let (from_tex, to_tex, from_kb, to_kb) = if both_single {
                         // Two single photos: their tiles' targets, each
                         // with its Ken Burns.
                         let (a, b) = (&current.tiles[0], &incoming.tiles[0]);
@@ -2162,21 +2243,21 @@ impl<P: VideoPlayer> Pipeline<P> {
                             in_shader_uv(IDENTITY_WINDOW),
                         )
                     };
-                // SAFETY: a Pipeline lives on the render thread with its
-                // context current (gl.rs # Safety); the quad is the pipeline's
-                // own, and both textures belong to live tiles or the scratch
-                // pair.
-                unsafe {
-                    self.transitions[*transition_idx].draw(
-                        self.quad_vbo,
-                        self.quad_ibo,
-                        from_tex,
-                        to_tex,
-                        progress,
-                        ratio,
-                        from_kb,
-                        to_kb,
-                    );
+                    // SAFETY: a Pipeline lives on the render thread with its
+                    // context current (gl.rs # Safety); the quad is the
+                    // pipeline's own, and both textures belong to live tiles
+                    // or the scratch pair.
+                    unsafe {
+                        transition.draw(
+                            self.quad_vbo,
+                            self.quad_ibo,
+                            from_tex,
+                            to_tex,
+                            progress,
+                            from_kb,
+                            to_kb,
+                        );
+                    }
                 }
                 finished = elapsed >= TRANSITION_DURATION;
             }
@@ -2221,6 +2302,43 @@ impl<P: VideoPlayer> Pipeline<P> {
             self.start_live();
         }
     }
+}
+
+/// The screen less the union of `tiles`, as rectangles: the grid every
+/// tile edge cuts the screen into, the cells no tile covers, merged along
+/// each row. A collage has a handful of tiles, so the grid stays small.
+fn gap_cells(tiles: &[Rect], screen_w: i32, screen_h: i32) -> Vec<Rect> {
+    let edges = |pick: fn(&Rect) -> [i32; 2], size: i32| {
+        let mut v: Vec<i32> = tiles
+            .iter()
+            .flat_map(pick)
+            .chain([0, size])
+            .map(|e| e.clamp(0, size))
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let xs = edges(|r| [r.x, r.x + r.w], screen_w);
+    let ys = edges(|r| [r.y, r.y + r.h], screen_h);
+    let mut cells = Vec::new();
+    for row in ys.windows(2) {
+        let (y, h) = (row[0], row[1] - row[0]);
+        let mut open: Option<Rect> = None;
+        for col in xs.windows(2) {
+            let (x, w) = (col[0], col[1] - col[0]);
+            let covered = tiles
+                .iter()
+                .any(|t| t.x <= x && x + w <= t.x + t.w && t.y <= y && y + h <= t.y + t.h);
+            match (&mut open, covered) {
+                (Some(cell), false) => cell.w += w,
+                (None, false) => open = Some(Rect { x, y, w, h }),
+                (_, true) => cells.extend(open.take()),
+            }
+        }
+        cells.extend(open);
+    }
+    cells
 }
 
 fn with_v_flip(kb: UvWindow) -> UvWindow {
@@ -2337,6 +2455,30 @@ impl<P: VideoPlayer> crate::app::Slideshow for Pipeline<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gap_cells_cover_the_screen_less_the_tiles() {
+        let r = |x, y, w, h| Rect { x, y, w, h };
+        // A single photo leaves no gap.
+        assert!(gap_cells(&[r(0, 0, 1280, 800)], 1280, 800).is_empty());
+        // Two side by side with a separator and a margin: every pixel is in
+        // exactly one tile or one cell.
+        let tiles = [r(4, 4, 632, 792), r(644, 4, 632, 792)];
+        let cells = gap_cells(&tiles, 1280, 800);
+        for y in 0..800 {
+            for x in 0..1280 {
+                let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+                let hits = tiles
+                    .iter()
+                    .chain(&cells)
+                    .filter(|t| t.contains(fx, fy))
+                    .count();
+                assert_eq!(hits, 1, "pixel ({x}, {y}) in {hits} rects");
+            }
+        }
+        // Rows merge: the top margin is one cell, not three.
+        assert!(cells.contains(&r(0, 0, 1280, 4)), "{cells:?}");
+    }
 
     #[test]
     fn ken_burns_moves_until_its_duration_runs_and_a_still_never_does() {

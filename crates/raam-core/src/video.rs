@@ -597,14 +597,24 @@ impl<P: VideoPlayer> Video<P> {
     }
 
     /// Ends a backoff that's over, and watches for a decoder whose release
-    /// never finishes (a wedged VPU), which counts as a failure once.
+    /// never finishes (a wedged VPU), which counts as a failure, and again
+    /// each time its backoff ends while it is still open: a clip planned
+    /// after the backoff would otherwise wait on its release for good, and
+    /// the slideshow with it (raam#107).
     /// `probing`: a probe of ours is up (the live clip is known here).
     pub fn watch_decoders(&mut self, probing: bool) {
-        if self.backoff_until.is_some_and(|t| clock::now() >= t) {
-            log::info!("backoff over, clips are tried again");
-            self.backoff_until = None;
-        }
         let ours = self.live.is_some() || probing;
+        if self.backoff_until.is_some_and(|t| clock::now() >= t) {
+            self.backoff_until = None;
+            if self.orphan_counted && !ours && self.player.decoders_open() > 0 {
+                let open_for = self.orphan_since.map(clock::elapsed).unwrap_or_default();
+                self.record_failure(&format!(
+                    "a stopped decoder still not released after {open_for:?}"
+                ));
+                return;
+            }
+            log::info!("backoff over, clips are tried again");
+        }
         if ours || self.player.decoders_open() == 0 {
             self.orphan_since = None;
             self.orphan_counted = false;
@@ -1025,7 +1035,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stopped_decoder_never_released_counts_once() {
+    fn a_stopped_decoder_never_released_keeps_clips_backed_off() {
         let fake = Fake::new();
         let mut video = Video::new(fake.clone());
         fake.with(|s| s.decoders = 1);
@@ -1040,10 +1050,20 @@ mod tests {
         advance(ms(1));
         video.watch_decoders(false);
         assert!(video.backing_off(), "wedged: counted");
+        // Still open when the backoff ends: counted again, for twice as
+        // long, so a clip planned now isn't parked on its release for good.
         advance(Duration::from_secs(DECODER_BACKOFF_BASE_SECS));
         video.watch_decoders(false);
-        assert!(!video.backing_off(), "the backoff ends; counted only once");
-        assert_eq!(video.deadline(), Some(DECODER_RELEASE_POLL), "still polled");
+        assert!(video.backing_off(), "still wedged: counted again");
+        advance(Duration::from_secs(DECODER_BACKOFF_BASE_SECS));
+        video.watch_decoders(false);
+        assert!(video.backing_off(), "the second backoff is twice as long");
+        // Released at last: the backoff runs out and clips come back.
+        fake.with(|s| s.decoders = 0);
+        advance(Duration::from_secs(DECODER_BACKOFF_BASE_SECS));
+        video.watch_decoders(false);
+        assert!(!video.backing_off(), "released: the backoff ends");
+        assert_eq!(video.deadline(), None, "nothing left to poll");
     }
 
     #[test]

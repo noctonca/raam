@@ -334,7 +334,8 @@ heavier crate, the replacement is a decision:
 | `rusqlite` (bundled, `LIBSQLITE3_FLAGS` trimmed) | engine | The library DB; FTS/RTREE/etc. compiled out (−0.5 MB) |
 | `ureq` 3 (rustls) | engine | Blocking HTTP without the async runtime (replaces reqwest: −60 crates); TLS stays because weather and users' Immich need it, and API 23's trust store is stale so roots are bundled |
 | `serde_json` (Value only, no derive) | engine | Immich/weather parsing, settings rows |
-| `jpeg-decoder` + `jpeg-encoder` | engine | One decoder (DCT-scaled reads) and a dependency-free encoder for previews (replaces `image`) |
+| `jpeg-decoder` + `jpeg-encoder` | engine | The DCT-scaled reads (local photos, and a tile whose preview halves to cover it) and a dependency-free encoder for previews (replaces `image`) |
+| `zune-jpeg` (with `zune-core`, its only dependency) | engine | Whole preview decodes: 1.3x faster than jpeg-decoder on the frame's A7 and writes RGBA itself, saving a ~50 ms expansion pass per photo (raam#104). It has no DCT scaling, so jpeg-decoder stays for that |
 | `kamadak-exif` | engine | Orientation + DateTimeOriginal; EXIF edge cases are cheap insurance |
 | SHA-1 via `ring::digest` | engine | Immich checksum matching; ring is already there under rustls |
 | `fontdue` | core (overlay) | Clock/weather atlas rasterisation; revisit merging onto egui's skrifa |

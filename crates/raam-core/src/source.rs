@@ -44,6 +44,30 @@ pub trait TileSource {
     fn set_skip_videos(&self, skip: bool);
 }
 
+/// The size a `width`x`height` preview scales to at Fill's cover scale
+/// for `rect`: the smallest size at its aspect that covers the tile. A
+/// source may decode straight to about this size (a DCT-scaled JPEG
+/// decode) when the preview halves at least once to cover it.
+///
+/// # Panics
+///
+/// If `rect` is empty, or the preview is (see `shrink_to_cover`).
+pub fn cover_size(width: u32, height: u32, rect: collage::Rect) -> (u32, u32) {
+    assert!(
+        rect.w > 0 && rect.h > 0 && width > 0 && height > 0,
+        "cover_size of a {width}x{height} preview into a {}x{} tile",
+        rect.w,
+        rect.h
+    );
+    let side = |n: i32| u32::try_from(n).expect("a tile's side, asserted positive above");
+    let (tw, th) = (side(rect.w), side(rect.h));
+    let s = (tw as f32 / width as f32).max(th as f32 / height as f32);
+    (
+        num::sat_u32((width as f32 * s).ceil()),
+        num::sat_u32((height as f32 * s).ceil()),
+    )
+}
+
 /// Halves a decoded preview on the source's side of the seam (2x2 box
 /// average) while it stays at least the tile's cover size, so the render
 /// thread uploads a near-tile-sized texture (a 420x398 tile needs about a
@@ -74,37 +98,45 @@ pub fn shrink_to_cover(photo: &mut Photo, rect: collage::Rect) -> Duration {
     if photo.width == 0 || photo.height == 0 {
         return clock::elapsed(start);
     }
-    let side = |n: i32| u32::try_from(n).expect("a tile's side, asserted positive above");
-    let (tw, th) = (side(rect.w), side(rect.h));
-    let s = (tw as f32 / photo.width as f32).max(th as f32 / photo.height as f32);
-    let (cover_w, cover_h) = (
-        num::sat_u32((photo.width as f32 * s).ceil()),
-        num::sat_u32((photo.height as f32 * s).ceil()),
-    );
+    let (cover_w, cover_h) = cover_size(photo.width, photo.height, rect);
     while photo.width / 2 >= cover_w && photo.height / 2 >= cover_h {
         let (w, h) = (photo.width / 2, photo.height / 2);
-        let src = &photo.rgba;
-        let stride = photo.width as usize * 4;
-        let mut out = vec![0u8; (w * h * 4) as usize];
-        for y in 0..h as usize {
-            let r0 = 2 * y * stride;
-            let r1 = r0 + stride;
-            for x in 0..w as usize {
-                let (c, o) = (8 * x, 4 * (y * w as usize + x));
-                for k in 0..4 {
-                    let sum = u16::from(src[r0 + c + k])
-                        + u16::from(src[r0 + c + 4 + k])
-                        + u16::from(src[r1 + c + k])
-                        + u16::from(src[r1 + c + 4 + k]);
-                    out[o + k] = u8::try_from((sum + 2) / 4).expect("a mean of 4 bytes is a byte");
-                }
-            }
-        }
-        photo.rgba = out;
+        photo.rgba = halve(&photo.rgba, photo.width as usize, w as usize, h as usize);
         photo.width = w;
         photo.height = h;
     }
     clock::elapsed(start)
+}
+
+/// One 2x2 box halving of `src` (RGBA, `src_w` wide) to `w`x`h`, each
+/// byte the rounded mean `(a + b + c + d + 2) / 4` of its four. SWAR: a
+/// pixel is a little-endian u32, its even bytes (R, B) and odd bytes (G,
+/// A) are summed in two 16-bit lanes of a u32 each (4 x 255 + 2 fits), so
+/// one add does two channels; bit-exact with the per-byte loop it
+/// replaced and 1.7x faster on the frame's Cortex-A7, where that loop
+/// doesn't vectorise (raam#104).
+fn halve(src: &[u8], src_w: usize, w: usize, h: usize) -> Vec<u8> {
+    const LANES: u32 = 0x00FF_00FF;
+    const ROUND: u32 = 0x0002_0002;
+    let stride = src_w * 4;
+    let mut out = vec![0u8; w * h * 4];
+    for (y, row) in out.chunks_exact_mut(w * 4).enumerate() {
+        let r0 = &src[2 * y * stride..][..w * 8];
+        let r1 = &src[(2 * y + 1) * stride..][..w * 8];
+        let pairs = r0.as_chunks::<8>().0.iter().zip(r1.as_chunks::<8>().0);
+        for (o, (a, b)) in row.as_chunks_mut::<4>().0.iter_mut().zip(pairs) {
+            let px = [
+                u32::from_le_bytes([a[0], a[1], a[2], a[3]]),
+                u32::from_le_bytes([a[4], a[5], a[6], a[7]]),
+                u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                u32::from_le_bytes([b[4], b[5], b[6], b[7]]),
+            ];
+            let even = px.iter().map(|p| p & LANES).sum::<u32>() + ROUND;
+            let odd = px.iter().map(|p| (p >> 8) & LANES).sum::<u32>() + ROUND;
+            *o = (((even >> 2) & LANES) | (((odd >> 2) & LANES) << 8)).to_le_bytes();
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -272,6 +304,28 @@ mod tests {
                     let slack = 1.0 / f64::from(p.width) + 1.0 / f64::from(p.height);
                     prop_assert!((result / source - 1.0).abs() <= slack * 1.01,
                         "{}x{} -> {}x{}", w, h, p.width, p.height);
+                }
+            }
+
+            /// The SWAR halving is bit-exact with the per-byte rounded
+            /// mean, odd sides included (the last row or column dropped).
+            #[test]
+            fn halving_is_the_per_byte_rounded_mean(
+                (w, h, src) in (2..=40usize, 2..=40usize).prop_flat_map(|(w, h)| {
+                    (Just(w), Just(h), proptest::collection::vec(any::<u8>(), w * h * 4))
+                }),
+            ) {
+                let out = halve(&src, w, w / 2, h / 2);
+                for y in 0..h / 2 {
+                    for x in 0..w / 2 {
+                        for k in 0..4 {
+                            let at = |dx: usize, dy: usize| {
+                                u16::from(src[4 * ((2 * y + dy) * w + 2 * x + dx) + k])
+                            };
+                            let mean = (at(0, 0) + at(1, 0) + at(0, 1) + at(1, 1) + 2) / 4;
+                            prop_assert_eq!(u16::from(out[4 * (y * (w / 2) + x) + k]), mean);
+                        }
+                    }
                 }
             }
 

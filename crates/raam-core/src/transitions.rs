@@ -241,6 +241,8 @@ struct QuadProgram {
     u_from_offset: GlInt,
     u_to_scale: GlInt,
     u_to_offset: GlInt,
+    /// Crosswarp's only; -1 (which GL ignores) in fade's program.
+    u_to_centre: GlInt,
 }
 
 impl QuadProgram {
@@ -263,6 +265,7 @@ impl QuadProgram {
                 u_from_offset: uniform_loc(program, "uFromOffset"),
                 u_to_scale: uniform_loc(program, "uToScale"),
                 u_to_offset: uniform_loc(program, "uToOffset"),
+                u_to_centre: uniform_loc(program, "uToCentre"),
             }
         }
     }
@@ -485,7 +488,7 @@ impl TransitionProgram {
                     bind_quad(p, quad_vbo, from_tex, to_tex, progress, from_kb, to_kb);
                     if matches!(self.kind, Kind::Crosswarp(_)) {
                         glUniform2f(
-                            uniform_loc(p.program, "uToCentre"),
+                            p.u_to_centre,
                             0.5 * to_kb.0.0 + to_kb.1.0,
                             0.5 * to_kb.0.1 + to_kb.1.1,
                         );

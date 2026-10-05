@@ -63,6 +63,14 @@ after both (see its precedence note).
   A hang then ends on the line that names the call it is stuck in, and
   `debuggerd -b` names the thread. Copy `release_video_decoder` in
   `hosts/android/src/player.rs` (#122).
+- **A request/reply channel** (a daemon's control socket) bounds its
+  send as well as its receive, and a timeout reopens it, since a late
+  reply would be read as the next request's. Its errors are typed by
+  where they come from, and only a socket error reconnects. Copy
+  `WifiError` and `Ctrl` in `src/wifi.rs` (#126). An undo is pending
+  state, put back against a fresh list by id **and** name, never sent
+  on the channel whose failure triggered it (`Restore`, `put_back`,
+  #127).
 - **A value that leaks or stalls if dropped** gets
   `#[must_use = "<what breaks>"]`. See `video.rs`: "stop() it: a
   dropped probe leaks its decoder, and no clip opens again". A
@@ -109,7 +117,7 @@ tail` exits 0 even when clippy failed.
 | Explicit integer sizes | The four cast lints, plus review for `usize` in the model |
 | Named limits | Review only (`unreadable_literal` off) |
 | Pure core | Review only. The wasm32 build catches some, but `Instant` panics at runtime on wasm instead of failing the build |
-| Crash, don't limp | Android panic hook (`exit(70)`, the system relaunches). **No restart-loop guard yet** |
+| Crash, don't limp | Android panic hook (`exit(70)`, the system relaunches). **The desktop host has no panic policy (#129). No restart-loop guard yet** |
 | Simulation first, goldens | `cargo test --workspace`; `goldens-own-commit.sh` in CI; the pixel check runs locally |
 | Dependencies | `cargo deny check` in CI; the register row is review |
 | Formatting | `cargo fmt --all --check` in CI; the opt-in pre-commit hook |
@@ -152,6 +160,10 @@ PR of its own.
    #122), as are `wifi.rs`'s. On the frame, read thread names from
    `/proc/<pid>/task/*/comm`: toolbox `ps -t` splits a name at its
    space.
+9. **The desktop host has no panic policy** (#129): no panic hook and
+   no `panic = "abort"`. A panic on a worker thread kills that thread
+   only, and the app limps on without it. For example, Wi-Fi keeps its
+   last snapshot and drops every command.
 
 ## Reviewing: the order that has paid off here
 
@@ -171,22 +183,31 @@ real bugs.
      their files. So a busy or out-of-memory VPU dropped good clips for
      good, and `debug.video.fail=probe` did the same to every clip it
      probed. Ask what each error kind does that can't be undone, and
-     whether the device can cause it.
+     whether the device can cause it;
+   - #127: a refused cleanup step after a good Wi-Fi join was handled
+     as a failed join, whose undo removed the network just joined; and
+     a join that failed because the sockets failed sent its undo
+     (`let _ =` on each step) to those sockets, so the other networks
+     stayed disabled until a config save made it permanent. Read every
+     undo path last.
 2. **Unbounded anything:**
    - #39: clip downloads had no byte limit, and album paging had no
      page cap;
    - #63: a wake alarm retried every 50 ms;
    - #53: the key queue;
-   - #50: the WebGL name table.
+   - #50: the WebGL name table;
+   - #128: a Wi-Fi scan cut at a bare 1024 returned a short list.
 3. **Ordering bugs a new bound creates.** #39: a download cut short
-   at the cap failed the probe.
+   at the cap failed the probe. #126: a timeout is a bound too. A
+   wpa_supplicant reply that came after the 3 s wait was read as the
+   next request's, and every reply after it was one behind.
 4. **`unsafe` and `as`:**
    - #82: writing the SAFETY notes found a drop-order bug and the
      audio buffer race fixed in #83;
    - #72: UB fixes;
    - #49, #54, #91: casts of outside data that wrapped or panicked.
 5. **Catch-alls on owned enums.** #48: an unknown transition name
-   became a fade.
+   became a fade. #128: `key_mgmt`'s `_ => None` over `Security`.
 6. **Missing entry asserts.** #64: a 0×0 tile hung the fetch thread;
    #57: RGBA length.
 7. **Bare numbers** that belong in `limits.rs` (#43, #54).

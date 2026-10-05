@@ -84,7 +84,7 @@ on the files you touched, if you have it.
 |---|---|
 | P1: simple control flow, no recursion | Review only |
 | P2: every loop bounded | Review, plus named limits |
-| P3: no allocation after init on hot paths | Review only. The budget constants (`APP_TOTAL_STEADY_MB`, `MALI_PEAK_MB`, `TILE_TEXTURES_PER_PLAN_MB`, `TRANSITION_SCRATCH_TARGETS`) are declared but **asserted nowhere** |
+| P3: no allocation after init on hot paths | Live render targets are counted and asserted within `MALI_PEAK_MB` (`gl.rs`), and a target dropped without `destroy()` panics. The other budget constants (`APP_TOTAL_STEADY_MB`, `TILE_TEXTURES_PER_PLAN_MB`, `TRANSITION_SCRATCH_TARGETS`) are asserted nowhere. Otherwise review |
 | P4: short functions | Review only (`too_many_lines` off: 30 sites) |
 | P5: assertions | `missing_panics_doc` (raam-engine opts out crate-wide); density is review only |
 | P6: smallest scope | Review only |
@@ -116,7 +116,11 @@ PR of its own.
 2. **The restart-loop guard** that TIGERSTYLE.md describes doesn't
    exist. A deterministic crash at startup restarts about once a
    second.
-3. **The memory budgets aren't asserted** where they're spent.
+3. **Most memory budgets aren't asserted** where they're spent. Only
+   `MALI_PEAK_MB` is, over live render targets. `TILE_TEXTURES_PER_PLAN_MB`
+   (12) is already passed in normal use (12.2 MB measured on the frame,
+   12.4 on the desktop), and ARCHITECTURE.md says tile textures are
+   "reserved up front" while the code makes them per plan.
 4. **`Result<_, String>`** in the hosts and raam-core's seams (raam#94).
 5. **The pure core isn't machine-checked.** It needs `disallowed-types`
    for `Instant`/`SystemTime` and `disallowed-methods` for
@@ -125,8 +129,9 @@ PR of its own.
 6. **`let _ =` on `Result`s** outside tests, without a reason, e.g. in
    `library.rs` and `db.rs`. Also: should a failed DB read crash or
    fall back to a default? That is raam#45, waiting on a decision.
-7. **Bare `#[allow]`s with no reason,** in `gl.rs`, `theme.rs`,
-   `transitions.rs`, `egl.rs` and `webgl.rs`.
+7. **Bare `#[allow]`s with no reason,** in `theme.rs`,
+   `transitions.rs` and `egl.rs` (the GL module's were given reasons
+   in #117).
 8. **Unnamed threads.** The fetch, library, writer and weather workers
    and the Android player threads are started with `thread::spawn`.
    The panic hook therefore logs "panic on thread ?". Only `wifi.rs`
@@ -164,6 +169,10 @@ real bugs.
    #57: RGBA length.
 7. **Bare numbers** that belong in `limits.rs` (#43, #54).
 8. **Duplicated loops; long functions.**
+9. **Contracts written only in docs,** checked against the callers.
+   #113: `uniform_loc`'s "once per program, at startup" was broken by a
+   per-frame call in crosswarp, which grew the wasm uniform table
+   without bound. #116: "freed with `destroy`" became a drop guard.
 
 How to run it:
 

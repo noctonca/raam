@@ -115,6 +115,14 @@ adb -s $T shell rm -f /sdcard/raam.db /sdcard/raam.db-wal /sdcard/raam.db-shm
   within 10s` and `a stopped decoder not released after 10s`, and no
   clip plays again until a reboot. Seen 2026-10-04. With clips in the
   queue, finish the cycle with `$S reboot` (it also clears test props).
+- **It can wedge audio too, and then Raam can't start.** After a
+  `deploy`'s stops, the new process can log `overlay ready` and the
+  transitions linked, then nothing: no `pipeline + painter ready`, and
+  `deploy` FAILs after 90 s. `su -c 'debuggerd -b <pid>'` shows the
+  render thread (the first `android_main` thread) in a binder call under
+  `AudioSystem::getOutputLatency`, with mediaserver in `futex_wait`. It
+  isn't the build: `$S reboot`, and the same build comes up. Seen
+  2026-10-05.
 - Settings are rows in the `setting` table, values in JSON. A default
   is an absent row, so restore a default by deleting the row. Example:
   `video.sound` = `true` turns clip sound on.

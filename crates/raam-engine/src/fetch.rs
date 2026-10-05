@@ -25,7 +25,7 @@ use crate::library::{self, Library};
 use crate::provider::{ImmichProvider, Provider};
 use raam_core::clock;
 use raam_core::collage::{self, Orientation};
-use raam_core::source::{TileSource, shrink_to_cover};
+use raam_core::source::{self, TileSource, shrink_to_cover};
 use raam_model::limits::{
     FETCH_BACKOFF_WAIT, FETCH_EMPTY_WAIT, FETCH_FAILED_WAIT, FETCH_SKIP_WAIT, FETCH_SLOT_POLL,
     FETCH_TILE_POLL,
@@ -410,7 +410,7 @@ fn fetch_loop(shared: Arc<FetchShared>, host: Host, screen: Screen, lib: Arc<Lib
         };
         for (slot_idx, entry) in plan.assets.iter().enumerate() {
             let fetch_start = clock::now();
-            match load_photo(&lib, &mut immich, entry) {
+            match load_photo(&lib, &mut immich, entry, rects[slot_idx]) {
                 Ok((mut photo, from)) => {
                     let preview = (photo.width, photo.height);
                     let resize_time = if photo.video.is_some() {
@@ -527,9 +527,18 @@ enum FetchError {
     /// The local photo's upright preview isn't made yet (library.rs).
     NotMade,
     /// The preview isn't a JPEG this decoder reads.
-    Decode(jpeg_decoder::Error),
-    /// A JPEG, but neither RGB nor grayscale.
+    Decode(zune_jpeg::errors::DecodeErrors),
+    /// A JPEG, but neither YCbCr, RGB nor grayscale (zune-jpeg 0.5's CMYK
+    /// to RGBA is wrong on small images, so CMYK is refused, as before).
+    ColourSpace(zune_jpeg::zune_core::colorspace::ColorSpace),
+    /// The DCT-scaled decode of a preview zune-jpeg's headers accepted
+    /// failed.
+    ScaledDecode(jpeg_decoder::Error),
+    /// The DCT-scaled decode gave a pixel format zune-jpeg's headers
+    /// didn't say.
     PixelFormat(jpeg_decoder::PixelFormat),
+    /// The DCT-scaled decode's pixels don't fill the size it reported.
+    ScaledSize,
     /// A local clip's row has no file location.
     NoLocation,
     /// The clip is bigger than the cache cap.
@@ -555,7 +564,10 @@ impl std::fmt::Display for FetchError {
             FetchError::Read { path, source } => write!(f, "read {}: {source}", path.display()),
             FetchError::NotMade => f.write_str("local preview not made yet"),
             FetchError::Decode(e) => write!(f, "jpeg decode: {e}"),
-            FetchError::PixelFormat(p) => write!(f, "unsupported pixel format {p:?}"),
+            FetchError::ColourSpace(c) => write!(f, "unsupported colour space {c:?}"),
+            FetchError::ScaledDecode(e) => write!(f, "scaled jpeg decode: {e}"),
+            FetchError::PixelFormat(p) => write!(f, "scaled decode gave pixel format {p:?}"),
+            FetchError::ScaledSize => f.write_str("scaled decode's pixels don't fill its size"),
             FetchError::NoLocation => f.write_str("local clip has no location"),
             FetchError::TooBig => f.write_str("clip bigger than the cache cap"),
             FetchError::Probe(why) => write!(f, "clip unreadable: {why}"),
@@ -570,8 +582,11 @@ impl std::error::Error for FetchError {
             FetchError::Provider(e) => Some(e),
             FetchError::Read { source, .. } => Some(source),
             FetchError::Decode(e) => Some(e),
+            FetchError::ScaledDecode(e) => Some(e),
             FetchError::NotMade
+            | FetchError::ColourSpace(_)
             | FetchError::PixelFormat(_)
+            | FetchError::ScaledSize
             | FetchError::NoLocation
             | FetchError::TooBig
             | FetchError::Probe(_)
@@ -595,6 +610,7 @@ fn load_photo(
     lib: &Library,
     immich: &mut ImmichProvider,
     e: &MediaItem,
+    rect: collage::Rect,
 ) -> Result<(Photo, &'static str), FetchError> {
     if e.video {
         return load_video(lib, immich, e);
@@ -650,7 +666,7 @@ fn load_photo(
             (bytes, "server")
         }
     };
-    let (width, height, rgba) = decode_jpeg_rgba(&bytes)?;
+    let (width, height, rgba) = decode_preview(&bytes, rect)?;
     let (fill_centre, face_focal, _) = db::focus(&lib.db.lock().unwrap(), e.asset);
     Ok((
         Photo {
@@ -667,16 +683,64 @@ fn load_photo(
     ))
 }
 
-/// Decodes a preview JPEG (RGB or grayscale) straight to the RGBA the GPU
-/// upload wants.
-fn decode_jpeg_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), FetchError> {
-    let mut dec = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
-    let pixels = dec.decode().map_err(FetchError::Decode)?;
+/// Decodes a preview JPEG to the RGBA the GPU upload wants, at about the
+/// size `rect` needs. A preview that halves at least once to cover the
+/// tile is decoded DCT-scaled (1/2, 1/4 or 1/8, jpeg-decoder's `scale`)
+/// straight to at least its cover size: on the frame that is 1.7-2.3x
+/// faster than a whole decode and `shrink_to_cover`'s box halving, peaks at
+/// a quarter of the memory or less, and is closer to a Lanczos3 downscale
+/// than the box halving (raam#104 has the measurements). Every other
+/// preview is decoded whole by zune-jpeg, whose colour converter writes
+/// the alpha itself. RGB and grayscale JPEGs only (zune-jpeg 0.5's CMYK
+/// to RGBA is wrong on small images, so CMYK is refused, as before).
+fn decode_preview(bytes: &[u8], rect: collage::Rect) -> Result<(u32, u32, Vec<u8>), FetchError> {
+    use zune_jpeg::zune_core::{
+        bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions,
+    };
+    let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
+    let mut dec = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(bytes), options);
+    dec.decode_headers().map_err(FetchError::Decode)?;
+    match dec.input_colorspace() {
+        Some(ColorSpace::YCbCr | ColorSpace::RGB | ColorSpace::Luma) => {}
+        other => {
+            return Err(FetchError::ColourSpace(
+                other.expect("zune-jpeg has the colour space once the headers decoded"),
+            ));
+        }
+    }
+    let (w, h) = dec
+        .dimensions()
+        .expect("zune-jpeg has the dimensions once the headers decoded");
+    let side = |n: usize| u32::try_from(n).expect("a JPEG side is at most 65535");
+    let (w, h) = (side(w), side(h));
+    if w > 0 && h > 0 {
+        let (cover_w, cover_h) = source::cover_size(w, h, rect);
+        if w / 2 >= cover_w && h / 2 >= cover_h {
+            return decode_scaled(bytes, cover_w, cover_h);
+        }
+    }
+    let rgba = dec.decode().map_err(FetchError::Decode)?;
+    assert_eq!(
+        rgba.len(),
+        (w * h * 4) as usize,
+        "zune-jpeg's RGBA output is w*h*4"
+    );
+    Ok((w, h, rgba))
+}
+
+/// A DCT-scaled decode to the smallest 1/2^k size that is at least
+/// `min_w`x`min_h`, expanded to RGBA.
+fn decode_scaled(bytes: &[u8], min_w: u32, min_h: u32) -> Result<(u32, u32, Vec<u8>), FetchError> {
+    let side = |n: u32| u16::try_from(n).expect("a cover size below a JPEG side fits a u16");
+    let mut dec = jpeg_decoder::Decoder::new(bytes);
+    let (w, h) = dec
+        .scale(side(min_w), side(min_h))
+        .map_err(FetchError::ScaledDecode)?;
+    let pixels = dec.decode().map_err(FetchError::ScaledDecode)?;
     let info = dec
         .info()
         .expect("jpeg-decoder has the info once decode returned Ok");
-    let (w, h) = (u32::from(info.width), u32::from(info.height));
-    let rgba = match info.pixel_format {
+    let rgba: Vec<u8> = match info.pixel_format {
         jpeg_decoder::PixelFormat::RGB24 => pixels
             .as_chunks::<3>()
             .0
@@ -686,6 +750,10 @@ fn decode_jpeg_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), FetchError> {
         jpeg_decoder::PixelFormat::L8 => pixels.iter().flat_map(|&l| [l, l, l, 255]).collect(),
         other => return Err(FetchError::PixelFormat(other)),
     };
+    let (w, h) = (u32::from(w), u32::from(h));
+    if rgba.len() != (w * h * 4) as usize {
+        return Err(FetchError::ScaledSize);
+    }
     Ok((w, h, rgba))
 }
 
@@ -782,29 +850,67 @@ mod tests {
         out
     }
 
+    fn tile(w: i32, h: i32) -> collage::Rect {
+        collage::Rect { x: 0, y: 0, w, h }
+    }
+
     /// RGB and grayscale previews come out as RGBA; anything else is an
     /// error that says which, never a tile of wrong pixels.
     #[test]
     fn a_preview_decodes_to_rgba_or_says_why_not() {
-        let (w, h, rgba) =
-            decode_jpeg_rgba(&jpeg(4, 2, jpeg_encoder::ColorType::Rgb, &[200, 100, 50])).unwrap();
-        assert_eq!((w, h, rgba.len()), (4, 2, 4 * 2 * 4));
-        assert!(rgba.chunks(4).all(|p| p[3] == 255));
+        let rgb = jpeg(4, 2, jpeg_encoder::ColorType::Rgb, &[200, 100, 50]);
+        let luma = jpeg(3, 3, jpeg_encoder::ColorType::Luma, &[90]);
+        // Whole (a tile it doesn't halve for) and DCT-scaled (a tiny one).
+        for t in [tile(4, 4), tile(1, 1)] {
+            let (w, h, rgba) = decode_preview(&rgb, t).unwrap();
+            assert_eq!(rgba.len(), (w * h * 4) as usize);
+            assert!(rgba.chunks(4).all(|p| p[3] == 255));
 
-        let (_, _, grey) =
-            decode_jpeg_rgba(&jpeg(3, 3, jpeg_encoder::ColorType::Luma, &[90])).unwrap();
-        assert!(
-            grey.chunks(4)
-                .all(|p| p[0] == p[1] && p[1] == p[2] && p[3] == 255)
-        );
+            let (_, _, grey) = decode_preview(&luma, t).unwrap();
+            assert!(
+                grey.chunks(4)
+                    .all(|p| p[0] == p[1] && p[1] == p[2] && p[3] == 255)
+            );
+        }
 
         assert!(matches!(
-            decode_jpeg_rgba(&jpeg(2, 2, jpeg_encoder::ColorType::Cmyk, &[0, 0, 0, 0])),
-            Err(FetchError::PixelFormat(jpeg_decoder::PixelFormat::CMYK32))
+            decode_preview(
+                &jpeg(2, 2, jpeg_encoder::ColorType::Cmyk, &[0, 0, 0, 0]),
+                tile(1, 1)
+            ),
+            Err(FetchError::ColourSpace(_))
         ));
         assert!(matches!(
-            decode_jpeg_rgba(b"not a jpeg"),
+            decode_preview(b"not a jpeg", tile(1, 1)),
             Err(FetchError::Decode(_))
         ));
+    }
+
+    /// A preview that halves to cover its tile is decoded DCT-scaled to
+    /// the smallest 1/2^k size that still covers it; one that doesn't is
+    /// decoded whole. The colour survives either way.
+    #[test]
+    fn a_preview_decodes_at_about_its_tiles_size() {
+        let rgb = jpeg(160, 120, jpeg_encoder::ColorType::Rgb, &[200, 100, 50]);
+        for (t, want) in [
+            (tile(160, 120), (160, 120)),
+            (tile(81, 61), (160, 120)),
+            (tile(80, 60), (80, 60)),
+            (tile(40, 20), (40, 30)),
+            (tile(30, 30), (40, 30)),
+            (tile(1, 1), (20, 15)),
+        ] {
+            let (w, h, rgba) = decode_preview(&rgb, t).unwrap();
+            assert_eq!((w, h), want, "into {}x{}", t.w, t.h);
+            let mid = &rgba[(4 * (w * (h / 2) + w / 2)) as usize..][..4];
+            assert!(
+                mid.iter()
+                    .zip([200u8, 100, 50, 255])
+                    .all(|(&a, b)| a.abs_diff(b) <= 3),
+                "{mid:?} into {}x{}",
+                t.w,
+                t.h
+            );
+        }
     }
 }

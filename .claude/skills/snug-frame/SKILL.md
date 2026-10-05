@@ -116,13 +116,17 @@ frame.
 
 What the commands take care of, and why:
 
-- **`install -r` doesn't kill the running process here.** The old pid
-  can keep logging for minutes, and `am start` only brings the old task
-  to the front. `deploy` force-stops and starts, then waits for a
-  process other than the old one to log `EGL + pipeline + painter
-  ready`. When Raam is home the system relaunches it within seconds of
-  a force-stop, so the pid can change twice; the last one is the one
-  proved. To read the log yourself: `$S pid`, then `$S log`. The ring
+- **Raam is stopped at most once, never while it starts.** `install -r`
+  sometimes kills the old process itself and sometimes leaves it
+  running, and when Raam is home the system relaunches it about 2 s
+  after any stop. A second kill in that window, of a process still
+  starting or holding a decoder, has wedged mediaserver until a reboot,
+  and the next Raam then hangs before its pipeline. So `deploy` checks
+  mediaserver answers first, force-stops only an old process that
+  outlived the install, then starts and waits for a process other than
+  the old one to log `EGL + pipeline + painter ready`. If none does, it
+  says whether mediaserver is wedged (then `$S reboot`: it isn't the
+  build). To read the log yourself: `$S pid`, then `$S log`. The ring
   holds only a few minutes.
 - **A fresh install grants storage before the first launch**, so the
   curation import (which reads `/sdcard` and runs only while the

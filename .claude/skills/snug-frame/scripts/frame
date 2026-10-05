@@ -120,13 +120,72 @@ await_raam() {
         fi
         sleep 2
     done
-    die "no new Raam process got its pipeline up in 90 s (old pid ${old:-none}); see frame log"
+    pid=$(raam_pid)
+    if [ -n "$pid" ]; then
+        echo "   last lines of pid $pid:" >&2
+        pid_log "$pid" | tail -3 | sed 's/^/   /' >&2
+    fi
+    if ! media_ok; then
+        die "no new Raam process got its pipeline up in 90 s: mediaserver is wedged (an earlier kill of Raam mid-decode or mid-startup); it isn't the build: frame reboot, and it comes up"
+    fi
+    die "no new Raam process got its pipeline up in 90 s (old pid ${old:-none}); mediaserver answers, so look at the frame log"
 }
 
-restart_raam() {
-    local old
-    old=$(raam_pid)
-    "${A[@]}" shell am force-stop "$PKG"
+# Is mediaserver answering? Killing Raam while it holds a decoder, or
+# while it is starting up, has left mediaserver's audio or video side
+# stuck until a reboot, and a Raam started then hangs before its
+# pipeline (in AudioSystem::getOutputLatency). AOSP's audio dumps print
+# "may be deadlocked" when they can't take their lock; a dump that
+# doesn't return in 10 s counts as stuck too.
+media_ok() {
+    local svc out pid i
+    for svc in media.audio_policy media.audio_flinger; do
+        out=$(mktemp)
+        "${A[@]}" shell dumpsys "$svc" >"$out" 2>&1 &
+        pid=$!
+        for i in $(seq 1 10); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null
+            rm -f "$out"
+            echo "   $svc: no answer in 10 s" >&2
+            return 1
+        fi
+        if grep -qi 'deadlocked' "$out"; then
+            rm -f "$out"
+            echo "   $svc: says it may be deadlocked" >&2
+            return 1
+        fi
+        rm -f "$out"
+    done
+    if "${A[@]}" logcat -d | grep -q 'failed to enter Idle state'; then
+        echo "   the log has a decoder that failed to enter Idle (a wedged OMX node)" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Starts the new build with at most one kill, and never of a process
+# that is still starting. install -r sometimes kills the old process
+# itself (seen 2026-10-05) and sometimes leaves it running; when Raam is
+# home the system relaunches it about 2 s after any stop. The old way,
+# install then force-stop, could kill that relaunched process during
+# its startup, a second kill in seconds, and that wedged mediaserver.
+start_new_build() {
+    local old=$1 i
+    for i in $(seq 1 5); do
+        [ "$(raam_pid)" = "$old" ] || break
+        sleep 1
+    done
+    if [ -n "$old" ] && [ "$(raam_pid)" = "$old" ]; then
+        step "stop the old build (pid $old, still running after install)"
+        "${A[@]}" shell am force-stop "$PKG"
+    else
+        ok "install -r stopped the old build itself: no second stop"
+    fi
+    # A start only brings a running Raam to the front; it never kills.
     "${A[@]}" shell am start -n "$PKG/$ACT" >/dev/null
     await_raam "$old"
 }
@@ -315,12 +374,14 @@ build)
     ;;
 deploy)
     installed || die "Raam isn't installed; use frame install"
+    step "mediaserver answers"
+    media_ok || die "mediaserver is wedged before the deploy: frame reboot first, or the new build will hang at startup and look broken"
+    ok "mediaserver answers"
     build
+    old=$(raam_pid)
     step "install -r"
     "${A[@]}" install -r "$APK" | tr -d '\r' | grep -qx Success || die "install -r"
-    # install -r doesn't kill the old process here: restart it, or the
-    # log keeps coming from the old build.
-    restart_raam
+    start_new_build "$old"
     ;;
 install)
     dir=${2:-}
@@ -371,8 +432,12 @@ EOF
     fi
     ;;
 backup)
+    old=$(raam_pid)
     backup "${2:-}"
-    restart_raam
+    # backup's copy script already stopped Raam once; a home Raam is
+    # relaunched by the system, so only start it (never a second stop).
+    "${A[@]}" shell am start -n "$PKG/$ACT" >/dev/null
+    await_raam "$old"
     ;;
 uninstall)
     arg=${2:-}

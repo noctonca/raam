@@ -2119,11 +2119,17 @@ impl<P: VideoPlayer> Pipeline<P> {
                 }
             }
         }
+        // Flushed, not finished: every source here is the Pipeline's own
+        // texture, which GL keeps in order without the CPU waiting. Waiting
+        // also waited for the frames in flight and the compositor's work on
+        // the same GPU, about 30 ms a tile on the frame (raam#105). (A
+        // clip's compose does finish: its source's buffer goes with the
+        // probe player.)
         // SAFETY: a Pipeline lives on the render thread with its context
         // current (gl.rs # Safety).
         unsafe {
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
-            glFinish();
+            glFlush();
         }
     }
 

@@ -77,6 +77,10 @@ cutting instead` and `plan N dropped: … next plan in 5s`, and Raam
 stays up. A clip already playing plays through. Clear it with
 `setprop debug.video.fail ""`: plans compose again and transitions
 come back. Seeing recovery after the clear is the point of the test.
+Then check what the run left behind: Settings → Videos should still
+show every clip ready to play. A decoder fault backs clips off but
+never marks them unplayable (#121); before that fix, `probe` marked
+every clip it touched.
 
 ## Editing raam.db
 

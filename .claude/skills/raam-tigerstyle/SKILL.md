@@ -52,6 +52,17 @@ after both (see its precedence note).
   `source.rs:shrink_to_cover` (empty tile) and
   `slideshow.rs:upload_size` (RGBA length). A layout fact is a
   `const _: () = assert!(..)`, as at the top of `painter.rs`.
+- **A call into the OS or a driver that can block for good** (a
+  MediaCodec stop or release, an OpenSL ES destroy, a binder call into
+  mediaserver) can't be bounded from our side, so make it easy to
+  diagnose instead:
+  - log before the call and after it, with its time;
+  - log its error rather than `let _ =` it;
+  - run it on a named thread.
+
+  A hang then ends on the line that names the call it is stuck in, and
+  `debuggerd -b` names the thread. Copy `release_video_decoder` in
+  `hosts/android/src/player.rs` (#122).
 - **A value that leaks or stalls if dropped** gets
   `#[must_use = "<what breaks>"]`. See `video.rs`: "stop() it: a
   dropped probe leaks its decoder, and no clip opens again". A
@@ -76,7 +87,9 @@ after both (see its precedence note).
 
 Before pushing, run the four clippy runs CI does (below),
 `cargo test --workspace`, and the general skill's `scripts/audit.sh`
-on the files you touched, if you have it.
+on the files you touched, if you have it. Judge each run by its exit
+status, never by the last lines of piped output: `cargo clippy … |
+tail` exits 0 even when clippy failed.
 
 ## Enforcement map
 
@@ -133,9 +146,12 @@ PR of its own.
    `transitions.rs` and `egl.rs` (the GL module's were given reasons
    in #117).
 8. **Unnamed threads.** The fetch, library, writer and weather workers
-   and the Android player threads are started with `thread::spawn`.
-   The panic hook therefore logs "panic on thread ?". Only `wifi.rs`
-   uses `thread::Builder` with a name.
+   are started with `thread::spawn`, so the panic hook logs "panic on
+   thread ?" for them, and on Android they show as `android_main`. The
+   Android player's threads are named (`spawn_named` in `player.rs`,
+   #122), as are `wifi.rs`'s. On the frame, read thread names from
+   `/proc/<pid>/task/*/comm`: toolbox `ps -t` splits a name at its
+   space.
 
 ## Reviewing: the order that has paid off here
 
@@ -149,7 +165,13 @@ real bugs.
    - #38: a failed DB read made the sweep delete cache files and
      write a short export;
    - #28: a failed DELETE still unlinked the files;
-   - #95: every sync error showed as "offline".
+   - #95: every sync error showed as "offline";
+   - #121: one decoder error kind covered "the clip can't be decoded"
+     and "the decoder broke", and it marked clips unplayable and deleted
+     their files. So a busy or out-of-memory VPU dropped good clips for
+     good, and `debug.video.fail=probe` did the same to every clip it
+     probed. Ask what each error kind does that can't be undone, and
+     whether the device can cause it.
 2. **Unbounded anything:**
    - #39: clip downloads had no byte limit, and album paging had no
      page cap;
@@ -173,6 +195,8 @@ real bugs.
    #113: `uniform_loc`'s "once per program, at startup" was broken by a
    per-frame call in crosswarp, which grew the wasm uniform table
    without bound. #116: "freed with `destroy`" became a drop guard.
+   #122: the one-decoder-at-a-time count went up on the decode thread,
+   a few ms after `open` returned; it is now taken in `open`.
 
 How to run it:
 

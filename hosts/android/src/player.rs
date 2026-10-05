@@ -27,7 +27,9 @@ use android_activity::AndroidAppWaker;
 use jni::{JNIEnv, JavaVM};
 use ndk::media::media_codec::{
     DequeuedInputBufferResult, DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection,
+    OutputBuffer,
 };
+use ndk::media::media_format::MediaFormat;
 use ndk::native_window::NativeWindow;
 use raam_core::clock;
 use raam_core::gl::*;
@@ -704,6 +706,60 @@ const IDENTITY4: [f32; 16] = [
 
 // ---- the decode threads ----------------------------------------------------
 
+/// What `feed_input` did.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fed {
+    /// A sample went in.
+    Sample,
+    /// The extractor had none left: end-of-stream went in.
+    EndOfStream,
+    /// No input buffer was free within `CODEC_DEQUEUE_WAIT`.
+    Nothing,
+}
+
+/// Hands the codec the extractor's next sample, or end-of-stream once it
+/// has none, waiting up to `CODEC_DEQUEUE_WAIT` for an input buffer.
+fn feed_input(codec: &MediaCodec, ex: &Extractor) -> Result<Fed, String> {
+    let mut input = match codec.dequeue_input_buffer(CODEC_DEQUEUE_WAIT) {
+        Ok(DequeuedInputBufferResult::Buffer(input)) => input,
+        Ok(DequeuedInputBufferResult::TryAgainLater) => return Ok(Fed::Nothing),
+        Err(e) => return Err(format!("dequeue input: {e:?}")),
+    };
+    // Negative: the extractor has no sample left.
+    let Ok(len) = usize::try_from(ex.read_sample_data(input.buffer_mut())) else {
+        codec
+            .queue_input_buffer(
+                input,
+                0,
+                0,
+                0,
+                ndk_sys::AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM,
+            )
+            .map_err(|e| format!("queue EOS: {e:?}"))?;
+        return Ok(Fed::EndOfStream);
+    };
+    // A sample before the start (or none) is stamped 0.
+    let pts = u64::try_from(ex.sample_time_us()).unwrap_or(0);
+    codec
+        .queue_input_buffer(input, 0, len, pts, 0)
+        .map_err(|e| format!("queue input: {e:?}"))?;
+    ex.advance();
+    Ok(Fed::Sample)
+}
+
+/// An output buffer carries the end-of-stream flag.
+fn is_eos(flags: u32) -> bool {
+    flags & ndk_sys::AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM != 0
+}
+
+/// Whether a decode loop goes on after a step.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    Go,
+    /// The player was stopped: leave the loop.
+    Stop,
+}
+
 /// `slot` counts the decoder from `Player::open` on, and is dropped only
 /// after the codec is released.
 fn video_thread(
@@ -727,252 +783,356 @@ fn video_thread(
     // mediaserver that can't make one now.
     let codec = MediaCodec::from_decoder_type(&mime)
         .ok_or_else(|| PlayerError::Decoder(format!("no decoder for {mime}")))?;
-
-    let mut input_eos = false;
-    let mut seq: i64 = 0;
-    let mut first_pts: Option<i64> = None;
-    let mut last_rel: i64 = 0;
-    let mut frame_us = DEFAULT_FRAME_US;
-    let mut next_drift_log = clock::now();
-    let mut last_output = clock::now();
-    let mut queued_in = 0u64;
-    // Samples fed and frames out in this pass: `OMX.rk.video_decoder.avc`
-    // doesn't always send an end-of-stream output buffer (seen on two of
-    // the first four clips: every frame came out, then nothing), so the
-    // pass also ends when every sample fed has come out as a frame.
-    let mut in_pass = 0u64;
-    let mut out_pass = 0u64;
-    let mut at_end = false;
-    let result = (|| -> Result<(), String> {
-        codec
-            .configure(&format, Some(&window), MediaCodecDirection::Decoder)
-            .map_err(|e| format!("configure: {e:?}"))?;
-        codec.start().map_err(|e| format!("start: {e:?}"))?;
-        let configured = clock::elapsed(t0);
-        // Test-only: `debug.video.fail=probe|live|hang` fails the probe or
-        // the live decoder at once; `hang` fails the live one and holds its
-        // release 15 s, as a wedged stop does.
-        let fail = raam_core::switches::fail();
-        use raam_core::switches::Fail;
-        if (fail == Fail::Probe && sh.probe)
-            || ((fail == Fail::Live || fail == Fail::Hang) && !sh.probe)
-        {
-            return Err(format!("test failure (debug.video.fail={fail:?})"));
-        }
-        loop {
-            if sh.stopped() {
-                return Ok(());
-            }
-            // Seen once on the frame (a 60 fps clip, while two 17-27 MB
-            // downloads were being probed): the decoder simply stopped
-            // producing. A stall ends the clip, rather than the slideshow
-            // freezing on it.
-            let running = sh.ctl.lock().unwrap().clock_running();
-            if !running {
-                last_output = clock::now();
-            }
-            if !input_eos
-                && clock::elapsed(last_output) > DECODER_STALL
-                && sh.phase() == DecoderPhase::Playing
-            {
-                return Err(format!(
-                    "decoder stalled: no output for {:.1}s (input eos {input_eos}, {queued_in} samples in, {} rendered, {} dropped, last stamp {})",
-                    clock::elapsed(last_output).as_secs_f64(),
-                    sh.rendered.load(Ordering::Relaxed),
-                    sh.dropped.load(Ordering::Relaxed),
-                    sh.last_stamp.load(Ordering::Relaxed)
-                ));
-            }
-            if !input_eos {
-                match codec.dequeue_input_buffer(CODEC_DEQUEUE_WAIT) {
-                    Ok(DequeuedInputBufferResult::Buffer(mut input)) => {
-                        // Negative: the extractor has no sample left.
-                        match usize::try_from(ex.read_sample_data(input.buffer_mut())) {
-                            Err(_) => {
-                                codec
-                                    .queue_input_buffer(
-                                        input,
-                                        0,
-                                        0,
-                                        0,
-                                        ndk_sys::AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM,
-                                    )
-                                    .map_err(|e| format!("queue EOS: {e:?}"))?;
-                                input_eos = true;
-                            }
-                            Ok(len) => {
-                                // A sample before the start (or none) is stamped 0.
-                                let pts = u64::try_from(ex.sample_time_us()).unwrap_or(0);
-                                codec
-                                    .queue_input_buffer(input, 0, len, pts, 0)
-                                    .map_err(|e| format!("queue input: {e:?}"))?;
-                                ex.advance();
-                                queued_in += 1;
-                                in_pass += 1;
-                            }
-                        }
-                    }
-                    Ok(DequeuedInputBufferResult::TryAgainLater) => {}
-                    Err(e) => return Err(format!("dequeue input: {e:?}")),
-                }
-            }
-            match codec.dequeue_output_buffer(CODEC_DEQUEUE_WAIT) {
-                Ok(DequeuedOutputBufferInfoResult::Buffer(out)) => {
-                    last_output = clock::now();
-                    let info = *out.info();
-                    let eos = info.flags() & (ndk_sys::AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) != 0;
-                    let pts = info.presentation_time_us();
-                    if eos && info.size() == 0 {
-                        let _ = codec.release_output_buffer(out, false);
-                        at_end = true;
-                    } else {
-                        out_pass += 1;
-                        let first = *first_pts.get_or_insert(pts);
-                        let rel = pts - first;
-                        if rel > last_rel {
-                            frame_us = (rel - last_rel).clamp(FRAME_US_MIN, FRAME_US_MAX);
-                        }
-                        last_rel = rel;
-                        let media = sh.loop_base_us.load(Ordering::Relaxed) + rel;
-                        let phase = sh.phase();
-                        if phase == DecoderPhase::Starting {
-                            seq += 1;
-                            let stamp = seq * 1000;
-                            codec
-                                .release_output_buffer_at_time(out, stamp)
-                                .map_err(|e| format!("render: {e:?}"))?;
-                            sh.first_stamp.store(stamp, Ordering::Release);
-                            sh.last_stamp.store(stamp, Ordering::Release);
-                            sh.rendered.fetch_add(1, Ordering::Relaxed);
-                            log::info!(
-                                "{}: frame 0 rendered {:.0} ms after open (decoder configured in {configured:?})",
-                                sh.label,
-                                clock::elapsed(t0).as_secs_f64() * 1000.0
-                            );
-                            sh.set_phase(DecoderPhase::FirstFrame);
-                            // Hold frame 0 until the slideshow plays it.
-                            {
-                                let mut ctl = sh.ctl.lock().unwrap();
-                                while !ctl.play && !ctl.stop {
-                                    ctl = sh.cond.wait_timeout(ctl, PLAYER_POLL).unwrap().0;
-                                }
-                                if ctl.stop {
-                                    return Ok(());
-                                }
-                            }
-                            // However long frame 0 was held (audio pre-roll,
-                            // the window hidden), the stall watch starts now.
-                            last_output = clock::now();
-                            sh.set_phase(DecoderPhase::Playing);
-                        } else {
-                            if !sh.wait_until(media) {
-                                let _ = codec.release_output_buffer(out, false);
-                                return Ok(());
-                            }
-                            // Waiting out a pause (the menu) isn't a stall.
-                            last_output = clock::now();
-                            let late = {
-                                let ctl = sh.ctl.lock().unwrap();
-                                sh.media_now_us(&ctl) - media
-                            };
-                            if late > DROP_LATE_US && !eos {
-                                let _ = codec.release_output_buffer(out, false);
-                                sh.dropped.fetch_add(1, Ordering::Relaxed);
-                            } else {
-                                seq += 1;
-                                let stamp = seq * 1000;
-                                codec
-                                    .release_output_buffer_at_time(out, stamp)
-                                    .map_err(|e| format!("render: {e:?}"))?;
-                                sh.last_stamp.store(stamp, Ordering::Release);
-                                sh.rendered.fetch_add(1, Ordering::Relaxed);
-                            }
-                            sh.position_us.store(media, Ordering::Relaxed);
-                            let audio = sh.audio_ms.load(Ordering::Relaxed);
-                            if audio >= 0 {
-                                let drift = audio - sh.latency_us / 1000 - media / 1000;
-                                sh.max_drift_ms.fetch_max(drift.abs(), Ordering::Relaxed);
-                                if next_drift_log <= clock::now() {
-                                    log::info!(
-                                        "{}: A/V at {:.2}s: audio {:+} ms against the picture (late frames dropped so far: {})",
-                                        sh.label,
-                                        media as f64 / 1e6,
-                                        drift,
-                                        sh.dropped.load(Ordering::Relaxed)
-                                    );
-                                    next_drift_log = clock::now() + DRIFT_LOG_EVERY;
-                                }
-                            }
-                        }
-                        if eos {
-                            at_end = true;
-                        }
-                    }
-                }
-                Ok(DequeuedOutputBufferInfoResult::OutputFormatChanged) => {
-                    log::info!("{}: output format {:?}", sh.label, codec.output_format());
-                }
-                Ok(DequeuedOutputBufferInfoResult::OutputBuffersChanged) => {}
-                Ok(DequeuedOutputBufferInfoResult::TryAgainLater) => {}
-                Err(e) => return Err(format!("dequeue output: {e:?}")),
-            }
-            if !at_end && input_eos && sh.phase() == DecoderPhase::Playing {
-                let all_out = out_pass >= in_pass;
-                let quiet = clock::elapsed(last_output) > END_OF_PASS_QUIET;
-                if all_out || quiet {
-                    log::info!(
-                        "{}: end of pass without an EOS buffer from the decoder ({out_pass} of {in_pass} frames out{})",
-                        sh.label,
-                        if all_out {
-                            ""
-                        } else {
-                            ", then 600 ms of nothing"
-                        }
-                    );
-                    at_end = true;
-                }
-            }
-            if at_end {
-                at_end = false;
-                if sh.ctl.lock().unwrap().looping {
-                    ex.seek_to(0)?;
-                    codec.flush().map_err(|e| format!("flush: {e:?}"))?;
-                    input_eos = false;
-                    first_pts = None;
-                    in_pass = 0;
-                    out_pass = 0;
-                    last_output = clock::now();
-                    sh.loop_base_us
-                        .fetch_add(last_rel + frame_us, Ordering::Relaxed);
-                    last_rel = 0;
-                    let n = sh.loops.fetch_add(1, Ordering::Relaxed) + 1;
-                    log::info!(
-                        "{}: loop {n} starts at {:.2}s",
-                        sh.label,
-                        sh.loop_base_us.load(Ordering::Relaxed) as f64 / 1e6
-                    );
-                    continue;
-                }
-                sh.set_phase(DecoderPhase::Ended);
-                // Keep the codec until the slideshow has composed the last
-                // frame: stopping it disconnects the surface, which drops
-                // any frame not yet latched.
-                let mut ctl = sh.ctl.lock().unwrap();
-                while !ctl.stop {
-                    ctl = sh.cond.wait_timeout(ctl, PLAYER_POLL).unwrap().0;
-                }
-                return Ok(());
-            }
-        }
-    })();
     // Failed is reported before the codec is stopped: after an OMX error
     // (seen: ion out of memory, then OMX.rk ERROR 0x80001000) the stop can
     // take seconds or never return, and the slideshow must not wait on it.
-    if let Err(e) = result {
+    if let Err(e) = decode_video(&codec, &ex, &format, &window, sh, t0) {
         sh.fail(PlayerError::Decoder(e));
     }
-    // A teardown that never finishes (raam#110) is found by its last log
-    // line: each call into the decoder that can block is announced first.
+    release_video_decoder(codec, window, slot, sh);
+    Ok(())
+}
+
+/// Configures and starts the codec, then decodes until the player stops:
+/// frame 0 held for `play`, then each frame on the media clock, looping or
+/// holding the last frame at the end.
+fn decode_video(
+    codec: &MediaCodec,
+    ex: &Extractor,
+    format: &MediaFormat,
+    window: &NativeWindow,
+    sh: &Shared,
+    t0: Duration,
+) -> Result<(), String> {
+    codec
+        .configure(format, Some(window), MediaCodecDirection::Decoder)
+        .map_err(|e| format!("configure: {e:?}"))?;
+    codec.start().map_err(|e| format!("start: {e:?}"))?;
+    let mut pass = VideoPass::new(t0);
+    // Test-only: `debug.video.fail=probe|live|hang` fails the probe or the
+    // live decoder at once; `hang` fails the live one and holds its release
+    // 15 s, as a wedged stop does.
+    let fail = raam_core::switches::fail();
+    use raam_core::switches::Fail;
+    if (fail == Fail::Probe && sh.probe)
+        || ((fail == Fail::Live || fail == Fail::Hang) && !sh.probe)
+    {
+        return Err(format!("test failure (debug.video.fail={fail:?})"));
+    }
+    loop {
+        if sh.stopped() {
+            return Ok(());
+        }
+        pass.watch_stall(sh)?;
+        if !pass.input_eos {
+            match feed_input(codec, ex)? {
+                Fed::Sample => {
+                    pass.queued_in += 1;
+                    pass.in_pass += 1;
+                }
+                Fed::EndOfStream => pass.input_eos = true,
+                Fed::Nothing => {}
+            }
+        }
+        match codec.dequeue_output_buffer(CODEC_DEQUEUE_WAIT) {
+            Ok(DequeuedOutputBufferInfoResult::Buffer(out)) => {
+                if pass.on_output(codec, out, sh)? == Flow::Stop {
+                    return Ok(());
+                }
+            }
+            Ok(DequeuedOutputBufferInfoResult::OutputFormatChanged) => {
+                log::info!("{}: output format {:?}", sh.label, codec.output_format());
+            }
+            Ok(
+                DequeuedOutputBufferInfoResult::OutputBuffersChanged
+                | DequeuedOutputBufferInfoResult::TryAgainLater,
+            ) => {}
+            Err(e) => return Err(format!("dequeue output: {e:?}")),
+        }
+        pass.watch_end_without_eos(sh);
+        if pass.at_end {
+            pass.at_end = false;
+            if sh.ctl.lock().unwrap().looping {
+                pass.next_loop(codec, ex, sh)?;
+                continue;
+            }
+            hold_last_frame(sh);
+            return Ok(());
+        }
+    }
+}
+
+/// One clip's video decode, across its passes (loops).
+struct VideoPass {
+    /// When the player was opened, and how long configure and start took.
+    t0: Duration,
+    configured: Duration,
+    input_eos: bool,
+    /// The last frame's sequence number: its stamp is this × 1000 ns.
+    seq: i64,
+    /// This pass's first presentation time, and the latest relative to it.
+    first_pts: Option<i64>,
+    last_rel: i64,
+    /// The latest frame's duration, for where the next pass starts.
+    frame_us: i64,
+    next_drift_log: Duration,
+    /// The stall watch: the last output, or the last time the clock didn't
+    /// run.
+    last_output: Duration,
+    queued_in: u64,
+    /// Samples fed and frames out in this pass: `OMX.rk.video_decoder.avc`
+    /// doesn't always send an end-of-stream output buffer (seen on two of
+    /// the first four clips: every frame came out, then nothing), so the
+    /// pass also ends when every sample fed has come out as a frame.
+    in_pass: u64,
+    out_pass: u64,
+    at_end: bool,
+}
+
+impl VideoPass {
+    fn new(t0: Duration) -> Self {
+        Self {
+            t0,
+            configured: clock::elapsed(t0),
+            input_eos: false,
+            seq: 0,
+            first_pts: None,
+            last_rel: 0,
+            frame_us: DEFAULT_FRAME_US,
+            next_drift_log: clock::now(),
+            last_output: clock::now(),
+            queued_in: 0,
+            in_pass: 0,
+            out_pass: 0,
+            at_end: false,
+        }
+    }
+
+    fn next_stamp(&mut self) -> i64 {
+        self.seq += 1;
+        self.seq * 1000
+    }
+
+    /// Seen once on the frame (a 60 fps clip, while two 17-27 MB downloads
+    /// were being probed): the decoder simply stopped producing. A stall
+    /// ends the clip, rather than the slideshow freezing on it.
+    fn watch_stall(&mut self, sh: &Shared) -> Result<(), String> {
+        if !sh.ctl.lock().unwrap().clock_running() {
+            self.last_output = clock::now();
+        }
+        if !self.input_eos
+            && clock::elapsed(self.last_output) > DECODER_STALL
+            && sh.phase() == DecoderPhase::Playing
+        {
+            return Err(format!(
+                "decoder stalled: no output for {:.1}s (input eos {}, {} samples in, {} rendered, {} dropped, last stamp {})",
+                clock::elapsed(self.last_output).as_secs_f64(),
+                self.input_eos,
+                self.queued_in,
+                sh.rendered.load(Ordering::Relaxed),
+                sh.dropped.load(Ordering::Relaxed),
+                sh.last_stamp.load(Ordering::Relaxed)
+            ));
+        }
+        Ok(())
+    }
+
+    /// A decoded buffer: frame 0 (held for `play`), a frame on the media
+    /// clock, or the end of the pass.
+    fn on_output(
+        &mut self,
+        codec: &MediaCodec,
+        out: OutputBuffer<'_>,
+        sh: &Shared,
+    ) -> Result<Flow, String> {
+        self.last_output = clock::now();
+        let info = *out.info();
+        let eos = is_eos(info.flags());
+        if eos && info.size() == 0 {
+            let _ = codec.release_output_buffer(out, false);
+            self.at_end = true;
+            return Ok(Flow::Go);
+        }
+        self.out_pass += 1;
+        let pts = info.presentation_time_us();
+        let first = *self.first_pts.get_or_insert(pts);
+        let rel = pts - first;
+        if rel > self.last_rel {
+            self.frame_us = (rel - self.last_rel).clamp(FRAME_US_MIN, FRAME_US_MAX);
+        }
+        self.last_rel = rel;
+        let flow = if sh.phase() == DecoderPhase::Starting {
+            self.first_frame(codec, out, sh)?
+        } else {
+            let media = sh.loop_base_us.load(Ordering::Relaxed) + rel;
+            self.timed_frame(codec, out, media, eos, sh)?
+        };
+        if eos {
+            self.at_end = true;
+        }
+        Ok(flow)
+    }
+
+    /// Renders frame 0 at once, then holds it until the slideshow plays it.
+    fn first_frame(
+        &mut self,
+        codec: &MediaCodec,
+        out: OutputBuffer<'_>,
+        sh: &Shared,
+    ) -> Result<Flow, String> {
+        let stamp = self.next_stamp();
+        codec
+            .release_output_buffer_at_time(out, stamp)
+            .map_err(|e| format!("render: {e:?}"))?;
+        sh.first_stamp.store(stamp, Ordering::Release);
+        sh.last_stamp.store(stamp, Ordering::Release);
+        sh.rendered.fetch_add(1, Ordering::Relaxed);
+        log::info!(
+            "{}: frame 0 rendered {:.0} ms after open (decoder configured in {:?})",
+            sh.label,
+            clock::elapsed(self.t0).as_secs_f64() * 1000.0,
+            self.configured
+        );
+        sh.set_phase(DecoderPhase::FirstFrame);
+        if !hold_for_play(sh) {
+            return Ok(Flow::Stop);
+        }
+        // However long frame 0 was held (audio pre-roll, the window
+        // hidden), the stall watch starts now.
+        self.last_output = clock::now();
+        sh.set_phase(DecoderPhase::Playing);
+        Ok(Flow::Go)
+    }
+
+    /// Waits for a frame's time on the media clock, then renders it, or
+    /// drops it if it is already too late (never the last one).
+    fn timed_frame(
+        &mut self,
+        codec: &MediaCodec,
+        out: OutputBuffer<'_>,
+        media: i64,
+        eos: bool,
+        sh: &Shared,
+    ) -> Result<Flow, String> {
+        if !sh.wait_until(media) {
+            let _ = codec.release_output_buffer(out, false);
+            return Ok(Flow::Stop);
+        }
+        // Waiting out a pause (the menu) isn't a stall.
+        self.last_output = clock::now();
+        let late = {
+            let ctl = sh.ctl.lock().unwrap();
+            sh.media_now_us(&ctl) - media
+        };
+        if late > DROP_LATE_US && !eos {
+            let _ = codec.release_output_buffer(out, false);
+            sh.dropped.fetch_add(1, Ordering::Relaxed);
+        } else {
+            let stamp = self.next_stamp();
+            codec
+                .release_output_buffer_at_time(out, stamp)
+                .map_err(|e| format!("render: {e:?}"))?;
+            sh.last_stamp.store(stamp, Ordering::Release);
+            sh.rendered.fetch_add(1, Ordering::Relaxed);
+        }
+        sh.position_us.store(media, Ordering::Relaxed);
+        self.log_drift(media, sh);
+        Ok(Flow::Go)
+    }
+
+    /// With sound: the largest A/V drift, and a log line every
+    /// `DRIFT_LOG_EVERY`.
+    fn log_drift(&mut self, media: i64, sh: &Shared) {
+        let audio = sh.audio_ms.load(Ordering::Relaxed);
+        if audio < 0 {
+            return;
+        }
+        let drift = audio - sh.latency_us / 1000 - media / 1000;
+        sh.max_drift_ms.fetch_max(drift.abs(), Ordering::Relaxed);
+        if self.next_drift_log <= clock::now() {
+            log::info!(
+                "{}: A/V at {:.2}s: audio {:+} ms against the picture (late frames dropped so far: {})",
+                sh.label,
+                media as f64 / 1e6,
+                drift,
+                sh.dropped.load(Ordering::Relaxed)
+            );
+            self.next_drift_log = clock::now() + DRIFT_LOG_EVERY;
+        }
+    }
+
+    /// Ends the pass without an EOS buffer once every sample fed has come
+    /// out, or nothing has for `END_OF_PASS_QUIET`.
+    fn watch_end_without_eos(&mut self, sh: &Shared) {
+        if self.at_end || !self.input_eos || sh.phase() != DecoderPhase::Playing {
+            return;
+        }
+        let all_out = self.out_pass >= self.in_pass;
+        if !all_out && clock::elapsed(self.last_output) <= END_OF_PASS_QUIET {
+            return;
+        }
+        log::info!(
+            "{}: end of pass without an EOS buffer from the decoder ({} of {} frames out{})",
+            sh.label,
+            self.out_pass,
+            self.in_pass,
+            if all_out {
+                String::new()
+            } else {
+                format!(", then {END_OF_PASS_QUIET:?} of nothing")
+            }
+        );
+        self.at_end = true;
+    }
+
+    /// Starts the next pass of a looping clip from the top, its media time
+    /// carrying on from the last frame's end.
+    fn next_loop(&mut self, codec: &MediaCodec, ex: &Extractor, sh: &Shared) -> Result<(), String> {
+        ex.seek_to(0)?;
+        codec.flush().map_err(|e| format!("flush: {e:?}"))?;
+        self.input_eos = false;
+        self.first_pts = None;
+        self.in_pass = 0;
+        self.out_pass = 0;
+        self.last_output = clock::now();
+        sh.loop_base_us
+            .fetch_add(self.last_rel + self.frame_us, Ordering::Relaxed);
+        self.last_rel = 0;
+        let n = sh.loops.fetch_add(1, Ordering::Relaxed) + 1;
+        log::info!(
+            "{}: loop {n} starts at {:.2}s",
+            sh.label,
+            sh.loop_base_us.load(Ordering::Relaxed) as f64 / 1e6
+        );
+        Ok(())
+    }
+}
+
+/// Holds frame 0 until the slideshow plays it. False = stopped first.
+fn hold_for_play(sh: &Shared) -> bool {
+    let mut ctl = sh.ctl.lock().unwrap();
+    while !ctl.play && !ctl.stop {
+        ctl = sh.cond.wait_timeout(ctl, PLAYER_POLL).unwrap().0;
+    }
+    !ctl.stop
+}
+
+/// Keeps the codec until the slideshow has composed the last frame:
+/// stopping it disconnects the surface, which drops any frame not yet
+/// latched.
+fn hold_last_frame(sh: &Shared) {
+    sh.set_phase(DecoderPhase::Ended);
+    let mut ctl = sh.ctl.lock().unwrap();
+    while !ctl.stop {
+        ctl = sh.cond.wait_timeout(ctl, PLAYER_POLL).unwrap().0;
+    }
+}
+
+/// Stops and releases the video codec, then the window, and only then
+/// uncounts the decoder. A teardown that never finishes (raam#110) is
+/// found by its last log line: each call into the decoder that can block
+/// is announced first.
+fn release_video_decoder(codec: MediaCodec, window: NativeWindow, slot: DecoderSlot, sh: &Shared) {
     let t = clock::now();
     if raam_core::switches::fail() == raam_core::switches::Fail::Hang && !sh.probe {
         std::thread::sleep(HANG_HOLD);
@@ -996,7 +1156,6 @@ fn video_thread(
     } else {
         log::info!("{}: decoder released in {released:?}", sh.label);
     }
-    Ok(())
 }
 
 /// A sample rate or channel count from a clip's audio format. Android
@@ -1006,10 +1165,9 @@ fn audio_param(v: i32, what: &str) -> Result<u32, String> {
     u32::try_from(v).map_err(|_| format!("audio {what} {v} is negative"))
 }
 
-fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
-    // THREAD_PRIORITY_AUDIO, so decoding the sound keeps up while a
-    // 1080p clip and the render loop load the CPU. Android lets an app
-    // raise its own threads' priority this far (RLIMIT_NICE).
+/// THREAD_PRIORITY_AUDIO for this thread, so decoding the sound keeps up
+/// while a 1080p clip and the render loop load the CPU.
+fn raise_audio_priority(sh: &Shared) {
     // SAFETY: gettid takes nothing and can't fail.
     let tid = libc::id_t::try_from(unsafe { libc::gettid() }).expect("a thread id is positive");
     // SAFETY: a plain syscall on this thread's own id; no pointers.
@@ -1019,6 +1177,10 @@ fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
         sh.label,
         if prio == 0 { "set" } else { "refused" }
     );
+}
+
+fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
+    raise_audio_priority(sh);
     let ex = Extractor::open(path)?;
     let (track, mut format) = ex.find_track("audio/").ok_or("no audio track")?;
     ex.select_track(track)?;
@@ -1028,11 +1190,11 @@ fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
     let mime = format.str("mime").unwrap_or("?").to_string();
     // No guess at either: a wrong rate plays at the wrong speed, and a
     // wrong channel count as noise. Without them the clip plays silent.
-    let mut rate = audio_param(
+    let rate = audio_param(
         format.i32("sample-rate").ok_or("no sample rate")?,
         "sample rate",
     )?;
-    let mut channels = audio_param(
+    let channels = audio_param(
         format.i32("channel-count").ok_or("no channel count")?,
         "channel count",
     )?;
@@ -1042,211 +1204,277 @@ fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
         .configure(&format, None, MediaCodecDirection::Decoder)
         .map_err(|e| format!("configure: {e:?}"))?;
     codec.start().map_err(|e| format!("start: {e:?}"))?;
-
-    let mut out: Option<AudioOut> = None;
-    let mut volume = f32::NAN;
-    let mut playing = false;
-    let mut input_eos = false;
-    let mut pending: Vec<u8> = Vec::with_capacity(PCM_BATCH_BYTES * 2);
-    let mut queued_batches = 0u32;
-    // Media time the player's position 0 stands for.
-    let offset_ms = start_us / 1000;
-    let mut skip_before_us = start_us;
-    let mut ended = false;
-    let mut align_from: Option<u32> = None;
-    let result = (|| -> Result<(), String> {
-        loop {
-            let (stop, running, looping) = {
-                let c = sh.ctl.lock().unwrap();
-                (c.stop, c.running(), c.looping)
-            };
-            if stop {
-                return Ok(());
-            }
-            if let Some(o) = out.as_ref() {
-                if running != playing {
-                    o.set_playing(running)?;
-                    playing = running;
-                }
-                let v = sh.volume();
-                if v != volume {
-                    o.set_volume(v)?;
-                    volume = v;
-                }
-                if let Some(ms) = o.position_ms() {
-                    let audio_ms = offset_ms + i64::from(ms);
-                    // GetPosition went back to 0 once a drained player
-                    // stopped: keep the furthest point reached.
-                    let before = sh.audio_ms.fetch_max(audio_ms, Ordering::Relaxed);
-                    // What is heard now, on the media clock.
-                    let heard_us = audio_ms * 1000 - sh.latency_us;
-                    let mut ctl = sh.ctl.lock().unwrap();
-                    if running && ctl.align {
-                        if align_from.is_none() {
-                            align_from = Some(ms);
-                        }
-                        if align_from.is_some_and(|from| ms > from) {
-                            // The first sample has left the mixer: the picture
-                            // starts (or resumes) here, exactly.
-                            let was = ctl.now_us();
-                            ctl.clock_acc_us = heard_us;
-                            ctl.clock_since = None;
-                            ctl.align = false;
-                            ctl.update_clock();
-                            drop(ctl);
-                            sh.cond.notify_all();
-                            *sh.av_offset_us.lock().unwrap() = Some(0.0);
-                            log::info!(
-                                "{}: sound started (position {} ms, {} ms output latency): picture clock {:.3}s -> {:.3}s",
-                                sh.label,
-                                audio_ms,
-                                sh.latency_us / 1000,
-                                was as f64 / 1e6,
-                                heard_us as f64 / 1e6
-                            );
-                            align_from = None;
-                        }
-                    } else if running && !ctl.align && !ended && audio_ms > before {
-                        // Long-run drift only (a starved mixer runs slow):
-                        // slow, starting from 0 at the alignment above.
-                        let off = (heard_us - ctl.now_us()) as f64;
-                        drop(ctl);
-                        let mut o = sh.av_offset_us.lock().unwrap();
-                        *o = Some(o.map_or(0.0, |prev| prev * 0.98 + off * 0.02));
-                    }
-                }
-            }
-            if ended {
-                // Drained: let what is queued play out (the video thread
-                // decides when the clip ends).
-                std::thread::sleep(PLAYER_POLL);
-                continue;
-            }
-            // A full batch waits for a free buffer before decoding more.
-            if pending.len() >= PCM_BATCH_BYTES {
-                let o = match out.as_mut() {
-                    Some(o) => o,
-                    None => {
-                        let o = AudioOut::new(rate, channels)?;
-                        o.set_volume(sh.volume())?;
-                        volume = sh.volume();
-                        log::info!(
-                            "{}: audio {mime} {rate} Hz x{channels}, OpenSL ES player ready",
-                            sh.label
-                        );
-                        out.insert(o)
-                    }
-                };
-                if o.enqueue(&pending, PLAYER_POLL)? {
-                    pending.clear();
-                    queued_batches += 1;
-                    if queued_batches == 2 {
-                        sh.audio_ready.store(true, Ordering::Release);
-                        sh.waker.wake();
-                    }
-                }
-                continue;
-            }
-            if !input_eos {
-                match codec.dequeue_input_buffer(CODEC_DEQUEUE_WAIT) {
-                    Ok(DequeuedInputBufferResult::Buffer(mut input)) => {
-                        // Negative: the extractor has no sample left.
-                        match usize::try_from(ex.read_sample_data(input.buffer_mut())) {
-                            Err(_) => {
-                                codec
-                                    .queue_input_buffer(
-                                        input,
-                                        0,
-                                        0,
-                                        0,
-                                        ndk_sys::AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM,
-                                    )
-                                    .map_err(|e| format!("queue EOS: {e:?}"))?;
-                                input_eos = true;
-                            }
-                            Ok(len) => {
-                                // A sample before the start (or none) is stamped 0.
-                                let pts = u64::try_from(ex.sample_time_us()).unwrap_or(0);
-                                codec
-                                    .queue_input_buffer(input, 0, len, pts, 0)
-                                    .map_err(|e| format!("queue input: {e:?}"))?;
-                                ex.advance();
-                            }
-                        }
-                    }
-                    Ok(DequeuedInputBufferResult::TryAgainLater) => {}
-                    Err(e) => return Err(format!("dequeue input: {e:?}")),
-                }
-            }
-            match codec.dequeue_output_buffer(CODEC_DEQUEUE_WAIT) {
-                Ok(DequeuedOutputBufferInfoResult::Buffer(output)) => {
-                    let info = *output.info();
-                    let eos = info.flags() & (ndk_sys::AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) != 0;
-                    // buffer() is the whole allocation; the PCM is
-                    // [offset, offset + size). A range outside it is a
-                    // broken decoder: the sound stops, the picture goes on.
-                    let raw = output.buffer();
-                    let pcm = usize::try_from(info.offset())
-                        .ok()
-                        .zip(usize::try_from(info.size()).ok())
-                        .and_then(|(off, sz)| raw.get(off..off.checked_add(sz)?))
-                        .ok_or_else(|| {
-                            format!(
-                                "audio buffer [{}, +{}) outside its {} bytes",
-                                info.offset(),
-                                info.size(),
-                                raw.len()
-                            )
-                        })?;
-                    if info.presentation_time_us() >= skip_before_us {
-                        pending.extend_from_slice(pcm);
-                    }
-                    let _ = codec.release_output_buffer(output, false);
-                    if eos {
-                        if looping {
-                            ex.seek_to(0)?;
-                            codec.flush().map_err(|e| format!("flush: {e:?}"))?;
-                            input_eos = false;
-                            skip_before_us = 0;
-                        } else {
-                            // Whatever is left, then nothing more.
-                            if !pending.is_empty() {
-                                if out.is_none() {
-                                    let o = AudioOut::new(rate, channels)?;
-                                    o.set_volume(sh.volume())?;
-                                    out = Some(o);
-                                }
-                                let o = out.as_mut().unwrap();
-                                while !o.enqueue(&pending, PLAYER_POLL)? {
-                                    if sh.stopped() {
-                                        return Ok(());
-                                    }
-                                }
-                                pending.clear();
-                            }
-                            sh.audio_ready.store(true, Ordering::Release);
-                            ended = true;
-                        }
-                    }
-                }
-                Ok(DequeuedOutputBufferInfoResult::OutputFormatChanged) => {
-                    let f = codec.output_format();
-                    if let Some(r) = f.i32("sample-rate") {
-                        rate = audio_param(r, "sample rate")?;
-                    }
-                    if let Some(c) = f.i32("channel-count") {
-                        channels = audio_param(c, "channel count")?;
-                    }
-                }
-                Ok(_) => {}
-                Err(e) => return Err(format!("dequeue output: {e:?}")),
-            }
-        }
-    })();
+    let mut pass = AudioPass::new(mime, rate, channels, start_us);
+    let result = decode_audio(&codec, &ex, &mut pass, sh);
     if let Err(e) = codec.stop() {
         log::warn!("{}: audio decoder stop: {e:?}", sh.label);
     }
+    // The codec first, then the OpenSL ES player in `pass`.
     drop(codec);
-    drop(out);
+    drop(pass);
     result
+}
+
+/// Decodes the sound into the OpenSL ES player until the player stops,
+/// keeping the picture's clock with what is heard.
+fn decode_audio(
+    codec: &MediaCodec,
+    ex: &Extractor,
+    pass: &mut AudioPass,
+    sh: &Shared,
+) -> Result<(), String> {
+    loop {
+        let (stop, running, looping) = {
+            let c = sh.ctl.lock().unwrap();
+            (c.stop, c.running(), c.looping)
+        };
+        if stop {
+            return Ok(());
+        }
+        pass.sync_output(running, sh)?;
+        if pass.ended {
+            // Drained: let what is queued play out (the video thread
+            // decides when the clip ends).
+            std::thread::sleep(PLAYER_POLL);
+            continue;
+        }
+        // A full batch waits for a free buffer before decoding more.
+        if pass.pending.len() >= PCM_BATCH_BYTES {
+            pass.queue_batch(sh)?;
+            continue;
+        }
+        if !pass.input_eos && feed_input(codec, ex)? == Fed::EndOfStream {
+            pass.input_eos = true;
+        }
+        match codec.dequeue_output_buffer(CODEC_DEQUEUE_WAIT) {
+            Ok(DequeuedOutputBufferInfoResult::Buffer(output)) => {
+                if pass.on_output(codec, ex, output, looping, sh)? == Flow::Stop {
+                    return Ok(());
+                }
+            }
+            Ok(DequeuedOutputBufferInfoResult::OutputFormatChanged) => {
+                pass.format_changed(&codec.output_format())?;
+            }
+            Ok(
+                DequeuedOutputBufferInfoResult::OutputBuffersChanged
+                | DequeuedOutputBufferInfoResult::TryAgainLater,
+            ) => {}
+            Err(e) => return Err(format!("dequeue output: {e:?}")),
+        }
+    }
+}
+
+/// One clip's sound decode.
+struct AudioPass {
+    mime: String,
+    rate: u32,
+    channels: u32,
+    /// Made with the first full batch.
+    out: Option<AudioOut>,
+    /// What the output was last set to.
+    volume: f32,
+    playing: bool,
+    input_eos: bool,
+    /// PCM not yet queued, up to a batch.
+    pending: Vec<u8>,
+    queued_batches: u32,
+    /// Media time the output's position 0 stands for.
+    offset_ms: i64,
+    /// Decoded PCM before this is the seek's run-up, not played.
+    skip_before_us: i64,
+    /// The sound is all queued (not looping).
+    ended: bool,
+    /// The output's position when aligning started: the picture's clock
+    /// starts once it moves past this.
+    align_from: Option<u32>,
+}
+
+impl AudioPass {
+    fn new(mime: String, rate: u32, channels: u32, start_us: i64) -> Self {
+        Self {
+            mime,
+            rate,
+            channels,
+            out: None,
+            volume: f32::NAN,
+            playing: false,
+            input_eos: false,
+            pending: Vec::with_capacity(PCM_BATCH_BYTES * 2),
+            queued_batches: 0,
+            offset_ms: start_us / 1000,
+            skip_before_us: start_us,
+            ended: false,
+            align_from: None,
+        }
+    }
+
+    /// The output, made on first use at the current volume.
+    fn output(&mut self, sh: &Shared) -> Result<&mut AudioOut, String> {
+        if self.out.is_none() {
+            let o = AudioOut::new(self.rate, self.channels)?;
+            self.volume = sh.volume();
+            o.set_volume(self.volume)?;
+            log::info!(
+                "{}: audio {} {} Hz x{}, OpenSL ES player ready",
+                sh.label,
+                self.mime,
+                self.rate,
+                self.channels
+            );
+            self.out = Some(o);
+        }
+        Ok(self.out.as_mut().expect("made just above"))
+    }
+
+    /// Brings the output in line with the player (playing, volume) and the
+    /// picture's clock in line with the output's position.
+    fn sync_output(&mut self, running: bool, sh: &Shared) -> Result<(), String> {
+        let Some(o) = self.out.as_ref() else {
+            return Ok(());
+        };
+        if running != self.playing {
+            o.set_playing(running)?;
+            self.playing = running;
+        }
+        let v = sh.volume();
+        if v != self.volume {
+            o.set_volume(v)?;
+            self.volume = v;
+        }
+        if let Some(ms) = o.position_ms() {
+            self.track_position(ms, running, sh);
+        }
+        Ok(())
+    }
+
+    /// The output has played `ms`: the picture's clock starts exactly where
+    /// the first sample is heard, then follows slow drift.
+    fn track_position(&mut self, ms: u32, running: bool, sh: &Shared) {
+        let audio_ms = self.offset_ms + i64::from(ms);
+        // GetPosition went back to 0 once a drained player stopped: keep
+        // the furthest point reached.
+        let before = sh.audio_ms.fetch_max(audio_ms, Ordering::Relaxed);
+        // What is heard now, on the media clock.
+        let heard_us = audio_ms * 1000 - sh.latency_us;
+        let mut ctl = sh.ctl.lock().unwrap();
+        if running && ctl.align {
+            let from = *self.align_from.get_or_insert(ms);
+            if ms > from {
+                // The first sample has left the mixer: the picture starts
+                // (or resumes) here, exactly.
+                let was = ctl.now_us();
+                ctl.clock_acc_us = heard_us;
+                ctl.clock_since = None;
+                ctl.align = false;
+                ctl.update_clock();
+                drop(ctl);
+                sh.cond.notify_all();
+                *sh.av_offset_us.lock().unwrap() = Some(0.0);
+                log::info!(
+                    "{}: sound started (position {} ms, {} ms output latency): picture clock {:.3}s -> {:.3}s",
+                    sh.label,
+                    audio_ms,
+                    sh.latency_us / 1000,
+                    was as f64 / 1e6,
+                    heard_us as f64 / 1e6
+                );
+                self.align_from = None;
+            }
+        } else if running && !ctl.align && !self.ended && audio_ms > before {
+            // Long-run drift only (a starved mixer runs slow): slow,
+            // starting from 0 at the alignment above.
+            let off = (heard_us - ctl.now_us()) as f64;
+            drop(ctl);
+            let mut o = sh.av_offset_us.lock().unwrap();
+            *o = Some(o.map_or(0.0, |prev| prev * 0.98 + off * 0.02));
+        }
+    }
+
+    /// Queues the pending batch if a buffer frees up within `PLAYER_POLL`.
+    /// Two queued batches are the pre-roll the live clip waits for.
+    fn queue_batch(&mut self, sh: &Shared) -> Result<(), String> {
+        let pending = std::mem::take(&mut self.pending);
+        let queued = self.output(sh)?.enqueue(&pending, PLAYER_POLL)?;
+        self.pending = pending;
+        if queued {
+            self.pending.clear();
+            self.queued_batches += 1;
+            if self.queued_batches == 2 {
+                sh.audio_ready.store(true, Ordering::Release);
+                sh.waker.wake();
+            }
+        }
+        Ok(())
+    }
+
+    /// A decoded PCM buffer: kept unless it is the seek's run-up; at the
+    /// end, back to the start (looping) or the rest queued.
+    fn on_output(
+        &mut self,
+        codec: &MediaCodec,
+        ex: &Extractor,
+        output: OutputBuffer<'_>,
+        looping: bool,
+        sh: &Shared,
+    ) -> Result<Flow, String> {
+        let info = *output.info();
+        // buffer() is the whole allocation; the PCM is [offset, offset +
+        // size). A range outside it is a broken decoder: the sound stops,
+        // the picture goes on.
+        let raw = output.buffer();
+        let pcm = usize::try_from(info.offset())
+            .ok()
+            .zip(usize::try_from(info.size()).ok())
+            .and_then(|(off, sz)| raw.get(off..off.checked_add(sz)?))
+            .ok_or_else(|| {
+                format!(
+                    "audio buffer [{}, +{}) outside its {} bytes",
+                    info.offset(),
+                    info.size(),
+                    raw.len()
+                )
+            })?;
+        if info.presentation_time_us() >= self.skip_before_us {
+            self.pending.extend_from_slice(pcm);
+        }
+        let _ = codec.release_output_buffer(output, false);
+        if !is_eos(info.flags()) {
+            return Ok(Flow::Go);
+        }
+        if looping {
+            ex.seek_to(0)?;
+            codec.flush().map_err(|e| format!("flush: {e:?}"))?;
+            self.input_eos = false;
+            self.skip_before_us = 0;
+            return Ok(Flow::Go);
+        }
+        self.queue_rest(sh)
+    }
+
+    /// The end of the sound: whatever is pending, then nothing more.
+    fn queue_rest(&mut self, sh: &Shared) -> Result<Flow, String> {
+        if !self.pending.is_empty() {
+            let pending = std::mem::take(&mut self.pending);
+            let o = self.output(sh)?;
+            while !o.enqueue(&pending, PLAYER_POLL)? {
+                if sh.stopped() {
+                    return Ok(Flow::Stop);
+                }
+            }
+        }
+        sh.audio_ready.store(true, Ordering::Release);
+        self.ended = true;
+        Ok(Flow::Go)
+    }
+
+    /// The decoder's PCM format, which can differ from the track's.
+    fn format_changed(&mut self, f: &MediaFormat) -> Result<(), String> {
+        if let Some(r) = f.i32("sample-rate") {
+            self.rate = audio_param(r, "sample rate")?;
+        }
+        if let Some(c) = f.i32("channel-count") {
+            self.channels = audio_param(c, "channel count")?;
+        }
+        Ok(())
+    }
 }

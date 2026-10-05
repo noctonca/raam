@@ -426,7 +426,7 @@ impl Preset {
                 };
                 animating = name != "still";
                 // SAFETY: the context `b` was made under, still current.
-                unsafe { b.draw(prog, t, w, h) };
+                unsafe { b.draw(prog, t) };
                 true
             }
         };

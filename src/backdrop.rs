@@ -1,5 +1,5 @@
 //! A stand-in for the slideshow under the preset host's menu pages (the
-//! live mode draws the real pipeline): the core's gl-transitions shaders
+//! live mode draws the real pipeline): the core's transitions
 //! between two generated full-screen textures. `--backdrop still` holds
 //! the first; a transition name loops the progress without pause, so
 //! every frame is a transition frame - the frame's heaviest case under
@@ -65,7 +65,7 @@ impl Backdrop {
 
     /// Draws transition `name` at the phase `t_s` seconds gives, into the
     /// bound framebuffer, with a slow Ken Burns-like zoom on both slides.
-    pub unsafe fn draw(&self, name: &str, t_s: f32, w: i32, h: i32) {
+    pub unsafe fn draw(&self, name: &str, t_s: f32) {
         let Some(p) = self.progs.iter().find(|p| p.name == name) else {
             return;
         };
@@ -75,16 +75,7 @@ impl Backdrop {
         // SAFETY: the caller's context is current (this fn's contract), the
         // one `self`'s buffers, textures and programs were made under.
         unsafe {
-            p.draw(
-                self.vbo,
-                self.ibo,
-                self.from,
-                self.to,
-                progress,
-                w as f32 / h as f32,
-                kb,
-                kb,
-            );
+            p.draw(self.vbo, self.ibo, self.from, self.to, progress, kb, kb);
             // The program's attribute slots aren't known here; clear them
             // all so the painter's arrays start clean (as the live host
             // does after the pipeline's draw).

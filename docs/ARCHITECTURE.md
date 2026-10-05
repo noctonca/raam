@@ -79,7 +79,10 @@ forever.
   (the vendored `egui_keyboard`, one copy, with its upstream LICENSE).
 - The slideshow pipeline: collage layout, slide composition (Fill/Fit,
   blurred background, `RenderTarget`), Ken Burns aimed at faces,
-  gl-transitions, the clock/weather overlay with its glyph atlas.
+  five gl-transitions effects redrawn for the Mali-400 (anything linear
+  in the screen position in the vertex shader, cube and swap as
+  geometry: the fragment shader is fp16 there), the clock/weather
+  overlay with its glyph atlas.
 - The video orchestration over the `VideoPlayer` seam: the probe that
   brings up a clip's first frame for its tile, the live clip's start,
   pause, loop and end, one decoder at a time, the decoder-failure
@@ -244,7 +247,7 @@ slideshow and clips running, as named limits in `raam-model::limits`:
 | App total (PSS + GPU + window buffers) | ≤ 80 MB steady | measured ~67 MB |
 | Mali peak | ≤ 64 MB | measured 63.5 MB peak |
 | Tile textures per plan | ≤ 12 MB, reserved up front | measured max 12.2 MB |
-| Transition scratch | 2 × screen-sized RT, allocated once | ~4 MB each at 1280×800 |
+| Transition scratch | 2 × screen-sized RT, made for a collage transition other than fade and freed when it ends | ~4 MB each at 1280×800 |
 
 "Allocate up front" is aimed squarely at the one observed failure mode:
 GPU allocation failing when a plan composes during a transition under

@@ -3,7 +3,7 @@
 //! `table`, so their tests run natively, and under Miri (CI's miri job),
 //! which can't run the linkage itself.
 
-use super::{GlSizei, from_gl_size, gl_sizei};
+use super::{GL_ALPHA, GL_RGBA, GL_UNSIGNED_BYTE, GlEnum, GlSizei, from_gl_size, gl_sizei};
 use std::ffi::{c_char, c_void};
 
 /// `len` bytes at `ptr`, or none for a null pointer.
@@ -19,6 +19,36 @@ pub(super) unsafe fn bytes<'a>(ptr: *const c_void, len: usize) -> Option<&'a [u8
         // contract; u8 has no alignment or validity requirement.
         Some(unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) })
     }
+}
+
+/// The bytes GL reads for a `width` x `height` upload in `format` and
+/// `type_`: the length a glTexImage2D/glTexSubImage2D pixel pointer is
+/// read for. Only the uploads the core makes are known: RGBA and ALPHA,
+/// one unsigned byte a channel, in rows needing no padding at GL's
+/// default unpack alignment of 4 (raam never changes it). Anything else
+/// would need its own size here, so it panics rather than reading a
+/// guess's worth of the caller's buffer.
+///
+/// # Panics
+/// On a type other than `GL_UNSIGNED_BYTE`, a format other than RGBA or
+/// ALPHA, a negative side, or rows GL would pad.
+pub(super) fn image_len(width: GlSizei, height: GlSizei, format: GlEnum, type_: GlEnum) -> usize {
+    assert_eq!(
+        type_, GL_UNSIGNED_BYTE,
+        "texture upload type 0x{type_:x}: only GL_UNSIGNED_BYTE is sized"
+    );
+    let bytes_per_texel = match format {
+        GL_RGBA => 4,
+        GL_ALPHA => 1,
+        _ => panic!("texture upload format 0x{format:x}: only RGBA and ALPHA are sized"),
+    };
+    let row: usize = from_gl_size::<_, usize>(width) * bytes_per_texel;
+    let rows: usize = from_gl_size(height);
+    assert!(
+        row.is_multiple_of(4) || rows <= 1,
+        "a {width}x{height} upload in 0x{format:x} has rows GL pads to 4 bytes"
+    );
+    row * rows
 }
 
 /// `count` 4x4 matrices at `value`, 16 floats each; none for a count of 0
@@ -69,6 +99,35 @@ mod tests {
         assert_eq!(got, Some(&data[..3]));
         // SAFETY: null is allowed.
         assert_eq!(unsafe { bytes(std::ptr::null(), 16) }, None);
+    }
+
+    #[test]
+    fn image_len_sizes_rgba_and_alpha() {
+        assert_eq!(image_len(3, 2, GL_RGBA, GL_UNSIGNED_BYTE), 24);
+        assert_eq!(image_len(8, 2, GL_ALPHA, GL_UNSIGNED_BYTE), 16);
+        // One row is never padded.
+        assert_eq!(image_len(3, 1, GL_ALPHA, GL_UNSIGNED_BYTE), 3);
+        assert_eq!(image_len(0, 0, GL_RGBA, GL_UNSIGNED_BYTE), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "only GL_UNSIGNED_BYTE")]
+    fn image_len_refuses_a_packed_type() {
+        // GL_UNSIGNED_SHORT_5_6_5: 2 bytes a texel, which a size from the
+        // format alone would read past.
+        let _ = image_len(4, 4, GL_RGBA, 0x8363);
+    }
+
+    #[test]
+    #[should_panic(expected = "only RGBA and ALPHA")]
+    fn image_len_refuses_an_unknown_format() {
+        let _ = image_len(4, 4, 0x1907, GL_UNSIGNED_BYTE); // GL_RGB
+    }
+
+    #[test]
+    #[should_panic(expected = "rows GL pads")]
+    fn image_len_refuses_padded_rows() {
+        let _ = image_len(3, 2, GL_ALPHA, GL_UNSIGNED_BYTE);
     }
 
     #[test]

@@ -536,6 +536,7 @@ pub fn sample_stats() -> Stats {
             },
         ],
         export_note: "exported to /sdcard/Pictures/frame-curation.json".into(),
+        settings_note: String::new(),
         albums: vec![
             album("a1", "Digital Frame", 227, true, false, 227),
             album("a2", "Lisbon", 186, true, false, 120),
@@ -1392,6 +1393,11 @@ fn draw_settings(ui: &mut Ui, st: &mut AppState) {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         let claimed = claim(ui.ctx(), st, Region::Content);
+                        if !st.library.settings_note.is_empty() {
+                            let note = st.library.settings_note.clone();
+                            kit::note(ui, Tone::Error, icons::ERROR, &note);
+                            ui.add_space(space::L);
+                        }
                         match (st.section, st.sub) {
                             (Section::Photos, Sub::Albums) => albums_page(ui, st),
                             (Section::Photos, Sub::Hidden) => hidden_page(ui, st),

@@ -383,16 +383,31 @@ pub fn set_immich_server(conn: &Connection, url: &str, key: &str) -> rusqlite::R
 
 /// Loads saved settings over the defaults in `s`. Returns the keys found,
 /// so callers can tell a saved value from a default.
-pub fn load_settings(conn: &Connection, s: &mut Settings) -> Vec<String> {
+///
+/// # Errors
+///
+/// If the rows or the sleep schedule can't be read; `s` is then left as
+/// it was. Never a partial load: every save writes all the settings, so
+/// one made after a short load would write defaults over the rest
+/// (`Library::refuse_settings_saves`). A row whose value isn't JSON is
+/// the row's own fault, and only that setting stays as it was.
+pub fn load_settings(conn: &Connection, s: &mut Settings) -> rusqlite::Result<Vec<String>> {
+    let read: Vec<(String, String)> = conn
+        .prepare("SELECT key, value FROM setting")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let sleep: Option<(u32, u32, bool)> = conn
+        .query_row(
+            "SELECT start_min, end_min, enabled FROM schedule WHERE kind = 'sleep' ORDER BY id LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
     let mut rows: HashMap<String, serde_json::Value> = HashMap::new();
-    if let Ok(mut stmt) = conn.prepare("SELECT key, value FROM setting")
-        && let Ok(iter) =
-            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-    {
-        for (k, v) in iter.flatten() {
-            if let Ok(v) = serde_json::from_str(&v) {
-                rows.insert(k, v);
-            }
+    for (k, v) in read {
+        match serde_json::from_str(&v) {
+            Ok(v) => drop(rows.insert(k, v)),
+            Err(e) => log::warn!("db: setting {k} isn't JSON, left as it was: {e}"),
         }
     }
     let str_of = |k: &str| rows.get(k).and_then(|v| v.as_str()).map(str::to_string);
@@ -480,17 +495,7 @@ pub fn load_settings(conn: &Connection, s: &mut Settings) -> Vec<String> {
     if let Some(v) = rows.get("video.volume").and_then(|v| v.as_f64()) {
         s.video_volume = num::to_f32(v).clamp(0.0, 1.0);
     }
-    if let Ok((start, end, enabled)) = conn.query_row(
-        "SELECT start_min, end_min, enabled FROM schedule WHERE kind = 'sleep' ORDER BY id LIMIT 1",
-        [],
-        |r| {
-            Ok((
-                r.get::<_, u32>(0)?,
-                r.get::<_, u32>(1)?,
-                r.get::<_, bool>(2)?,
-            ))
-        },
-    ) {
+    if let Some((start, end, enabled)) = sleep {
         // In range: the table's CHECKs hold both minutes to 0..=1439.
         s.sleep_min = start;
         s.wake_min = end;
@@ -498,7 +503,7 @@ pub fn load_settings(conn: &Connection, s: &mut Settings) -> Vec<String> {
     }
     s.server_url = source(conn, SourceKind::Immich).base_url;
     s.api_key = immich_key(conn);
-    rows.into_keys().collect()
+    Ok(rows.into_keys().collect())
 }
 
 pub fn save_settings(
@@ -1679,7 +1684,7 @@ mod tests {
         };
         let loaded = |conn: &Connection| -> (String, String) {
             let mut s = Settings::defaults("", "");
-            load_settings(conn, &mut s);
+            load_settings(conn, &mut s).unwrap();
             (s.server_url, s.api_key)
         };
         asset(&conn, "photo", "image", None);
@@ -1751,7 +1756,7 @@ mod tests {
         save_settings(&conn, &rows, OFF_1_TO_7).unwrap();
 
         let mut loaded = Settings::defaults("", "");
-        load_settings(&conn, &mut loaded);
+        load_settings(&conn, &mut loaded).unwrap();
         assert_eq!(raam_core::store::settings_rows(&loaded), rows);
         assert_eq!(
             Schedule {
@@ -1787,7 +1792,7 @@ mod tests {
             let rows = raam_core::store::settings_rows(s);
             save_settings(&conn, &rows, OFF_1_TO_7).unwrap();
             let mut loaded = Settings::defaults("", "");
-            load_settings(&conn, &mut loaded);
+            load_settings(&conn, &mut loaded).unwrap();
             assert_eq!(raam_core::store::settings_rows(&loaded), rows);
         }
     }
@@ -1818,7 +1823,7 @@ mod tests {
             )
             .unwrap();
             let mut loaded = Settings::defaults("", "");
-            load_settings(&conn, &mut loaded);
+            load_settings(&conn, &mut loaded).unwrap();
             assert_eq!((loaded.interval_secs, loaded.audio_delay_ms), want);
             // What the controller does with it, which panicked before.
             let _ = std::time::Duration::from_secs_f32(loaded.interval_secs);
@@ -1831,7 +1836,7 @@ mod tests {
         )
         .unwrap();
         let mut loaded = Settings::defaults("", "");
-        load_settings(&conn, &mut loaded);
+        load_settings(&conn, &mut loaded).unwrap();
         assert_eq!(loaded.cache_cap_mb, 4096);
     }
 
@@ -1883,7 +1888,7 @@ mod tests {
                     let rows: Vec<_> = NUMERIC_KEYS.into_iter().zip(values).collect();
                     save_settings(&conn, &rows, OFF_1_TO_7).unwrap();
                     let mut s = Settings::defaults("", "");
-                    load_settings(&conn, &mut s);
+                    load_settings(&conn, &mut s).unwrap();
                     let (lo, hi) = limits::INTERVAL_RANGE_SECS;
                     prop_assert!((lo..=hi).contains(&s.interval_secs), "{}", s.interval_secs);
                     let _ = std::time::Duration::from_secs_f32(s.interval_secs);
@@ -1974,7 +1979,7 @@ mod tests {
                 .run(&(any_settings_rows(), any_schedule()), |(rows, sleep)| {
                     save_settings(&conn, &rows, sleep).unwrap();
                     let mut loaded = Settings::defaults("", "");
-                    load_settings(&conn, &mut loaded);
+                    load_settings(&conn, &mut loaded).unwrap();
                     prop_assert_eq!(raam_core::store::settings_rows(&loaded), rows);
                     prop_assert_eq!(
                         Schedule {
@@ -2025,6 +2030,41 @@ mod tests {
         assert!(!paths[1].exists() && !paths[2].exists() && !stray.exists());
         assert_eq!(sweep(&conn, &[&dir]), (0, 0));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Settings that can't be read are an error that changes nothing: a
+    /// partial load would let the next save write defaults over the rest.
+    /// A row that isn't JSON is that row's fault alone.
+    #[test]
+    fn settings_that_cant_be_read_are_an_error_and_change_nothing() {
+        install_clock();
+        let db = open(Path::new(":memory:"), "").unwrap();
+        let conn = db.lock().unwrap();
+        let mut s = Settings::defaults("", "");
+        s.interval_secs = 30.0;
+        save_settings(&conn, &raam_core::store::settings_rows(&s), OFF_1_TO_7).unwrap();
+        conn.execute(
+            "UPDATE setting SET value = 'not json' WHERE key = 'slideshow.ken_burns'",
+            [],
+        )
+        .unwrap();
+        let mut loaded = Settings::defaults("", "");
+        let keys = load_settings(&conn, &mut loaded).unwrap();
+        assert_eq!(loaded.interval_secs, 30.0);
+        assert!(
+            !keys.iter().any(|k| k == "slideshow.ken_burns"),
+            "the bad row is skipped"
+        );
+
+        conn.execute_batch("ALTER TABLE setting RENAME TO unreadable;")
+            .unwrap();
+        let mut fresh = Settings::defaults("", "");
+        assert!(load_settings(&conn, &mut fresh).is_err());
+        assert_eq!(
+            fresh.interval_secs,
+            Settings::defaults("", "").interval_secs
+        );
+        assert_eq!(fresh.sleep_min, Settings::defaults("", "").sleep_min);
     }
 
     /// A file the sweep can't check (no permission, an I/O error) is

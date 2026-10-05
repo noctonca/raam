@@ -59,6 +59,18 @@ pub const MAX_EGUI_WAIT: Duration = Duration::from_secs(1);
 pub const UNDO_HIDE: Duration = Duration::from_secs(8);
 /// Settings writes are debounced this long after the last change. Chosen.
 pub const SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
+/// How long a restart waits for the writer to finish the saves sent before
+/// it. Chosen: a settings save logs a few milliseconds on the frame, and
+/// the writer may first be finishing a slower write (an album pick, a
+/// curation export).
+pub const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+/// After the host exits to apply a new colour depth, the relaunch alarm
+/// brings it back this much later. Chosen: past the exit, and short
+/// enough to read as a blink.
+pub const RELAUNCH_DELAY: Duration = Duration::from_secs(1);
+/// The most EGL configs the Android host looks through for one with the
+/// colour depth asked for. Chosen: a GLES2 driver lists a few dozen.
+pub const EGL_CONFIGS_MAX: usize = 64;
 /// The screen still on this long after the schedule put it to sleep means
 /// the device ignored the sleep (or someone woke it by hand): the
 /// controller treats it as a manual wake. Chosen: far longer than a

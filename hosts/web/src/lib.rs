@@ -198,6 +198,7 @@ impl Live {
                 screen: self.screen,
                 wakelock_allowed: false,
                 overrides: Overrides::default(),
+                chooses_colour_depth: false,
             },
             &mut Deps {
                 stage: Some(Stage {

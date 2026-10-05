@@ -23,8 +23,8 @@ use raam_model::limits::{
     INTERVAL_RANGE_SECS, LARGEST_LAYOUT,
 };
 use raam_model::{
-    AlbumId, AlbumRow, ClockStyle, Corner, CurationKey, FitBackground, GapColour, Prefetch,
-    ScaleMode, Settings, SourceKind, Stats, TransitionChoice, VideoPlayback,
+    AlbumId, AlbumRow, ClockStyle, ColourDepth, Corner, CurationKey, FitBackground, GapColour,
+    Prefetch, ScaleMode, Settings, SourceKind, Stats, TransitionChoice, VideoPlayback,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -296,6 +296,10 @@ pub struct AppState {
     /// The host runs a weather worker (the web demo doesn't), set by the
     /// controller; without one the Weather switch is greyed out.
     pub has_weather: bool,
+    /// The colour depth this process started with, on a host that picks
+    /// its window's depth from the setting; `None` elsewhere, where the
+    /// Colour depth row is greyed out. Set by the controller.
+    pub colour_depth_at_start: Option<ColourDepth>,
     /// The host's network snapshot, copied in by the controller. `None` on
     /// a host without a network worker: Wi-Fi can't be set up there.
     pub network: Option<NetSnapshot>,
@@ -421,6 +425,7 @@ impl AppState {
             pending_albums: HashMap::new(),
             status: Status::default(),
             has_weather: true,
+            colour_depth_at_start: None,
             network: None,
             wifi_pending: None,
             join: JoinDraft::default(),
@@ -2024,6 +2029,7 @@ fn display_page(ui: &mut Ui, st: &mut AppState) {
     );
     ui.spacing_mut().item_spacing.y = 0.0;
     let has_weather = st.has_weather;
+    let at_start = st.colour_depth_at_start;
     let s = &mut st.settings;
 
     kit::section_header(ui, "Appearance");
@@ -2040,6 +2046,34 @@ fn display_page(ui: &mut Ui, st: &mut AppState) {
     if kit::list_item(ui, row).changed() {
         s.dark_theme = seg == 1;
     }
+
+    let mut depth = if s.colour_depth == ColourDepth::Bits16 {
+        0
+    } else {
+        1
+    };
+    ui.add_enabled_ui(at_start.is_some(), |ui| {
+        let sup = match at_start {
+            None => "Only on the frame",
+            Some(d) if d != s.colour_depth => "Raam restarts to apply this when the menu closes",
+            Some(_) => "16-bit moves more smoothly; 24-bit keeps the finest gradients",
+        };
+        let row = ListItem::new("Colour depth")
+            .icon(icons::PALETTE)
+            .supporting(sup)
+            .trailing(Trailing::Segmented {
+                selected: &mut depth,
+                options: &["16-bit", "24-bit"],
+                seg_w: 120.0,
+            });
+        if kit::list_item(ui, row).changed() {
+            s.colour_depth = if depth == 0 {
+                ColourDepth::Bits16
+            } else {
+                ColourDepth::Bits24
+            };
+        }
+    });
 
     kit::section_header(ui, "Clock");
     let mut clock = ClockStyle::ALL

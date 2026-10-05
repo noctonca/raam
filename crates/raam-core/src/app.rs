@@ -87,6 +87,9 @@ pub struct Inputs {
     /// The host's wake mechanism takes a wake lock (not flags-only).
     pub wakelock_allowed: bool,
     pub overrides: Overrides,
+    /// The host picks its window's colour depth from the setting when it
+    /// starts (Android's EGL config), so a change applies on a restart.
+    pub chooses_colour_depth: bool,
 }
 
 /// The controller's view of the slideshow pipeline. `Pipeline` implements
@@ -233,6 +236,10 @@ pub struct FrameOut {
     pub egui: Option<EguiOut>,
     /// Paint the (possibly previously uploaded) chrome this pass.
     pub draw_egui: bool,
+    /// The colour depth changed and the menu has closed: the host runs this
+    /// pass's effects (the save among them), waits for the writer, and
+    /// restarts so its window is made at the new depth.
+    pub restart: bool,
 }
 
 pub struct App {
@@ -382,7 +389,11 @@ impl App {
             overlay: None,
             egui: None,
             draw_egui: false,
+            restart: false,
         };
+        if inputs.chooses_colour_depth && self.state.colour_depth_at_start.is_none() {
+            self.state.colour_depth_at_start = Some(self.state.settings.colour_depth);
+        }
 
         // Touches, keys and text, in the order they came.
         let mut input: Vec<&Event> = Vec::new();
@@ -1083,6 +1094,20 @@ impl App {
                 out.effects.push(Effect::SaveSettings { rows, sleep });
             }
         }
+        // Against the depth this process started with, not the one the host
+        // got: a host that falls back from 16-bit must not restart forever.
+        if !self.overlay_open
+            && self
+                .state
+                .colour_depth_at_start
+                .is_some_and(|d| d != self.state.settings.colour_depth)
+        {
+            log::info!(
+                "colour depth now {}-bit: restarting to apply it",
+                self.state.settings.colour_depth.as_str()
+            );
+            out.restart = true;
+        }
 
         // A scaling change lands in `update` next pass, so run one more.
         // Ken Burns only moves pixels, and none show under opaque settings.
@@ -1297,7 +1322,7 @@ fn push_egui_touch(
 mod tests {
     use super::*;
     use crate::clock::fake::{advance, install as install_clock, set_wall_hm};
-    use raam_model::{Plan, TransitionChoice};
+    use raam_model::{ColourDepth, Plan, TransitionChoice};
     use std::cell::Cell;
 
     #[derive(Default)]
@@ -1507,6 +1532,8 @@ mod tests {
         /// `None`: a host without a network worker.
         net: Option<FakeNet>,
         ov: Overrides,
+        /// The host picks its window's colour depth (Android).
+        chooses_depth: bool,
     }
 
     impl Rig {
@@ -1522,6 +1549,7 @@ mod tests {
                     screen: (1280, 800),
                     wakelock_allowed: true,
                     overrides: Overrides::default(),
+                    chooses_colour_depth: false,
                 },
                 &mut Deps {
                     stage: None,
@@ -1540,6 +1568,7 @@ mod tests {
                 power,
                 net: None,
                 ov: Overrides::default(),
+                chooses_depth: false,
             }
         }
 
@@ -1551,6 +1580,7 @@ mod tests {
                     screen: (1280, 800),
                     wakelock_allowed: true,
                     overrides: self.ov,
+                    chooses_colour_depth: self.chooses_depth,
                 },
                 &mut Deps {
                     stage: Some(Stage {
@@ -2179,6 +2209,67 @@ mod tests {
             close_with_server(&mut rig, "immich.lan", "key"),
             sent("http://immich.lan", "key")
         );
+    }
+
+    /// Opens the menu, sets the colour depth, and lets the menu time out:
+    /// the closing pass's output.
+    fn close_with_depth(rig: &mut Rig, depth: ColourDepth) -> FrameOut {
+        rig.tap(100.0, 100.0);
+        assert!(rig.app.overlay_open());
+        rig.app.state.settings.colour_depth = depth;
+        let open = rig.frame(&[]);
+        assert!(!open.restart, "nothing restarts while the menu is up");
+        advance(AUTO_DISMISS + Duration::from_secs(1));
+        let out = rig.frame(&[]);
+        assert!(!rig.app.overlay_open());
+        out
+    }
+
+    #[test]
+    fn a_colour_depth_change_saves_then_restarts_when_the_menu_closes() {
+        let mut rig = Rig::new(None);
+        rig.chooses_depth = true;
+        rig.frame(&[]);
+        assert_eq!(
+            rig.app.state.colour_depth_at_start,
+            Some(ColourDepth::Bits16)
+        );
+        let out = close_with_depth(&mut rig, ColourDepth::Bits24);
+        assert!(out.restart);
+        // The save is in the same pass, ahead of the restart: the host runs
+        // the effects first.
+        let rows = out
+            .effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::SaveSettings { rows, .. } => Some(rows),
+                _ => None,
+            })
+            .expect("the change saves as the menu closes");
+        assert!(rows.contains(&("display.colour_depth", serde_json::json!("24"))));
+    }
+
+    #[test]
+    fn colour_depth_restarts_only_for_a_change_on_a_host_that_picks_it() {
+        // Changed back before closing: the depth this process runs at.
+        let mut rig = Rig::new(None);
+        rig.chooses_depth = true;
+        rig.frame(&[]);
+        rig.app.state.settings.colour_depth = ColourDepth::Bits24;
+        assert!(!close_with_depth(&mut rig, ColourDepth::Bits16).restart);
+        // Started at 24-bit (the host may have fallen back to it; no
+        // matter): no change, no restart, and none on later passes.
+        let mut rig = Rig::new(None);
+        rig.app.state.settings.colour_depth = ColourDepth::Bits24;
+        rig.chooses_depth = true;
+        rig.frame(&[]);
+        assert!(!close_with_depth(&mut rig, ColourDepth::Bits24).restart);
+        advance(Duration::from_secs(5));
+        assert!(!rig.frame(&[]).restart);
+        // A host that can't pick it never restarts, and greys the row.
+        let mut rig = Rig::new(None);
+        assert!(!close_with_depth(&mut rig, ColourDepth::Bits24).restart);
+        assert_eq!(rig.app.state.colour_depth_at_start, None);
     }
 
     #[test]

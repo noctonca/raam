@@ -15,7 +15,12 @@
 //! other linkages (hence no `# Safety` section on each): a pointer
 //! argument must be valid for what GL reads or writes through it. The
 //! blocks that dereference one say which argument sizes it.
-#![allow(non_snake_case, clippy::missing_safety_doc, clippy::too_many_arguments)]
+#![expect(
+    non_snake_case,
+    clippy::missing_safety_doc,
+    clippy::too_many_arguments,
+    reason = "GLES2's entry points, by their own names and signatures; each one's safety contract is its GL function's (above)"
+)]
 
 use super::raw::{bytes, image_len, mat4s, write_log};
 use super::table::Table;
@@ -44,6 +49,10 @@ struct State {
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
 }
+
+/// WEBGL_debug_renderer_info's unmasked names, for `glGetString`.
+const UNMASKED_VENDOR_WEBGL: GlEnum = 0x9245;
+const UNMASKED_RENDERER_WEBGL: GlEnum = 0x9246;
 
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     STATE.with(|s| {
@@ -75,12 +84,14 @@ pub fn make_current(gl: Wgl) {
     });
 }
 
+/// # Panics
+/// Never: the answer's NUL bytes are removed before it becomes a C string.
 pub unsafe fn glGetString(name: GlEnum) -> *const u8 {
     with(|s| {
         // The unmasked renderer when the browser shares it.
         let query = match (name, s.gl.get_extension("WEBGL_debug_renderer_info")) {
-            (GL_RENDERER, Ok(Some(_))) => 0x9246, // UNMASKED_RENDERER_WEBGL
-            (GL_VENDOR, Ok(Some(_))) => 0x9245,   // UNMASKED_VENDOR_WEBGL
+            (GL_RENDERER, Ok(Some(_))) => UNMASKED_RENDERER_WEBGL,
+            (GL_VENDOR, Ok(Some(_))) => UNMASKED_VENDOR_WEBGL,
             _ => name,
         };
         let value =
@@ -90,7 +101,9 @@ pub unsafe fn glGetString(name: GlEnum) -> *const u8 {
                 .unwrap_or_else(|| "?".into());
         s.strings
             .entry(name)
-            .or_insert_with(|| CString::new(value.replace('\0', "")).unwrap_or_default())
+            .or_insert_with(|| {
+                CString::new(value.replace('\0', "")).expect("the NULs were just removed")
+            })
             .as_ptr() as *const u8
     })
 }

@@ -230,7 +230,7 @@ fn android_main(app: AndroidApp) {
             db::open(std::path::Path::new(":memory:"), &paths.local_dir_default)
                 .expect("in-memory database")
         });
-    let (saved_keys, overrides) = {
+    let (loaded, overrides) = {
         let conn = database.lock().unwrap();
         state.settings.cache_cap_mb = library::default_cap_mb(&files_dir);
         (
@@ -238,6 +238,7 @@ fn android_main(app: AndroidApp) {
             db::load_overrides(&conn),
         )
     };
+    let (saved_keys, unread) = raam_engine::settings_or_defaults(loaded);
     log::info!(
         "db: loaded {} saved settings and {} Fill/Fit overrides in {:?}",
         saved_keys.len(),
@@ -246,6 +247,9 @@ fn android_main(app: AndroidApp) {
     );
     let mut overrides = Some(overrides);
     let lib = library::spawn(database, paths, state.settings.cache_cap_mb, host.clone());
+    if let Some(why) = &unread {
+        lib.refuse_settings_saves(why);
+    }
     state.settings.immich_enabled = lib.enabled(SourceKind::Immich);
     state.settings.local_enabled = lib.enabled(SourceKind::Local);
     // The controller takes the loaded state; its saved-settings snapshots

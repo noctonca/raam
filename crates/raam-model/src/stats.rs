@@ -58,6 +58,8 @@ pub struct Stats {
     pub free_bytes: u64,
     pub hidden: Vec<HiddenItem>,
     pub export_note: String,
+    /// Why settings changes aren't being saved; empty while they are.
+    pub settings_note: String,
     /// The album list as last fetched (saved, so it shows offline).
     pub albums: Vec<AlbumRow>,
     pub albums_note: String,

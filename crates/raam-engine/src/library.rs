@@ -189,6 +189,9 @@ pub struct Library {
     config: Mutex<immich::Config>,
     stats: Mutex<(u64, Stats)>,
     export_note: Mutex<String>,
+    /// Set when the saved settings couldn't be read at startup: why, and
+    /// every settings save is refused until a restart reads them.
+    settings_note: Mutex<String>,
     pub cache_dir: PathBuf,
     pub local_preview_dir: PathBuf,
     pub local_dir: String,
@@ -278,6 +281,18 @@ impl Library {
         rx.recv_timeout(FLUSH_TIMEOUT).is_ok()
     }
 
+    /// The saved settings couldn't be read (`db::load_settings`), so the
+    /// app runs on defaults. A save would write them over every setting
+    /// the person made, so none is written until a restart reads them;
+    /// Settings says so.
+    pub fn refuse_settings_saves(&self, why: &str) {
+        assert!(!why.is_empty(), "a refusal says why");
+        *self.settings_note.lock().unwrap() = format!(
+            "Your settings couldn't be read ({why}), so changes aren't saved. Restart the frame to try again."
+        );
+        self.send(Cmd::Refresh);
+    }
+
     /// Changes whenever the stats do.
     pub fn stats_version(&self) -> u64 {
         self.stats.lock().unwrap().0
@@ -352,6 +367,7 @@ fn build(
         }),
         stats: Mutex::new((0, Stats::default())),
         export_note: Mutex::new(String::new()),
+        settings_note: Mutex::new(String::new()),
         cache_dir,
         local_preview_dir,
         local_dir: if local_row.base_url.is_empty() {
@@ -408,6 +424,9 @@ fn writer_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
         // Removed after the lock is let go.
         let mut stale_files = Vec::new();
         match cmd {
+            Cmd::SaveSettings { .. } if !lib.settings_note.lock().unwrap().is_empty() => {
+                log::warn!("db: settings not saved: they couldn't be read at startup");
+            }
             Cmd::SaveSettings { rows, sleep } => match db::save_settings(&conn, &rows, sleep) {
                 Ok(()) => log::info!(
                     "db: settings saved ({} keys + sleep schedule) in {:?}",
@@ -905,6 +924,7 @@ fn publish_stats(lib: &Library, st: &Loop) {
         free_bytes: free_bytes(&lib.cache_dir) / FREE_SPACE_STEP * FREE_SPACE_STEP,
         hidden,
         export_note: lib.export_note.lock().unwrap().clone(),
+        settings_note: lib.settings_note.lock().unwrap().clone(),
         albums,
         albums_note: st.sync.albums.clone(),
         videos,
@@ -1633,6 +1653,62 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// After the saved settings couldn't be read, a save of the defaults
+    /// the app then runs on is refused: it would write over every setting
+    /// the person made.
+    #[test]
+    fn a_settings_save_after_a_failed_load_is_refused() {
+        crate::install_test_clock();
+        let dir = std::env::temp_dir().join(format!("raam-unread-{}", std::process::id()));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = db::open(&dir.join("raam.db"), "").unwrap();
+        let (lib, writer_rx, _library_rx) = build(
+            db,
+            Paths {
+                files_dir: dir.clone(),
+                local_dir_default: dir.join("no-photos").display().to_string(),
+                curation_export: dir.join("curation.json"),
+            },
+            DEFAULT_CAP_MB,
+            Host {
+                waker: Arc::new(NoWaker),
+                switches: Arc::new(NoSwitches),
+                probe: Arc::new(NoProbe),
+                grant_storage: Arc::new(|| true),
+            },
+        );
+        let l = lib.clone();
+        std::thread::spawn(move || writer_loop(l, writer_rx));
+        let sleep = schedule::Schedule {
+            enabled: false,
+            sleep_min: 0,
+            wake_min: 0,
+        };
+        let mut mine = raam_model::Settings::defaults("", "");
+        mine.interval_secs = 30.0;
+        lib.send(Cmd::SaveSettings {
+            rows: raam_core::store::settings_rows(&mine),
+            sleep,
+        });
+        assert!(lib.flush());
+
+        lib.refuse_settings_saves("disk I/O error");
+        lib.send(Cmd::SaveSettings {
+            rows: raam_core::store::settings_rows(&raam_model::Settings::defaults("", "")),
+            sleep,
+        });
+        assert!(lib.flush());
+        let mut loaded = raam_model::Settings::defaults("", "");
+        db::load_settings(&lib.db.lock().unwrap(), &mut loaded).unwrap();
+        assert_eq!(
+            loaded.interval_secs, 30.0,
+            "the defaults were written over it"
+        );
+        assert!(lib.settings_note.lock().unwrap().contains("disk I/O error"));
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
     /// A restart waits on `flush` after sending the settings save: when it
     /// returns, the save is in the database.
     #[test]
@@ -1650,7 +1726,7 @@ mod tests {
         });
         assert!(lib.flush());
         let mut loaded = raam_model::Settings::defaults("", "");
-        db::load_settings(&lib.db.lock().unwrap(), &mut loaded);
+        db::load_settings(&lib.db.lock().unwrap(), &mut loaded).unwrap();
         assert_eq!(loaded.colour_depth, raam_model::ColourDepth::Bits24);
         let _ = std::fs::remove_dir_all(&dir);
     }

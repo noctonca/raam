@@ -186,7 +186,7 @@ impl Live {
         let database = db::open(&files_dir.join("raam.db"), &paths.local_dir_default)
             .map_err(|e| format!("db: {e}"))?;
         let mut state = AppState::new("", "");
-        let (saved_keys, overrides) = {
+        let (loaded, overrides) = {
             let conn = database.lock().unwrap();
             if args.photos.is_some() {
                 db::set_local_dir(&conn, &paths.local_dir_default)
@@ -198,6 +198,7 @@ impl Live {
                 db::load_overrides(&conn),
             )
         };
+        let (saved_keys, unread) = raam_engine::settings_or_defaults(loaded);
         log::info!(
             "db: loaded {} saved settings and {} Fill/Fit overrides in {:?}",
             saved_keys.len(),
@@ -205,6 +206,9 @@ impl Live {
             clock::elapsed(t)
         );
         let lib = library::spawn(database, paths, state.settings.cache_cap_mb, host.clone());
+        if let Some(why) = &unread {
+            lib.refuse_settings_saves(why);
+        }
         let network = crate::wifi::spawn(host.waker.clone());
         state.settings.immich_enabled = lib.enabled(SourceKind::Immich);
         state.settings.local_enabled = lib.enabled(SourceKind::Local);

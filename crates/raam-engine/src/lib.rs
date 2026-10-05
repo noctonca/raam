@@ -48,6 +48,22 @@ pub struct Paths {
     pub curation_export: PathBuf,
 }
 
+/// The saved settings' keys from `db::load_settings`, or none and why
+/// not. A host that can't read them runs on the defaults and passes the
+/// why to `Library::refuse_settings_saves`, so no save writes the
+/// defaults over them.
+pub fn settings_or_defaults(
+    loaded: rusqlite::Result<Vec<String>>,
+) -> (Vec<String>, Option<String>) {
+    match loaded {
+        Ok(keys) => (keys, None),
+        Err(e) => {
+            log::error!("db: the saved settings can't be read, running on defaults: {e}");
+            (Vec::new(), Some(e.to_string()))
+        }
+    }
+}
+
 /// Runs the App controller's effects on the engine, in order: a native
 /// host's step after each `frame` pass. The fetch and weather workers
 /// start with the first window, so before it a host has neither to give

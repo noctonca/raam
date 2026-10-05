@@ -38,6 +38,13 @@ after both (see its precedence note).
 
   `Result<_, String>` remains in the hosts and raam-core's seams; that
   is raam#94. Don't add more.
+- **A database read** (raam#45, decided): one whose result feeds a write,
+  a deletion or a cap check returns `rusqlite::Result`, and its operation
+  stops on the error. Copy `selected_albums` and `cached_bytes` (#132,
+  #134). One that only feeds the settings panel may default, with a
+  comment saying so, as `publish_stats` does. A load that a whole-record
+  save follows applies nothing on error. Copy `load_settings` with
+  `Library::refuse_settings_saves` (#135).
 - **A loop following outside data** is capped and fails at the cap,
   as `immich.rs`'s album paging does (`for _ in 0..limits::IMMICH_MAX_PAGES`,
   then an error, never a partial list). A raw body reader
@@ -147,9 +154,10 @@ PR of its own.
    for `Instant`/`SystemTime` and `disallowed-methods` for
    `thread::spawn`, scoped to `raam-core` and `raam-model`, or a CI
    grep.
-6. **`let _ =` on `Result`s** outside tests, without a reason, e.g. in
-   `library.rs` and `db.rs`. Also: should a failed DB read crash or
-   fall back to a default? That is raam#45, waiting on a decision.
+6. **`let _ =` on `Result`s** outside tests, without a reason. Most in
+   `library.rs` and `db.rs` went in #134. raam#45 is decided (see
+   Writing). Display reads that default (`counts`, `eligible`,
+   `hidden_list`, ...) still don't say so in a comment.
 7. **Bare `#[allow]`s with no reason,** in `theme.rs`,
    `transitions.rs` and `egl.rs` (the GL module's were given reasons
    in #117).
@@ -176,6 +184,11 @@ real bugs.
 1. **Swallowed errors**, and what the default then causes:
    - #38: a failed DB read made the sweep delete cache files and
      write a short export;
+   - #132: a failed read of the picked albums gave "none picked", and
+     the sync deleted the whole Immich library with its cache; #135: a
+     failed settings read left the defaults, and the first save wrote
+     them over every setting; #133: a missing photo folder was made
+     again, empty, and the sync dropped every local photo;
    - #28: a failed DELETE still unlinked the files;
    - #95: every sync error showed as "offline";
    - #121: one decoder error kind covered "the clip can't be decoded"

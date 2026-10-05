@@ -102,6 +102,11 @@ mod parse {
         }
     }
 
+    /// The 2.4 and 5 GHz bands' channel centres, MHz (the hardware's). A
+    /// 6 GHz access point is in neither.
+    const BAND_2G: std::ops::Range<u32> = 2400..2500;
+    const BAND_5G: std::ops::Range<u32> = 5150..5900;
+
     /// One access point, from a `BSS` reply.
     #[derive(Debug)]
     pub struct Bss {
@@ -133,7 +138,7 @@ mod parse {
             if b.ssid.is_empty() || b.ssid.iter().all(|&c| c == 0) {
                 continue;
             }
-            let (two, five) = (b.freq < 3000, b.freq >= 5000);
+            let (two, five) = (BAND_2G.contains(&b.freq), BAND_5G.contains(&b.freq));
             let sec = security(&b.flags);
             match nets.iter_mut().find(|n| n.ssid.0 == b.ssid) {
                 Some(n) => {
@@ -204,7 +209,8 @@ mod parse {
             Security::Wpa2Wpa3 if sae => vec![("key_mgmt", "WPA-PSK SAE"), ("ieee80211w", "1")],
             Security::Wpa2Wpa3 => vec![("key_mgmt", "WPA-PSK")],
             Security::Wpa3 if sae => vec![("key_mgmt", "SAE"), ("ieee80211w", "2")],
-            _ => return None,
+            // WPA3 alone needs SAE; WEP and 802.1X aren't joined here.
+            Security::Wpa3 | Security::Wep | Security::Enterprise => return None,
         })
     }
 
@@ -283,18 +289,21 @@ pub fn spawn(_waker: std::sync::Arc<dyn raam_core::seams::Waker>) -> Option<Net>
     None
 }
 
+/// Has no values: off Linux there is never a network to hold.
 #[cfg(not(target_os = "linux"))]
-pub struct Net;
+pub enum Net {}
 
 #[cfg(not(target_os = "linux"))]
 impl raam_core::network::Network for Net {
     fn version(&self) -> u64 {
-        0
+        match *self {}
     }
     fn snapshot(&self) -> raam_core::network::NetSnapshot {
-        unreachable!("never spawned")
+        match *self {}
     }
-    fn send(&self, _cmd: raam_core::network::NetCommand) {}
+    fn send(&self, _cmd: raam_core::network::NetCommand) {
+        match *self {}
+    }
 }
 
 /// Built on Linux, and in tests on any Unix, where a socket pair stands in
@@ -312,7 +321,10 @@ mod worker {
         self, Current, Join, JoinStage, NetCommand, NetSnapshot, Network, Wifi,
     };
     use raam_core::seams::Waker;
-    use raam_model::limits::WIFI_EVENT_WAIT;
+    use raam_model::limits::{
+        WIFI_ADDRESS_POLL, WIFI_ADDRESS_TIMEOUT, WIFI_EVENT_BYTES, WIFI_EVENT_WAIT,
+        WIFI_JOIN_TIMEOUT, WIFI_MAX_BSS, WIFI_NOT_FOUND_LIMIT, WIFI_REFRESH, WIFI_REPLY_BYTES,
+    };
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::net::UnixDatagram;
     use std::path::Path;
@@ -331,20 +343,6 @@ mod worker {
     };
 
     const DIR: &str = "/run/wpa_supplicant";
-    /// How often the links and Wi-Fi status are read with nothing going
-    /// on, and how often a lost socket is retried.
-    const REFRESH: Duration = Duration::from_secs(5);
-    /// Joined, waiting for an address: status is read this often.
-    const ADDRESS_POLL: Duration = Duration::from_millis(500);
-    /// A join that hasn't connected by now failed. A wrong key shows at
-    /// about 10 s, a missing network at about 23 s (docs/BUILDING.md,
-    /// "Wi-Fi").
-    const JOIN_TIMEOUT: Duration = Duration::from_secs(40);
-    /// Joined but no address by now: DHCP isn't answering.
-    const ADDRESS_TIMEOUT: Duration = Duration::from_secs(30);
-    /// wpa_supplicant scans this many times for a network before a join
-    /// gives up on it.
-    const NOT_FOUND_LIMIT: u32 = 3;
     /// `BSS` fields: id, freq, level, flags, ssid.
     const BSS_MASK: &str = "MASK=0x1885";
 
@@ -364,7 +362,7 @@ mod worker {
         Refused { doing: String, reply: String },
         /// Wi-Fi can't be used here (no adapter, no wpa_supplicant, no
         /// permission, a blocked radio), in the person's words for
-        /// Connectivity. Looked for again every `REFRESH`.
+        /// Connectivity. Looked for again every `WIFI_REFRESH`.
         Unavailable(String),
         /// A command that can't run as asked: a join already under way, a
         /// network that isn't saved, a security this adapter can't join, a
@@ -449,7 +447,7 @@ mod worker {
             self.0
                 .send(cmd.as_bytes())
                 .map_err(WifiError::socket(&doing(cmd)))?;
-            let mut buf = vec![0u8; 16 * 1024];
+            let mut buf = vec![0u8; WIFI_REPLY_BYTES];
             let n = self
                 .0
                 .recv(&mut buf)
@@ -474,7 +472,7 @@ mod worker {
             self.0
                 .set_read_timeout(Some(wait))
                 .map_err(WifiError::socket("events"))?;
-            let mut buf = vec![0u8; 4096];
+            let mut buf = vec![0u8; WIFI_EVENT_BYTES];
             match self.0.recv(&mut buf) {
                 Ok(n) => {
                     let s = String::from_utf8_lossy(&buf[..n]);
@@ -614,7 +612,7 @@ mod worker {
         }
 
         /// Bounded: each turn waits at most `WIFI_EVENT_WAIT` for an event,
-        /// or `REFRESH` while wpa_supplicant can't be reached.
+        /// or `WIFI_REFRESH` while wpa_supplicant can't be reached.
         #[cfg(target_os = "linux")]
         fn run(mut self) {
             loop {
@@ -627,7 +625,7 @@ mod worker {
                         Err(why) => {
                             self.publish(Err(why.to_string()));
                             // Commands wait for the socket; none can run.
-                            match self.rx.recv_timeout(REFRESH) {
+                            match self.rx.recv_timeout(WIFI_REFRESH) {
                                 Err(RecvTimeoutError::Disconnected) => return,
                                 Ok(cmd) => log::info!("wifi: {cmd:?} dropped, no wpa_supplicant"),
                                 Err(RecvTimeoutError::Timeout) => {}
@@ -690,9 +688,9 @@ mod worker {
             }
             self.step_join()?;
             let every = if self.join.as_ref().is_some_and(|j| j.connected.is_some()) {
-                ADDRESS_POLL
+                WIFI_ADDRESS_POLL
             } else {
-                REFRESH
+                WIFI_REFRESH
             };
             if self.refreshed.is_none_or(|t| t.elapsed() >= every) {
                 self.refresh()?;
@@ -838,8 +836,9 @@ mod worker {
                 Event::ScanStarted => self.wifi.scanning = true,
                 Event::ScanFailed => self.wifi.scanning = false,
                 Event::ScanResults => {
-                    self.wifi.nearby = self.read_scan()?;
+                    // Over, even if its results can't be read.
                     self.wifi.scanning = false;
+                    self.wifi.nearby = self.read_scan()?;
                     let t = clock::local(clock::wall_secs());
                     self.wifi.scanned_at = format!("{:02}:{:02}", t.hour, t.min);
                 }
@@ -866,7 +865,7 @@ mod worker {
                 Event::NotFound => {
                     if let Some(j) = &mut self.join {
                         j.not_found += 1;
-                        if j.not_found >= NOT_FOUND_LIMIT {
+                        if j.not_found >= WIFI_NOT_FOUND_LIMIT {
                             self.end_join(JoinStage::Failed(JoinError::NotFound));
                         }
                     }
@@ -881,11 +880,14 @@ mod worker {
             let mut all = Vec::new();
             let mut reply = self.req(&format!("BSS FIRST {BSS_MASK}"))?;
             while let Some(b) = parse::bss(&reply) {
+                if all.len() == WIFI_MAX_BSS {
+                    return Err(WifiError::Refused {
+                        doing: "BSS NEXT".into(),
+                        reply: format!("more than {WIFI_MAX_BSS} access points"),
+                    });
+                }
                 let id = b.id;
                 all.push(b);
-                if all.len() > 1024 {
-                    break;
-                }
                 reply = self.req(&format!("BSS NEXT-{id} {BSS_MASK}"))?;
             }
             Ok(parse::fold(&all))
@@ -1036,7 +1038,7 @@ mod worker {
                 return Ok(());
             };
             match j.connected {
-                None if j.started.elapsed() > JOIN_TIMEOUT => {
+                None if j.started.elapsed() > WIFI_JOIN_TIMEOUT => {
                     self.end_join(JoinStage::Failed(JoinError::Failed));
                 }
                 Some(t) => {
@@ -1047,7 +1049,7 @@ mod worker {
                         .is_some_and(|c| c.ssid == j.ssid && c.address.is_some());
                     if joined {
                         return self.finish_join();
-                    } else if t.elapsed() > ADDRESS_TIMEOUT {
+                    } else if t.elapsed() > WIFI_ADDRESS_TIMEOUT {
                         self.end_join(JoinStage::Failed(JoinError::NoAddress));
                     }
                 }
@@ -1298,6 +1300,25 @@ mod worker {
             assert!(!e.to_string().contains("hunter22"), "{e}");
         }
 
+        #[test]
+        fn a_scan_past_the_cap_is_an_error_not_a_short_list() {
+            let (mut w, wpa, _events) = rig();
+            // A wpa_supplicant whose `BSS NEXT` never ends.
+            let fake = std::thread::spawn(move || {
+                let mut buf = [0u8; 256];
+                for id in 0..=WIFI_MAX_BSS {
+                    wpa.recv(&mut buf).unwrap();
+                    let bss = format!("id={id}\nfreq=2412\nlevel=-50\nflags=[ESS]\nssid=n{id}\n");
+                    wpa.send(bss.as_bytes()).unwrap();
+                }
+            });
+            let e = w.on_event("CTRL-EVENT-SCAN-RESULTS ").unwrap_err();
+            fake.join().unwrap();
+            assert!(!e.reconnects(), "{e}");
+            assert!(w.wifi.nearby.is_empty(), "no short list");
+            assert!(!w.wifi.scanning, "the scan is over");
+        }
+
         fn ssid(name: &str) -> Ssid {
             Ssid(name.as_bytes().to_vec())
         }
@@ -1489,12 +1510,14 @@ mod tests {
             b(1, "Home", 2432, -62, "[WPA2-PSK-CCMP][ESS]"),
             b(2, "", 2432, -40, "[WPA2-PSK-CCMP][ESS]"),
             b(3, "Cafe", 2412, -50, "[ESS]"),
+            b(4, "Six", 5955, -60, "[WPA2-SAE-CCMP][ESS]"),
         ]);
         let names: Vec<String> = nets.iter().map(|n| n.ssid.show()).collect();
-        assert_eq!(names, ["Cafe", "Home"], "the hidden one is left out");
-        let home = &nets[1];
+        assert_eq!(names, ["Cafe", "Six", "Home"], "the hidden one is left out");
+        let home = &nets[2];
         assert_eq!(home.rssi, -62);
         assert!(home.band_2g && home.band_5g);
+        assert!(!nets[1].band_2g && !nets[1].band_5g, "6 GHz is neither");
     }
 
     #[test]

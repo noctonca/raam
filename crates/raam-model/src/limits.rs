@@ -175,9 +175,6 @@ pub const STORAGE_GRANT_SETTLE: Duration = Duration::from_millis(500);
 /// The read buffer for hashing a local file. Chosen: big enough that the
 /// SHA-1 of a 28 MB clip is a few hundred reads, small next to the heap.
 pub const HASH_BUFFER_BYTES: usize = 64 * 1024;
-/// Wi-Fi networks are scanned for again this often while their list is
-/// open. A scan takes about 11 s on a USB adapter (both bands). Chosen.
-pub const WIFI_RESCAN: Duration = Duration::from_secs(30);
 /// Local previews: the short side at least this, like Immich's 1440
 /// preview.
 pub const PREVIEW_SHORT_SIDE: u32 = 1440;
@@ -231,6 +228,34 @@ pub const WIFI_REPLY_WAIT: Duration = Duration::from_secs(3);
 /// join's clock and the UI's commands again. Chosen: a tap answers within
 /// a quarter second, and an idle worker wakes four times a second.
 pub const WIFI_EVENT_WAIT: Duration = Duration::from_millis(250);
+/// How often the links and Wi-Fi status are read with nothing going on,
+/// and how often wpa_supplicant is looked for while it can't be reached.
+/// Chosen: a cable or a network change shows within seconds.
+pub const WIFI_REFRESH: Duration = Duration::from_secs(5);
+/// Joined, waiting for an address: the status is read this often. Chosen.
+pub const WIFI_ADDRESS_POLL: Duration = Duration::from_millis(500);
+/// A join that hasn't connected by now failed. Measured on void: a wrong
+/// key shows at about 10 s, a missing network at about 23 s
+/// (docs/BUILDING.md, "Wi-Fi").
+pub const WIFI_JOIN_TIMEOUT: Duration = Duration::from_secs(40);
+/// Joined, but no address by now: DHCP isn't answering. Chosen.
+pub const WIFI_ADDRESS_TIMEOUT: Duration = Duration::from_secs(30);
+/// wpa_supplicant scans this many times for a network before a join gives
+/// up on it. Chosen.
+pub const WIFI_NOT_FOUND_LIMIT: u32 = 3;
+/// The largest reply read from wpa_supplicant. Chosen: four times its own
+/// 4 KiB reply buffer; a longer one would be cut short.
+pub const WIFI_REPLY_BYTES: usize = 16 * 1024;
+/// The largest event read. Chosen: the events used are one short line, and
+/// only a line's start is parsed, so a longer one cut short is harmless.
+pub const WIFI_EVENT_BYTES: usize = 4096;
+/// Access points one scan may list: far past the few dozen a frame hears,
+/// so only a wpa_supplicant whose `BSS NEXT` never ends reaches it, and
+/// that is an error, not a short list. Chosen.
+pub const WIFI_MAX_BSS: usize = 1024;
+/// Wi-Fi networks are scanned for again this often while their list is
+/// open. A scan takes about 11 s on a USB adapter (both bands). Chosen.
+pub const WIFI_RESCAN: Duration = Duration::from_secs(30);
 
 // ---- weather cadence ----------------------------------------------------------
 

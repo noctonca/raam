@@ -297,7 +297,13 @@ impl raam_core::network::Network for Net {
     fn send(&self, _cmd: raam_core::network::NetCommand) {}
 }
 
-#[cfg(target_os = "linux")]
+/// Built on Linux, and in tests on any Unix, where a socket pair stands in
+/// for wpa_supplicant.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "only the tests use it off Linux")
+)]
 mod worker {
     use super::parse::{self, Event};
     use super::*;
@@ -306,14 +312,23 @@ mod worker {
         self, Current, Join, JoinStage, NetCommand, NetSnapshot, Network, Wifi,
     };
     use raam_core::seams::Waker;
-    use std::os::linux::net::SocketAddrExt;
+    use raam_model::limits::WIFI_EVENT_WAIT;
     use std::os::unix::fs::MetadataExt;
-    use std::os::unix::net::{SocketAddr, UnixDatagram};
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
+    use std::os::unix::net::UnixDatagram;
+    use std::path::Path;
+    use std::sync::mpsc;
+    // What only the Linux build uses: opening the real sockets, and the loop.
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+    #[cfg(target_os = "linux")]
+    use {
+        raam_model::limits::WIFI_REPLY_WAIT,
+        std::os::linux::net::SocketAddrExt,
+        std::os::unix::net::SocketAddr,
+        std::path::PathBuf,
+        std::sync::atomic::{AtomicU32, Ordering},
+        std::sync::mpsc::{RecvTimeoutError, TryRecvError},
+    };
 
     const DIR: &str = "/run/wpa_supplicant";
     /// How often the links and Wi-Fi status are read with nothing going
@@ -333,13 +348,84 @@ mod worker {
     /// `BSS` fields: id, freq, level, flags, ssid.
     const BSS_MASK: &str = "MASK=0x1885";
 
+    /// What went wrong driving Wi-Fi, by where it came from.
+    #[derive(Debug)]
+    pub enum WifiError {
+        /// The control socket failed, or a reply didn't come within
+        /// `WIFI_REPLY_WAIT`: the environment. The sockets are opened
+        /// again, since a reply that comes late would be read as the next
+        /// request's.
+        Socket {
+            doing: String,
+            source: std::io::Error,
+        },
+        /// wpa_supplicant answered, but not as the request needs (`FAIL`,
+        /// an id that isn't one). The request fails; the socket is good.
+        Refused { doing: String, reply: String },
+        /// Wi-Fi can't be used here (no adapter, no wpa_supplicant, no
+        /// permission, a blocked radio), in the person's words for
+        /// Connectivity. Looked for again every `REFRESH`.
+        Unavailable(String),
+        /// A command that can't run as asked: a join already under way, a
+        /// network that isn't saved, a security this adapter can't join, a
+        /// password wpa_supplicant wouldn't take. The input.
+        Rejected(String),
+    }
+
+    impl WifiError {
+        /// The sockets have to be opened again: they failed, or Wi-Fi
+        /// went away under them.
+        pub fn reconnects(&self) -> bool {
+            match self {
+                WifiError::Socket { .. } | WifiError::Unavailable(_) => true,
+                WifiError::Refused { .. } | WifiError::Rejected(_) => false,
+            }
+        }
+
+        fn socket(doing: &str) -> impl FnOnce(std::io::Error) -> Self {
+            move |source| WifiError::Socket {
+                doing: doing.to_string(),
+                source,
+            }
+        }
+    }
+
+    impl std::fmt::Display for WifiError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                WifiError::Socket { doing, source } => write!(f, "{doing}: {source}"),
+                WifiError::Refused { doing, reply } => write!(f, "{doing}: {reply}"),
+                WifiError::Unavailable(why) | WifiError::Rejected(why) => write!(f, "{why}"),
+            }
+        }
+    }
+
+    impl std::error::Error for WifiError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            match self {
+                WifiError::Socket { source, .. } => Some(source),
+                WifiError::Refused { .. } | WifiError::Unavailable(_) | WifiError::Rejected(_) => {
+                    None
+                }
+            }
+        }
+    }
+
+    /// A request as errors and logs name it: its first words, so a key
+    /// never reaches either.
+    fn doing(cmd: &str) -> String {
+        cmd.split(' ').take(3).collect::<Vec<_>>().join(" ")
+    }
+
+    #[cfg(target_os = "linux")]
     static SOCKETS: AtomicU32 = AtomicU32::new(0);
 
-    /// One datagram socket to wpa_supplicant, bound in the abstract
-    /// namespace (no file to clean up).
+    /// One datagram socket to wpa_supplicant.
     struct Ctrl(UnixDatagram);
 
     impl Ctrl {
+        /// Bound in the abstract namespace (no file to clean up).
+        #[cfg(target_os = "linux")]
         fn open(path: &Path) -> std::io::Result<Ctrl> {
             let name = format!(
                 "raam-wifi-{}-{}",
@@ -348,39 +434,46 @@ mod worker {
             );
             let sock = UnixDatagram::bind_addr(&SocketAddr::from_abstract_name(name)?)?;
             sock.connect(path)?;
-            sock.set_read_timeout(Some(Duration::from_secs(3)))?;
+            Ctrl::new(sock, WIFI_REPLY_WAIT)
+        }
+
+        /// `wait` bounds each send and each reply.
+        fn new(sock: UnixDatagram, wait: Duration) -> std::io::Result<Ctrl> {
+            assert!(!wait.is_zero(), "a zero wait means none to the socket");
+            sock.set_read_timeout(Some(wait))?;
+            sock.set_write_timeout(Some(wait))?;
             Ok(Ctrl(sock))
         }
 
-        fn req(&self, cmd: &str) -> Result<String, String> {
-            // A key never reaches an error: only the command's first words.
-            let what = || cmd.split(' ').take(3).collect::<Vec<_>>().join(" ");
+        fn req(&self, cmd: &str) -> Result<String, WifiError> {
             self.0
                 .send(cmd.as_bytes())
-                .map_err(|e| format!("{}: {e}", what()))?;
+                .map_err(WifiError::socket(&doing(cmd)))?;
             let mut buf = vec![0u8; 16 * 1024];
             let n = self
                 .0
                 .recv(&mut buf)
-                .map_err(|e| format!("{}: {e}", what()))?;
+                .map_err(WifiError::socket(&doing(cmd)))?;
             Ok(String::from_utf8_lossy(&buf[..n]).into_owned())
         }
 
-        fn ok(&self, cmd: &str) -> Result<(), String> {
+        fn ok(&self, cmd: &str) -> Result<(), WifiError> {
             let r = self.req(cmd)?;
             if r.trim() == "OK" {
                 Ok(())
             } else {
-                let what = cmd.split(' ').take(3).collect::<Vec<_>>().join(" ");
-                Err(format!("{what}: {}", r.trim()))
+                Err(WifiError::Refused {
+                    doing: doing(cmd),
+                    reply: r.trim().to_string(),
+                })
             }
         }
 
         /// The next event, level stripped; `None` if none came in `wait`.
-        fn event(&self, wait: Duration) -> Result<Option<String>, String> {
+        fn event(&self, wait: Duration) -> Result<Option<String>, WifiError> {
             self.0
                 .set_read_timeout(Some(wait))
-                .map_err(|e| e.to_string())?;
+                .map_err(WifiError::socket("events"))?;
             let mut buf = vec![0u8; 4096];
             match self.0.recv(&mut buf) {
                 Ok(n) => {
@@ -398,7 +491,7 @@ mod worker {
                 {
                     Ok(None)
                 }
-                Err(e) => Err(format!("events: {e}")),
+                Err(e) => Err(WifiError::socket("events")(e)),
             }
         }
     }
@@ -427,6 +520,7 @@ mod worker {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub fn spawn(waker: Arc<dyn Waker>) -> Option<WpaNetwork> {
         let (links, address) = links();
         let shared = Arc::new(Shared {
@@ -441,18 +535,7 @@ mod worker {
             waker,
         });
         let (tx, rx) = mpsc::channel();
-        let worker = Worker {
-            shared: shared.clone(),
-            rx,
-            ctrl: None,
-            iface: String::new(),
-            sae: false,
-            wifi: Wifi::default(),
-            saved: Vec::new(),
-            off: false,
-            join: None,
-            refreshed: None,
-        };
+        let worker = Worker::new(shared.clone(), rx);
         std::thread::Builder::new()
             .name("wifi".into())
             .spawn(move || worker.run())
@@ -491,6 +574,24 @@ mod worker {
     }
 
     impl Worker {
+        fn new(shared: Arc<Shared>, rx: mpsc::Receiver<NetCommand>) -> Worker {
+            Worker {
+                shared,
+                rx,
+                ctrl: None,
+                iface: String::new(),
+                sae: false,
+                wifi: Wifi::default(),
+                saved: Vec::new(),
+                off: false,
+                join: None,
+                refreshed: None,
+            }
+        }
+
+        /// Bounded: each turn waits at most `WIFI_EVENT_WAIT` for an event,
+        /// or `REFRESH` while wpa_supplicant can't be reached.
+        #[cfg(target_os = "linux")]
         fn run(mut self) {
             loop {
                 if self.ctrl.is_none() {
@@ -500,7 +601,7 @@ mod worker {
                             self.refreshed = None;
                         }
                         Err(why) => {
-                            self.publish(Err(why));
+                            self.publish(Err(why.to_string()));
                             // Commands wait for the socket; none can run.
                             match self.rx.recv_timeout(REFRESH) {
                                 Err(RecvTimeoutError::Disconnected) => return,
@@ -512,17 +613,16 @@ mod worker {
                     }
                 }
                 if let Err(e) = self.pass() {
-                    log::warn!("wifi: {e}; reconnecting");
-                    if self.join.is_some() {
-                        self.end_join(JoinStage::Failed(JoinError::Failed));
+                    self.recover(e, true);
+                    if self.ctrl.is_none() {
+                        continue;
                     }
-                    self.ctrl = None;
                 }
                 match self.rx.try_recv() {
                     Err(TryRecvError::Disconnected) => return,
                     Ok(cmd) => {
                         if let Err(e) = self.command(cmd) {
-                            log::warn!("wifi: {e}");
+                            self.recover(e, false);
                         }
                     }
                     Err(TryRecvError::Empty) => {}
@@ -533,15 +633,39 @@ mod worker {
             }
         }
 
-        /// One turn: an event if one comes within a quarter second, the
-        /// join's clock, and the status when it's due.
-        fn pass(&mut self) -> Result<(), String> {
-            let ev = self
-                .ctrl
+        /// After an error: one that reconnects drops the sockets and ends a
+        /// join under way, whose events they carried. `in_pass`: it came
+        /// from the join's own steps, which end it anyway.
+        fn recover(&mut self, e: WifiError, in_pass: bool) {
+            let reconnects = e.reconnects();
+            if reconnects {
+                log::warn!("wifi: {e}; reconnecting");
+            } else {
+                log::warn!("wifi: {e}");
+            }
+            if (reconnects || in_pass) && self.join.is_some() {
+                self.end_join(JoinStage::Failed(JoinError::Failed));
+            }
+            if reconnects {
+                self.ctrl = None;
+            }
+        }
+
+        /// The sockets, which every request needs.
+        ///
+        /// # Panics
+        ///
+        /// If they're closed: `run` reconnects before anything else.
+        fn ctrl(&self) -> &(Ctrl, Ctrl) {
+            self.ctrl
                 .as_ref()
-                .unwrap()
-                .1
-                .event(Duration::from_millis(250))?;
+                .expect("a request with no socket: run reconnects first")
+        }
+
+        /// One turn: an event if one comes within `WIFI_EVENT_WAIT`, the
+        /// join's clock, and the status when it's due.
+        fn pass(&mut self) -> Result<(), WifiError> {
+            let ev = self.ctrl().1.event(WIFI_EVENT_WAIT)?;
             if let Some(e) = ev {
                 self.on_event(&e)?;
             }
@@ -557,17 +681,19 @@ mod worker {
             Ok(())
         }
 
-        fn req(&self, cmd: &str) -> Result<String, String> {
-            self.ctrl.as_ref().ok_or("no socket")?.0.req(cmd)
+        fn req(&self, cmd: &str) -> Result<String, WifiError> {
+            self.ctrl().0.req(cmd)
         }
 
-        fn ok(&self, cmd: &str) -> Result<(), String> {
-            self.ctrl.as_ref().ok_or("no socket")?.0.ok(cmd)
+        fn ok(&self, cmd: &str) -> Result<(), WifiError> {
+            self.ctrl().0.ok(cmd)
         }
 
         /// Finds the Wi-Fi interface and opens its sockets, or says in the
         /// person's words why Wi-Fi can't be set up.
-        fn connect(&mut self) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        fn connect(&mut self) -> Result<(), WifiError> {
+            let unavailable = |why: String| Err(WifiError::Unavailable(why));
             let (links, _) = links();
             let wireless: Vec<&str> = links
                 .iter()
@@ -575,21 +701,23 @@ mod worker {
                 .map(|l| l.name.as_str())
                 .collect();
             let Some(first) = wireless.first() else {
-                return Err("This device has no Wi-Fi adapter.".into());
+                return unavailable("This device has no Wi-Fi adapter.".into());
             };
             let Some(iface) = wireless.iter().find(|i| Path::new(DIR).join(i).exists()) else {
                 if Path::new("/run/NetworkManager").exists() {
-                    return Err("Wi-Fi on this device is managed by NetworkManager, which Raam can't set up yet. Use nmcli or the desktop's network settings.".into());
+                    return unavailable("Wi-Fi on this device is managed by NetworkManager, which Raam can't set up yet. Use nmcli or the desktop's network settings.".into());
                 }
-                return Err(format!(
+                return unavailable(format!(
                     "wpa_supplicant isn't running for {first}, so Raam can't set up Wi-Fi."
                 ));
             };
             if let Some(why) = blocked(iface) {
-                return Err(why);
+                return unavailable(why);
             }
             let path = Path::new(DIR).join(iface);
-            let open = |p: &PathBuf| Ctrl::open(p).map_err(|e| unreachable_why(e, p));
+            let open = |p: &PathBuf| {
+                Ctrl::open(p).map_err(|e| WifiError::Unavailable(unreachable_why(e, p)))
+            };
             let req = open(&path)?;
             let ev = open(&path)?;
             ev.ok("ATTACH")?;
@@ -601,7 +729,7 @@ mod worker {
             Ok(())
         }
 
-        fn refresh(&mut self) -> Result<(), String> {
+        fn refresh(&mut self) -> Result<(), WifiError> {
             self.refreshed = Some(Instant::now());
             self.saved = parse::saved(&self.req("LIST_NETWORKS")?);
             let status = self.req("STATUS")?;
@@ -634,12 +762,12 @@ mod worker {
             };
             // Blocked since: the same "can't" as at the start.
             match blocked(&self.iface) {
-                Some(why) => Err(why),
+                Some(why) => Err(WifiError::Unavailable(why)),
                 None => Ok(()),
             }
         }
 
-        fn on_event(&mut self, e: &str) -> Result<(), String> {
+        fn on_event(&mut self, e: &str) -> Result<(), WifiError> {
             match parse::event(e) {
                 Event::ScanStarted => self.wifi.scanning = true,
                 Event::ScanFailed => self.wifi.scanning = false,
@@ -683,7 +811,7 @@ mod worker {
         }
 
         /// Every BSS, one request each: `SCAN_RESULTS` stops at 4 KiB.
-        fn read_scan(&self) -> Result<Vec<Nearby>, String> {
+        fn read_scan(&self) -> Result<Vec<Nearby>, WifiError> {
             let mut all = Vec::new();
             let mut reply = self.req(&format!("BSS FIRST {BSS_MASK}"))?;
             while let Some(b) = parse::bss(&reply) {
@@ -697,14 +825,19 @@ mod worker {
             Ok(parse::fold(&all))
         }
 
-        fn command(&mut self, cmd: NetCommand) -> Result<(), String> {
+        fn command(&mut self, cmd: NetCommand) -> Result<(), WifiError> {
             log::info!("wifi: {cmd:?}");
             match cmd {
                 NetCommand::Scan => match self.req("SCAN")?.trim() {
                     // Busy: wpa_supplicant's own scan is on, and its
                     // results come the same way.
                     "OK" | "FAIL-BUSY" => self.wifi.scanning = true,
-                    other => return Err(format!("SCAN: {other}")),
+                    other => {
+                        return Err(WifiError::Refused {
+                            doing: "SCAN".into(),
+                            reply: other.to_string(),
+                        });
+                    }
                 },
                 NetCommand::SetEnabled(on) => {
                     self.off = !on;
@@ -727,14 +860,14 @@ mod worker {
                 }
                 NetCommand::Connect(ssid) => {
                     if self.join.is_some() {
-                        return Err("a join is already under way".into());
+                        return Err(WifiError::Rejected("a join is already under way".into()));
                     }
                     let id = self
                         .saved
                         .iter()
                         .find(|s| s.ssid == ssid)
                         .map(|s| s.id)
-                        .ok_or("not a saved network")?;
+                        .ok_or_else(|| WifiError::Rejected("not a saved network".into()))?;
                     self.start_join(id, ssid, false);
                     if let Err(e) = self.ok(&format!("SELECT_NETWORK {id}")) {
                         self.end_join(JoinStage::Failed(JoinError::Failed));
@@ -748,13 +881,13 @@ mod worker {
                     hidden,
                 } => {
                     if self.join.is_some() {
-                        return Err("a join is already under way".into());
+                        return Err(WifiError::Rejected("a join is already under way".into()));
                     }
-                    let id: u32 = self
-                        .req("ADD_NETWORK")?
-                        .trim()
-                        .parse()
-                        .map_err(|_| "ADD_NETWORK failed")?;
+                    let reply = self.req("ADD_NETWORK")?;
+                    let id: u32 = reply.trim().parse().map_err(|_| WifiError::Refused {
+                        doing: "ADD_NETWORK".into(),
+                        reply: reply.trim().to_string(),
+                    })?;
                     self.start_join(id, ssid.clone(), true);
                     if let Err(e) = self.set_up(id, &ssid, security, &key, hidden) {
                         self.end_join(JoinStage::Failed(JoinError::Failed));
@@ -789,16 +922,17 @@ mod worker {
             sec: Security,
             key: &str,
             hidden: bool,
-        ) -> Result<(), String> {
+        ) -> Result<(), WifiError> {
             self.ok(&format!("SET_NETWORK {id} ssid {}", parse::hex(&ssid.0)))?;
-            let fields = parse::key_mgmt(sec, self.sae)
-                .ok_or_else(|| format!("{} can't be joined here", sec.label()))?;
+            let fields = parse::key_mgmt(sec, self.sae).ok_or_else(|| {
+                WifiError::Rejected(format!("{} can't be joined here", sec.label()))
+            })?;
             for (k, v) in fields {
                 self.ok(&format!("SET_NETWORK {id} {k} {v}"))?;
             }
             if sec.needs_key() {
                 if let Some(p) = network::key_problem(key) {
-                    return Err(format!("the password: {p}"));
+                    return Err(WifiError::Rejected(format!("the password: {p}")));
                 }
                 // Quoted: a passphrase, which SAE needs as it is.
                 // wpa_supplicant reads to the last quote, so quotes inside
@@ -817,7 +951,7 @@ mod worker {
             }
         }
 
-        fn step_join(&mut self) -> Result<(), String> {
+        fn step_join(&mut self) -> Result<(), WifiError> {
             let Some(j) = &self.join else {
                 return Ok(());
             };
@@ -845,7 +979,7 @@ mod worker {
 
         /// Joined: older entries of the same name go, the others come back
         /// as they were, and it's all saved. Returns whether it was.
-        fn finish_join(&mut self) -> Result<bool, String> {
+        fn finish_join(&mut self) -> Result<bool, WifiError> {
             let j = self.join.as_ref().unwrap();
             for s in &j.before {
                 if s.id == j.id {
@@ -979,6 +1113,85 @@ mod worker {
             Some(s.local_addr().ok()?.ip().to_string())
         });
         (out, address)
+    }
+
+    /// The worker against a socket pair whose other end plays
+    /// wpa_supplicant, on any Unix.
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        struct NoWake;
+        impl Waker for NoWake {
+            fn wake(&self) {}
+        }
+
+        /// Short, so a request nobody answers fails fast.
+        const WAIT: Duration = Duration::from_millis(50);
+
+        /// A worker with its sockets open; the other ends of the requests
+        /// and the events.
+        fn rig() -> (Worker, UnixDatagram, UnixDatagram) {
+            let (req, wpa) = UnixDatagram::pair().unwrap();
+            let (ev, wpa_events) = UnixDatagram::pair().unwrap();
+            let shared = Arc::new(Shared {
+                snap: Mutex::new((
+                    1,
+                    NetSnapshot {
+                        links: Vec::new(),
+                        address: None,
+                        wifi: Err(String::new()),
+                    },
+                )),
+                waker: Arc::new(NoWake),
+            });
+            let (_tx, rx) = mpsc::channel();
+            let mut w = Worker::new(shared, rx);
+            w.ctrl = Some((Ctrl::new(req, WAIT).unwrap(), Ctrl::new(ev, WAIT).unwrap()));
+            (w, wpa, wpa_events)
+        }
+
+        /// The requests wpa_supplicant has been sent, in order.
+        fn sent(wpa: &UnixDatagram) -> Vec<String> {
+            wpa.set_nonblocking(true).unwrap();
+            let mut buf = [0u8; 4096];
+            let mut out = Vec::new();
+            while let Ok(n) = wpa.recv(&mut buf) {
+                out.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                assert!(out.len() < 100, "a request flood: {out:?}");
+            }
+            out
+        }
+
+        #[test]
+        fn a_reply_that_comes_late_drops_the_sockets() {
+            let (mut w, wpa, _events) = rig();
+            let e = w.command(NetCommand::Scan).unwrap_err();
+            assert!(e.reconnects(), "no reply in time: {e}");
+            w.recover(e, false);
+            assert!(
+                w.ctrl.is_none(),
+                "kept, the late reply would be read as the next request's"
+            );
+            assert_eq!(sent(&wpa), ["SCAN"]);
+        }
+
+        #[test]
+        fn a_refused_request_keeps_the_sockets() {
+            let (mut w, wpa, _events) = rig();
+            wpa.send(b"FAIL\n").unwrap();
+            let e = w.command(NetCommand::Scan).unwrap_err();
+            assert!(!e.reconnects(), "wpa_supplicant answered: {e}");
+            w.recover(e, false);
+            assert!(w.ctrl.is_some());
+        }
+
+        #[test]
+        fn a_key_never_reaches_an_error() {
+            let (w, _wpa, _events) = rig();
+            let e = w.ok("SET_NETWORK 3 psk \"hunter22\"").unwrap_err();
+            assert!(!e.to_string().contains("hunter22"), "{e}");
+        }
     }
 }
 

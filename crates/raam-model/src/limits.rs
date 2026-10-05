@@ -220,6 +220,18 @@ pub const HTTP_BODY_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 /// Weather and geolocation calls. Chosen.
 pub const WEATHER_HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 
+// ---- Wi-Fi (wpa_supplicant's control socket, src/wifi.rs) ---------------------
+
+/// The longest a request to wpa_supplicant may take to send, or its reply to
+/// come. Chosen: it answers in milliseconds, so seconds means it's stuck.
+/// The sockets are then opened again, since a reply that came late would be
+/// read as the next request's.
+pub const WIFI_REPLY_WAIT: Duration = Duration::from_secs(3);
+/// The Wi-Fi worker waits this long for an event before it looks at the
+/// join's clock and the UI's commands again. Chosen: a tap answers within
+/// a quarter second, and an idle worker wakes four times a second.
+pub const WIFI_EVENT_WAIT: Duration = Duration::from_millis(250);
+
 // ---- weather cadence ----------------------------------------------------------
 
 /// Open-Meteo poll cadence. Chosen: courteous to a free API.

@@ -304,6 +304,22 @@ const MIB: u64 = 1024 * 1024;
 const FREE_SPACE_STEP: u64 = 10 * MIB;
 
 pub fn spawn(db: Db, paths: Paths, cap_mb: u32, host: Host) -> Arc<Library> {
+    let (lib, writer_rx, library_rx) = build(db, paths, cap_mb, host);
+    let l = lib.clone();
+    std::thread::spawn(move || writer_loop(l, writer_rx));
+    let l = lib.clone();
+    std::thread::spawn(move || library_loop(l, library_rx));
+    lib
+}
+
+/// The library and its two threads' command queues, before the threads
+/// start (tests drive it without them).
+fn build(
+    db: Db,
+    paths: Paths,
+    cap_mb: u32,
+    host: Host,
+) -> (Arc<Library>, Receiver<Cmd>, Receiver<Cmd>) {
     let (writer_tx, writer_rx) = std::sync::mpsc::channel();
     let (library_tx, library_rx) = std::sync::mpsc::channel();
     let cache_dir = paths.files_dir.join("immich-cache");
@@ -346,11 +362,7 @@ pub fn spawn(db: Db, paths: Paths, cap_mb: u32, host: Host) -> Arc<Library> {
         host,
         paths,
     });
-    let l = lib.clone();
-    std::thread::spawn(move || writer_loop(l, writer_rx));
-    let l = lib.clone();
-    std::thread::spawn(move || library_loop(l, library_rx));
-    lib
+    (lib, writer_rx, library_rx)
 }
 
 /// The first-run cap: 1 GB, or a quarter of the free space if that is less.
@@ -871,7 +883,8 @@ fn publish_stats(lib: &Library, st: &Loop) {
     let conn = lib.db.lock().unwrap();
     let (immich_assets, immich_cached) = db::counts(&conn, SourceKind::Immich);
     let (local_assets, local_ready) = db::counts(&conn, SourceKind::Local);
-    let cache_bytes = db::cached_bytes(&conn, SourceKind::Immich);
+    // Display only: a failed read shows 0 and decides nothing.
+    let cache_bytes = db::cached_bytes(&conn, SourceKind::Immich).unwrap_or(0);
     let shared = db::shared_count(&conn);
     let hidden = db::hidden_list(&conn);
     let albums = db::albums(&conn);
@@ -1130,7 +1143,9 @@ fn materialise_one(lib: &Library, st: &mut Loop) -> bool {
     if !faces_checked {
         match provider.fetch_focus(&media) {
             Ok(focus) => {
-                let _ = db::set_focus(&lib.db.lock().unwrap(), asset, focus);
+                if let Err(e) = db::set_focus(&lib.db.lock().unwrap(), asset, focus) {
+                    log::warn!("library: saving the focus of asset {asset}: {e}");
+                }
             }
             Err(e) => log::warn!("library: focus for asset {asset}: {e}"),
         }
@@ -1147,13 +1162,21 @@ fn materialise_one(lib: &Library, st: &mut Loop) -> bool {
                 return true;
             }
             stall::at(&lib.host, Site::Row, Writer::Local, &what);
-            let _ = db::insert_cached(
+            let stored = db::insert_cached(
                 &lib.db.lock().unwrap(),
                 asset,
                 &path,
                 db::sql_int(bytes.len()),
                 db::now_ms(),
             );
+            if let Err(e) = stored {
+                // Not retried until the next scan: with no row, the next
+                // pass would make it again at once, and again.
+                log::error!("library: recording the preview of asset {asset}: {e}");
+                db::remove_files(&[path]);
+                st.failed.insert(asset);
+                return true;
+            }
             // A new local photo just became showable.
             lib.bump();
             true
@@ -1203,7 +1226,7 @@ pub fn store_immich_preview(
     if len > cap {
         return Ok(false);
     }
-    if !evict && db::cached_bytes(&lib.db.lock().unwrap(), SourceKind::Immich) + len > cap {
+    if !evict && cache_size(lib)? + len > cap {
         return Ok(false);
     }
     let path = lib.cache_dir.join(format!("{asset}.jpg"));
@@ -1220,9 +1243,18 @@ pub fn store_immich_preview(
     stall::at(&lib.host, Site::Row, writer, &what);
     let conn = lib.db.lock().unwrap();
     let evicted = if evict {
-        make_room(&conn, Some(asset), len, cap, LRU_BATCH_STORE).0
+        make_room(&conn, Some(asset), len, cap, LRU_BATCH_STORE)
     } else {
-        Vec::new()
+        Ok((Vec::new(), 0))
+    };
+    let evicted = match evicted {
+        Ok((files, _)) => files,
+        Err(e) => {
+            // No room made, so none taken.
+            drop(conn);
+            db::remove_files(&[path]);
+            return Err(LibraryError::db("making room in the cache")(e));
+        }
     };
     let stored = db::insert_cached(&conn, asset, &path, len, db::now_ms());
     drop(conn);
@@ -1259,7 +1291,7 @@ pub fn fetch_immich_video(
     let room = if evict {
         cap
     } else {
-        cap - db::cached_bytes(&lib.db.lock().unwrap(), SourceKind::Immich)
+        cap - cache_size(lib).map_err(|e| ProviderError::Failed(e.to_string()))?
     };
     // Prefetch with the cache full: nothing to fetch it into.
     let Ok(max_bytes @ 1..) = u64::try_from(room) else {
@@ -1276,11 +1308,21 @@ pub fn fetch_immich_video(
     // Before the probe: a download stopped at the cap is short, and a
     // probe of it would mark a good clip unplayable. Checked again against
     // the cache now, which may have grown meanwhile.
-    if len > room
-        || (!evict && db::cached_bytes(&lib.db.lock().unwrap(), SourceKind::Immich) + len > cap)
-    {
-        let _ = std::fs::remove_file(&tmp);
-        return Ok(None);
+    let over = if len > room || evict {
+        Ok(len > room)
+    } else {
+        cache_size(lib).map(|n| n + len > cap)
+    };
+    match over {
+        Ok(false) => {}
+        Ok(true) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Ok(None);
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(ProviderError::Failed(e.to_string()));
+        }
     }
     let probed = lib.host.probe.probe(&tmp.to_string_lossy());
     log::info!(
@@ -1326,12 +1368,25 @@ pub fn fetch_immich_video(
     sync_parent(&path).map_err(|e| ProviderError::Failed(e.to_string()))?;
     let conn = lib.db.lock().unwrap();
     let evicted = if evict {
-        make_room(&conn, Some(asset), len, cap, LRU_BATCH_STORE).0
+        make_room(&conn, Some(asset), len, cap, LRU_BATCH_STORE)
     } else {
-        Vec::new()
+        Ok((Vec::new(), 0))
+    };
+    let evicted = match evicted {
+        Ok((files, _)) => files,
+        Err(e) => {
+            drop(conn);
+            db::remove_files(std::slice::from_ref(&path));
+            return Err(ProviderError::Failed(format!(
+                "making room in the cache: {e}"
+            )));
+        }
     };
     let stored = db::insert_cached_variant(&conn, asset, "video", &path, len, db::now_ms());
-    let _ = db::set_playable(&conn, asset);
+    if let Err(e) = db::set_playable(&conn, asset) {
+        // An earlier mark stays: the clip waits for the next Clear cache.
+        log::warn!("library: clip {asset} plays here, but saying so failed: {e}");
+    }
     drop(conn);
     db::remove_files(&evicted);
     if let Err(e) = stored {
@@ -1353,8 +1408,8 @@ fn make_room(
     incoming: i64,
     cap: i64,
     batch: usize,
-) -> (Vec<PathBuf>, usize) {
-    let mut total = db::cached_bytes(conn, SourceKind::Immich);
+) -> rusqlite::Result<(Vec<PathBuf>, usize)> {
+    let mut total = db::cached_bytes(conn, SourceKind::Immich)?;
     let mut files = Vec::new();
     let mut dropped = 0;
     while total + incoming > cap {
@@ -1375,15 +1430,28 @@ fn make_room(
             );
         }
     }
-    (files, dropped)
+    Ok((files, dropped))
+}
+
+/// The Immich cache's size, for a check against the cap.
+fn cache_size(lib: &Library) -> Result<i64, LibraryError> {
+    db::cached_bytes(&lib.db.lock().unwrap(), SourceKind::Immich)
+        .map_err(LibraryError::db("reading the cache's size"))
 }
 
 /// Brings the cache under a lowered cap, least recently shown first.
 fn enforce_cap(lib: &Library) {
     let conn = lib.db.lock().unwrap();
     let cap_bytes = lib.cap_bytes();
-    let (files, dropped) = make_room(&conn, None, 0, db::sql_int(cap_bytes), LRU_BATCH_ENFORCE);
+    let made = make_room(&conn, None, 0, db::sql_int(cap_bytes), LRU_BATCH_ENFORCE);
     drop(conn);
+    let (files, dropped) = match made {
+        Ok(made) => made,
+        Err(e) => {
+            log::error!("library: bringing the cache under its cap: {e}");
+            return;
+        }
+    };
     db::remove_files(&files);
     if dropped > 0 {
         log::info!(
@@ -1494,6 +1562,75 @@ mod tests {
             },
         );
         (lib, dir)
+    }
+
+    /// A local preview whose row won't write is left until the next scan,
+    /// not made again on the very next pass, and again.
+    #[test]
+    fn a_preview_whose_row_wont_write_isnt_made_again_at_once() {
+        crate::install_test_clock();
+        let dir = std::env::temp_dir().join(format!("raam-norow-{}", std::process::id()));
+        drop(std::fs::remove_dir_all(&dir));
+        let photos = dir.join("photos");
+        std::fs::create_dir_all(&photos).unwrap();
+        let mut jpeg = Vec::new();
+        jpeg_encoder::Encoder::new(&mut jpeg, 90)
+            .encode(&[200; 4 * 2 * 3], 4, 2, jpeg_encoder::ColorType::Rgb)
+            .unwrap();
+        std::fs::write(photos.join("a.jpg"), &jpeg).unwrap();
+        let db = db::open(&dir.join("raam.db"), &photos.to_string_lossy()).unwrap();
+        let (lib, _writer, _library) = build(
+            db,
+            Paths {
+                files_dir: dir.clone(),
+                local_dir_default: photos.display().to_string(),
+                curation_export: dir.join("curation.json"),
+            },
+            DEFAULT_CAP_MB,
+            Host {
+                waker: Arc::new(NoWaker),
+                switches: Arc::new(NoSwitches),
+                probe: Arc::new(NoProbe),
+                grant_storage: Arc::new(|| true),
+            },
+        );
+        std::fs::create_dir_all(&lib.local_preview_dir).unwrap();
+        let mut st = Loop {
+            immich: ImmichProvider::new(),
+            local: LocalFolder::new(
+                lib.local_dir.clone(),
+                Vec::new(),
+                lib.host.probe.clone(),
+                lib.host.grant_storage.clone(),
+            ),
+            next_scan: clock::now(),
+            next_sync: clock::now(),
+            idle: false,
+            failed: Default::default(),
+            local_note: String::new(),
+            sync: SyncNotes::new(),
+            prefetch: Prefetch::Idle,
+            test_cap: None,
+            setting_cap: lib.cap_bytes(),
+        };
+        sync_provider(&lib, &mut st.local).unwrap();
+        lib.db
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER no_rows BEFORE INSERT ON cached_file
+                 BEGIN SELECT RAISE(FAIL, 'disk I/O error'); END;",
+            )
+            .unwrap();
+        assert!(materialise_one(&lib, &mut st), "there was work");
+        assert_eq!(st.failed.len(), 1, "left until the next scan");
+        assert!(
+            !materialise_one(&lib, &mut st),
+            "and not made again at once"
+        );
+        let previews = std::fs::read_dir(&lib.local_preview_dir).unwrap().count();
+        assert_eq!(previews, 0, "no file without a row");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A restart waits on `flush` after sending the settings save: when it

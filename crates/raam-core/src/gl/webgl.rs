@@ -17,7 +17,7 @@
 //! blocks that dereference one say which argument sizes it.
 #![allow(non_snake_case, clippy::missing_safety_doc, clippy::too_many_arguments)]
 
-use super::raw::{bytes, mat4s, write_log};
+use super::raw::{bytes, image_len, mat4s, write_log};
 use super::table::Table;
 use super::*;
 use std::cell::RefCell;
@@ -73,16 +73,6 @@ pub fn make_current(gl: Wgl) {
             strings: HashMap::new(),
         })
     });
-}
-
-/// Bytes per pixel of an unpacked GL_UNSIGNED_BYTE image.
-fn bpp(format: GlEnum) -> usize {
-    match format {
-        GL_RGBA => 4,
-        0x1907 => 3, // GL_RGB
-        0x190A => 2, // GL_LUMINANCE_ALPHA
-        _ => 1,      // GL_ALPHA, GL_LUMINANCE
-    }
 }
 
 pub unsafe fn glGetString(name: GlEnum) -> *const u8 {
@@ -484,15 +474,10 @@ pub unsafe fn glTexImage2D(
     type_: GlEnum,
     pixels: *const c_void,
 ) {
-    // SAFETY: non-null `pixels` holds a width x height image in `format`
-    // by GL's contract, at least width * height * bpp bytes (row padding
-    // only adds to it).
-    let data = unsafe {
-        bytes(
-            pixels,
-            from_gl_size::<_, usize>(width) * from_gl_size::<_, usize>(height) * bpp(format),
-        )
-    };
+    // SAFETY: non-null `pixels` holds the width x height image GL reads
+    // in `format` and `type_`, by GL's contract: `image_len` bytes, which
+    // panics for any upload it can't size.
+    let data = unsafe { bytes(pixels, image_len(width, height, format, type_)) };
     with(|s| {
         let r =
             s.gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
@@ -523,13 +508,8 @@ pub unsafe fn glTexSubImage2D(
     type_: GlEnum,
     pixels: *const c_void,
 ) {
-    // SAFETY: as glTexImage2D's: at least width * height * bpp bytes.
-    let data = unsafe {
-        bytes(
-            pixels,
-            from_gl_size::<_, usize>(width) * from_gl_size::<_, usize>(height) * bpp(format),
-        )
-    };
+    // SAFETY: as glTexImage2D's: `image_len` bytes.
+    let data = unsafe { bytes(pixels, image_len(width, height, format, type_)) };
     with(|s| {
         let r =
             s.gl.tex_sub_image_2d_with_i32_and_i32_and_u32_and_type_and_opt_u8_array(

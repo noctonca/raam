@@ -544,6 +544,26 @@ mod worker {
         Some(WpaNetwork { shared, tx })
     }
 
+    /// What a join changed that has to be put back: the networks
+    /// `SELECT_NETWORK` disabled, and the one it added. Each is known by id
+    /// and name, so after a wpa_supplicant restart (new ids) it never
+    /// touches another network.
+    #[derive(Debug)]
+    struct Restore {
+        enable: Vec<parse::Saved>,
+        remove: Option<(u32, Ssid)>,
+    }
+
+    impl Restore {
+        /// `remove_added`: the join failed, so a network it added goes too.
+        fn after(j: &Joining, remove_added: bool) -> Restore {
+            Restore {
+                enable: j.before.iter().filter(|s| !s.disabled).cloned().collect(),
+                remove: (remove_added && j.added).then(|| (j.id, j.ssid.clone())),
+            }
+        }
+    }
+
     /// A join under way.
     struct Joining {
         id: u32,
@@ -570,6 +590,9 @@ mod worker {
         /// Turned off with nothing saved, which wpa_supplicant can't hold.
         off: bool,
         join: Option<Joining>,
+        /// Put back after the next refresh, so it works from the networks
+        /// as they are; kept across a reconnect.
+        restore: Option<Restore>,
         refreshed: Option<Instant>,
     }
 
@@ -585,6 +608,7 @@ mod worker {
                 saved: Vec::new(),
                 off: false,
                 join: None,
+                restore: None,
                 refreshed: None,
             }
         }
@@ -613,7 +637,7 @@ mod worker {
                     }
                 }
                 if let Err(e) = self.pass() {
-                    self.recover(e, true);
+                    self.recover(e);
                     if self.ctrl.is_none() {
                         continue;
                     }
@@ -622,7 +646,7 @@ mod worker {
                     Err(TryRecvError::Disconnected) => return,
                     Ok(cmd) => {
                         if let Err(e) = self.command(cmd) {
-                            self.recover(e, false);
+                            self.recover(e);
                         }
                     }
                     Err(TryRecvError::Empty) => {}
@@ -633,22 +657,17 @@ mod worker {
             }
         }
 
-        /// After an error: one that reconnects drops the sockets and ends a
-        /// join under way, whose events they carried. `in_pass`: it came
-        /// from the join's own steps, which end it anyway.
-        fn recover(&mut self, e: WifiError, in_pass: bool) {
-            let reconnects = e.reconnects();
-            if reconnects {
-                log::warn!("wifi: {e}; reconnecting");
-            } else {
+        /// After an error: one that reconnects drops the sockets and fails
+        /// a join under way, whose events they carried. What the join
+        /// changed is put back once they're open again.
+        fn recover(&mut self, e: WifiError) {
+            if !e.reconnects() {
                 log::warn!("wifi: {e}");
+                return;
             }
-            if (reconnects || in_pass) && self.join.is_some() {
-                self.end_join(JoinStage::Failed(JoinError::Failed));
-            }
-            if reconnects {
-                self.ctrl = None;
-            }
+            log::warn!("wifi: {e}; reconnecting");
+            self.end_join(JoinStage::Failed(JoinError::Failed));
+            self.ctrl = None;
         }
 
         /// The sockets, which every request needs.
@@ -677,6 +696,53 @@ mod worker {
             };
             if self.refreshed.is_none_or(|t| t.elapsed() >= every) {
                 self.refresh()?;
+                self.put_back()?;
+            }
+            Ok(())
+        }
+
+        /// Puts back what a join changed, against the networks the last
+        /// refresh read. A refused step won't succeed later, so it's
+        /// logged and the rest goes on; a socket error keeps it all for
+        /// after the reconnect.
+        fn put_back(&mut self) -> Result<(), WifiError> {
+            let Some(r) = &self.restore else {
+                return Ok(());
+            };
+            let known =
+                |id: u32, ssid: &Ssid| self.saved.iter().any(|s| s.id == id && s.ssid == *ssid);
+            let mut steps: Vec<String> = Vec::new();
+            if let Some((id, ssid)) = &r.remove
+                && known(*id, ssid)
+            {
+                steps.push(format!("REMOVE_NETWORK {id}"));
+            }
+            for s in r.enable.iter().filter(|s| known(s.id, &s.ssid)) {
+                steps.push(format!("ENABLE_NETWORK {}", s.id));
+            }
+            for step in &steps {
+                match self.ok(step) {
+                    Ok(()) => {}
+                    Err(e) if e.reconnects() => return Err(e),
+                    Err(e) => log::warn!("wifi: not put back: {e}"),
+                }
+            }
+            log::info!(
+                "wifi: put back what the join changed ({} steps)",
+                steps.len()
+            );
+            self.restore = None;
+            self.refresh()
+        }
+
+        /// Ends a join under way before a command that changes the
+        /// networks, and puts back what it changed, so the command acts on
+        /// the networks as they were and the undo can't override it.
+        fn settle_join(&mut self) -> Result<(), WifiError> {
+            self.end_join(JoinStage::Failed(JoinError::Failed));
+            if self.restore.is_some() {
+                self.refresh()?;
+                self.put_back()?;
             }
             Ok(())
         }
@@ -840,6 +906,7 @@ mod worker {
                     }
                 },
                 NetCommand::SetEnabled(on) => {
+                    self.settle_join()?;
                     self.off = !on;
                     if !self.saved.is_empty() {
                         self.ok(if on {
@@ -852,6 +919,7 @@ mod worker {
                     self.refresh()?;
                 }
                 NetCommand::Forget(ssid) => {
+                    self.settle_join()?;
                     for s in self.saved.iter().filter(|s| s.ssid == ssid) {
                         self.ok(&format!("REMOVE_NETWORK {}", s.id))?;
                     }
@@ -862,6 +930,7 @@ mod worker {
                     if self.join.is_some() {
                         return Err(WifiError::Rejected("a join is already under way".into()));
                     }
+                    self.settle_join()?;
                     let id = self
                         .saved
                         .iter()
@@ -883,6 +952,7 @@ mod worker {
                     if self.join.is_some() {
                         return Err(WifiError::Rejected("a join is already under way".into()));
                     }
+                    self.settle_join()?;
                     let reply = self.req("ADD_NETWORK")?;
                     let id: u32 = reply.trim().parse().map_err(|_| WifiError::Refused {
                         doing: "ADD_NETWORK".into(),
@@ -899,6 +969,16 @@ mod worker {
         }
 
         fn start_join(&mut self, id: u32, ssid: Ssid, added: bool) {
+            assert!(
+                self.join.is_none(),
+                "a join over {:?}",
+                self.join.as_ref().map(|j| &j.ssid)
+            );
+            assert!(
+                self.restore.is_none(),
+                "a join must start from the networks as they were, not {:?}",
+                self.restore
+            );
             self.wifi.join = Some(Join {
                 ssid: ssid.clone(),
                 stage: JoinStage::Connecting,
@@ -966,8 +1046,7 @@ mod worker {
                         .as_ref()
                         .is_some_and(|c| c.ssid == j.ssid && c.address.is_some());
                     if joined {
-                        let remembered = self.finish_join()?;
-                        self.end_join(JoinStage::Joined { remembered });
+                        return self.finish_join();
                     } else if t.elapsed() > ADDRESS_TIMEOUT {
                         self.end_join(JoinStage::Failed(JoinError::NoAddress));
                     }
@@ -978,34 +1057,60 @@ mod worker {
         }
 
         /// Joined: older entries of the same name go, the others come back
-        /// as they were, and it's all saved. Returns whether it was.
-        fn finish_join(&mut self) -> Result<bool, WifiError> {
-            let j = self.join.as_ref().unwrap();
-            for s in &j.before {
-                if s.id == j.id {
-                    continue;
-                }
+        /// as they were, and it's all saved. Whatever goes wrong here, the
+        /// join stays joined: a step wpa_supplicant refuses is logged, and
+        /// a socket error leaves the others to be put back after the
+        /// reconnect, unsaved.
+        fn finish_join(&mut self) -> Result<(), WifiError> {
+            let j = self
+                .join
+                .as_ref()
+                .expect("finishing a join that isn't under way");
+            assert!(
+                j.connected.is_some(),
+                "finishing {:?} before it connected",
+                j.ssid
+            );
+            let mut steps: Vec<String> = Vec::new();
+            for s in j.before.iter().filter(|s| s.id != j.id) {
                 if j.added && s.ssid == j.ssid {
-                    self.ok(&format!("REMOVE_NETWORK {}", s.id))?;
+                    steps.push(format!("REMOVE_NETWORK {}", s.id));
                 } else if !s.disabled {
-                    self.ok(&format!("ENABLE_NETWORK {}", s.id))?;
+                    steps.push(format!("ENABLE_NETWORK {}", s.id));
                 }
             }
-            Ok(self.save())
+            for step in &steps {
+                match self.ok(step) {
+                    Ok(()) => {}
+                    Err(e) if e.reconnects() => {
+                        self.restore = self.join.as_ref().map(|j| Restore::after(j, false));
+                        self.end_join(JoinStage::Joined { remembered: false });
+                        return Err(e);
+                    }
+                    Err(e) => log::warn!("wifi: joined, but {e}"),
+                }
+            }
+            let remembered = self.save();
+            self.end_join(JoinStage::Joined { remembered });
+            Ok(())
         }
 
-        /// Ends the join with `stage`; a failed one is undone.
+        /// Ends the join with `stage`. A failed one is put back after the
+        /// next refresh (`put_back`), never on the spot: it may be ending
+        /// because the sockets just failed.
         fn end_join(&mut self, stage: JoinStage) {
             let Some(j) = self.join.take() else {
                 return;
             };
             log::info!("wifi: join of {:?} ended: {stage:?}", j.ssid);
-            if let JoinStage::Failed(_) = stage {
-                if j.added {
-                    let _ = self.ok(&format!("REMOVE_NETWORK {}", j.id));
+            match stage {
+                JoinStage::Failed(_) => {
+                    assert!(self.restore.is_none(), "two undos: {:?}", self.restore);
+                    self.restore = Some(Restore::after(&j, true));
                 }
-                for s in j.before.iter().filter(|s| !s.disabled) {
-                    let _ = self.ok(&format!("ENABLE_NETWORK {}", s.id));
+                JoinStage::Joined { .. } => {}
+                JoinStage::Connecting | JoinStage::Addressing => {
+                    unreachable!("a join ends joined or failed, not {stage:?}")
                 }
             }
             self.set_stage(stage);
@@ -1168,7 +1273,7 @@ mod worker {
             let (mut w, wpa, _events) = rig();
             let e = w.command(NetCommand::Scan).unwrap_err();
             assert!(e.reconnects(), "no reply in time: {e}");
-            w.recover(e, false);
+            w.recover(e);
             assert!(
                 w.ctrl.is_none(),
                 "kept, the late reply would be read as the next request's"
@@ -1182,7 +1287,7 @@ mod worker {
             wpa.send(b"FAIL\n").unwrap();
             let e = w.command(NetCommand::Scan).unwrap_err();
             assert!(!e.reconnects(), "wpa_supplicant answered: {e}");
-            w.recover(e, false);
+            w.recover(e);
             assert!(w.ctrl.is_some());
         }
 
@@ -1191,6 +1296,153 @@ mod worker {
             let (w, _wpa, _events) = rig();
             let e = w.ok("SET_NETWORK 3 psk \"hunter22\"").unwrap_err();
             assert!(!e.to_string().contains("hunter22"), "{e}");
+        }
+
+        fn ssid(name: &str) -> Ssid {
+            Ssid(name.as_bytes().to_vec())
+        }
+
+        fn saved(id: u32, name: &str, disabled: bool) -> parse::Saved {
+            parse::Saved {
+                id,
+                ssid: ssid(name),
+                disabled,
+            }
+        }
+
+        /// Queues wpa_supplicant's replies, in the order they'll be read.
+        fn answer(wpa: &UnixDatagram, replies: &[&str]) {
+            for r in replies {
+                wpa.send(r.as_bytes()).unwrap();
+            }
+        }
+
+        /// New sockets, as after a reconnect.
+        fn reopen(w: &mut Worker) -> (UnixDatagram, UnixDatagram) {
+            assert!(w.ctrl.is_none(), "reopening open sockets");
+            let (req, wpa) = UnixDatagram::pair().unwrap();
+            let (ev, wpa_events) = UnixDatagram::pair().unwrap();
+            w.ctrl = Some((Ctrl::new(req, WAIT).unwrap(), Ctrl::new(ev, WAIT).unwrap()));
+            (wpa, wpa_events)
+        }
+
+        const LIST: &str = "network id / ssid / bssid / flags\n";
+        const NOT_JOINED: &str = "wpa_state=DISCONNECTED\n";
+
+        /// "New", added for the join as id 5, over "Home" (id 0).
+        fn joining_new(w: &mut Worker) {
+            w.saved = vec![saved(0, "Home", false)];
+            w.start_join(5, ssid("New"), true);
+        }
+
+        fn stage(w: &Worker) -> JoinStage {
+            w.wifi.join.as_ref().expect("a join was started").stage
+        }
+
+        #[test]
+        fn a_failed_cleanup_keeps_the_network_just_joined() {
+            let (mut w, wpa, _events) = rig();
+            joining_new(&mut w);
+            w.join.as_mut().unwrap().connected = Some(Instant::now());
+            w.wifi.current = Some(Current {
+                ssid: ssid("New"),
+                rssi: None,
+                freq_mhz: 2412,
+                security: Security::Wpa2,
+                address: Some("192.168.0.9".into()),
+                link_mbps: None,
+            });
+            // ENABLE_NETWORK 0 refused, SAVE_CONFIG fine.
+            answer(&wpa, &["FAIL\n", "OK\n"]);
+            if let Err(e) = w.step_join() {
+                w.recover(e);
+            }
+            assert_eq!(stage(&w), JoinStage::Joined { remembered: true });
+            assert_eq!(sent(&wpa), ["ENABLE_NETWORK 0", "SAVE_CONFIG"]);
+        }
+
+        #[test]
+        fn a_join_cut_off_by_a_dead_socket_is_put_back_after_reconnecting() {
+            let (mut w, wpa, _events) = rig();
+            joining_new(&mut w);
+            let timed_out = std::io::Error::from(std::io::ErrorKind::TimedOut);
+            w.recover(WifiError::socket("STATUS")(timed_out));
+            assert_eq!(stage(&w), JoinStage::Failed(JoinError::Failed));
+            assert!(
+                sent(&wpa).is_empty(),
+                "nothing goes to sockets that just failed"
+            );
+
+            let (wpa, _events) = reopen(&mut w);
+            let list = format!("{LIST}0\tHome\tany\t[DISABLED]\n5\tNew\tany\t[DISABLED]\n");
+            let after = format!("{LIST}0\tHome\tany\t\n");
+            answer(
+                &wpa,
+                &[&list, NOT_JOINED, "OK\n", "OK\n", &after, NOT_JOINED],
+            );
+            w.refresh().unwrap();
+            w.put_back().unwrap();
+            assert_eq!(
+                sent(&wpa),
+                [
+                    "LIST_NETWORKS",
+                    "STATUS",
+                    "REMOVE_NETWORK 5",
+                    "ENABLE_NETWORK 0",
+                    "LIST_NETWORKS",
+                    "STATUS"
+                ]
+            );
+            assert!(w.restore.is_none());
+            assert!(w.wifi.enabled, "Home is back on");
+        }
+
+        #[test]
+        fn a_restart_that_renumbered_the_networks_is_left_alone() {
+            let (mut w, wpa, _events) = rig();
+            joining_new(&mut w);
+            w.end_join(JoinStage::Failed(JoinError::Failed));
+            // wpa_supplicant restarted: ids 0 and 5 are other networks now.
+            let list = format!("{LIST}0\tOffice\tany\t[DISABLED]\n5\tCafe\tany\t\n");
+            answer(&wpa, &[&list, NOT_JOINED, &list, NOT_JOINED]);
+            w.refresh().unwrap();
+            w.put_back().unwrap();
+            assert_eq!(
+                sent(&wpa),
+                ["LIST_NETWORKS", "STATUS", "LIST_NETWORKS", "STATUS"]
+            );
+        }
+
+        #[test]
+        fn turning_wifi_off_during_a_join_stays_off() {
+            let (mut w, wpa, _events) = rig();
+            joining_new(&mut w);
+            let during = format!("{LIST}0\tHome\tany\t[DISABLED]\n5\tNew\tany\t\n");
+            let back = format!("{LIST}0\tHome\tany\t\n");
+            let off = format!("{LIST}0\tHome\tany\t[DISABLED]\n");
+            #[rustfmt::skip]
+            answer(&wpa, &[
+                &during, NOT_JOINED, "OK\n", "OK\n", &back, NOT_JOINED,
+                "OK\n", "OK\n", &off, NOT_JOINED,
+            ]);
+            w.command(NetCommand::SetEnabled(false)).unwrap();
+            assert!(w.join.is_none(), "the join ended first");
+            assert_eq!(
+                sent(&wpa),
+                [
+                    "LIST_NETWORKS",
+                    "STATUS",
+                    "REMOVE_NETWORK 5",
+                    "ENABLE_NETWORK 0",
+                    "LIST_NETWORKS",
+                    "STATUS",
+                    "DISABLE_NETWORK all",
+                    "SAVE_CONFIG",
+                    "LIST_NETWORKS",
+                    "STATUS"
+                ]
+            );
+            assert!(!w.wifi.enabled);
         }
     }
 }

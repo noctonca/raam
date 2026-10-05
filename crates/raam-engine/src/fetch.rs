@@ -654,7 +654,9 @@ fn load_photo(
             })?;
             match provider.fetch_focus(&media) {
                 Ok(focus) => {
-                    let _ = db::set_focus(&lib.db.lock().unwrap(), e.asset, focus);
+                    if let Err(err) = db::set_focus(&lib.db.lock().unwrap(), e.asset, focus) {
+                        log::warn!("fetch: saving the focus of asset {}: {err}", e.asset);
+                    }
                 }
                 Err(err) => log::warn!("focus for asset {}: {err}", e.asset),
             }

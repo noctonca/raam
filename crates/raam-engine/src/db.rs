@@ -1149,11 +1149,16 @@ pub fn cached_video(conn: &Connection, asset: AssetId) -> Option<PathBuf> {
 /// The frame's decoder can't take this clip: out of the queue for
 /// good (until the cache is cleared), its cached file dropped. Returns the
 /// files to remove.
+/// A mark that won't write keeps the file: dropped unmarked, the clip
+/// would be fetched again at every sync, only to fail again.
 pub fn mark_unplayable(conn: &Connection, asset: AssetId, reason: &str) -> Vec<PathBuf> {
-    let _ = conn.execute(
+    if let Err(e) = conn.execute(
         "UPDATE asset SET playable = 0, unplayable_reason = ?2 WHERE id = ?1",
         params![asset.get(), reason],
-    );
+    ) {
+        log::error!("db: marking clip {asset} unplayable failed, its file kept: {e}");
+        return Vec::new();
+    }
     drop_cached(conn, asset)
 }
 
@@ -1213,15 +1218,15 @@ pub fn touch_cached(conn: &Connection, asset: AssetId) -> rusqlite::Result<usize
     )
 }
 
-/// Total bytes of cached files for one source.
-pub fn cached_bytes(conn: &Connection, kind: SourceKind) -> i64 {
+/// Total bytes of cached files for one source. An error, never 0: the
+/// cap is checked against it, and 0 would let the cache fill the disk.
+pub fn cached_bytes(conn: &Connection, kind: SourceKind) -> rusqlite::Result<i64> {
     conn.query_row(
         "SELECT COALESCE(SUM(c.bytes), 0) FROM cached_file c JOIN asset a ON a.id = c.asset_id
          JOIN source s ON s.id = a.source_id WHERE s.kind = ?1",
         [kind.as_str()],
         |r| r.get(0),
     )
-    .unwrap_or(0)
 }
 
 /// The single way cached files leave: their rows go, and their paths come
@@ -1409,8 +1414,16 @@ pub fn sweep(conn: &Connection, dirs: &[&Path]) -> (usize, usize) {
     let mut known = std::collections::HashSet::new();
     let mut missing = Vec::new();
     for (path, bytes) in rows {
-        let whole = std::fs::metadata(&path)
-            .is_ok_and(|m| m.is_file() && i64::try_from(m.len()) == Ok(bytes));
+        let whole = match std::fs::metadata(&path) {
+            Ok(m) => m.is_file() && i64::try_from(m.len()) == Ok(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            // Can't tell (no permission, an I/O error): kept, row and
+            // file, since a good file would otherwise be deleted.
+            Err(e) => {
+                log::warn!("db: startup sweep can't check {path}, kept: {e}");
+                true
+            }
+        };
         if whole {
             known.insert(PathBuf::from(path));
         } else {
@@ -2012,6 +2025,66 @@ mod tests {
         assert!(!paths[1].exists() && !paths[2].exists() && !stray.exists());
         assert_eq!(sweep(&conn, &[&dir]), (0, 0));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A file the sweep can't check (no permission, an I/O error) is
+    /// kept, row and all: only a file that is gone or short goes.
+    #[test]
+    fn the_sweep_keeps_a_file_it_cant_check() {
+        use std::os::unix::fs::PermissionsExt;
+        install_clock();
+        let dir = std::env::temp_dir().join(format!("raam-sweep-locked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let locked = dir.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        let db = open(Path::new(":memory:"), "").unwrap();
+        let conn = db.lock().unwrap();
+        set_immich_server(&conn, "http://immich.local:2283", "key").unwrap();
+        asset(&conn, "kept", "image", None);
+        let id = AssetId::new(conn.last_insert_rowid());
+        let path = locked.join("kept.jpg");
+        std::fs::write(&path, [0xff; 100]).unwrap();
+        insert_cached(&conn, id, &path, 100, 0).unwrap();
+        let mode = |m: u32| std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(m));
+        mode(0o000).unwrap();
+        if std::fs::metadata(&path).is_ok() {
+            // Root reads through the lock: nothing to test.
+            mode(0o755).unwrap();
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        let swept = sweep(&conn, &[&locked]);
+        mode(0o755).unwrap();
+        assert_eq!(swept, (0, 0));
+        assert_eq!(
+            cached_paths(&conn, id).unwrap(),
+            std::slice::from_ref(&path)
+        );
+        assert!(path.is_file());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A clip whose mark won't write keeps its file: dropped unmarked, it
+    /// would be fetched again at every sync.
+    #[test]
+    fn a_mark_that_wont_write_keeps_the_clips_file() {
+        install_clock();
+        let db = open(Path::new(":memory:"), "").unwrap();
+        let conn = db.lock().unwrap();
+        set_immich_server(&conn, "http://immich.local:2283", "key").unwrap();
+        asset(&conn, "clip", "video", None);
+        let id = AssetId::new(conn.last_insert_rowid());
+        insert_cached_variant(&conn, id, "video", Path::new("/cache/clip.mp4"), 100, 0).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER no_marks BEFORE UPDATE OF playable ON asset
+             BEGIN SELECT RAISE(FAIL, 'disk I/O error'); END;",
+        )
+        .unwrap();
+        assert!(mark_unplayable(&conn, id, "not H.264").is_empty());
+        assert_eq!(
+            cached_paths(&conn, id).unwrap(),
+            [PathBuf::from("/cache/clip.mp4")]
+        );
     }
 
     /// With the rows unreadable, every file is left where it is: against an

@@ -99,6 +99,33 @@ impl GapColour {
     }
 }
 
+/// The screen's colour depth on a host that can choose it (Android: the
+/// EGL config of the window). 16-bit (RGB565) is the default: a blind A/B
+/// on the SNUG frame found real photos indistinguishable from 24-bit,
+/// with banding visible only on a synthetic gradient, and SurfaceFlinger
+/// composites the window on the same GPU, reading half as much from a
+/// 565 buffer (an on-screen fade went from 43 to 50 fps).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ColourDepth {
+    Bits16,
+    Bits24,
+}
+
+impl ColourDepth {
+    pub const ALL: [ColourDepth; 2] = [ColourDepth::Bits16, ColourDepth::Bits24];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ColourDepth::Bits16 => "16",
+            ColourDepth::Bits24 => "24",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == s)
+    }
+}
+
 /// The clock overlay's look. Style and position are separate choices
 /// (`clock_corner`): both looks can sit in any corner.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -241,6 +268,7 @@ pub struct Settings {
     /// shown beside the setting.
     pub screen_default_max: usize,
     pub gap_colour: GapColour,
+    pub colour_depth: ColourDepth,
     pub clock_style: ClockStyle,
     pub clock_corner: Corner,
     pub clock_24h: bool,
@@ -281,6 +309,7 @@ impl Settings {
             collage_max: 3,
             screen_default_max: 3,
             gap_colour: GapColour::Black,
+            colour_depth: ColourDepth::Bits16,
             clock_style: ClockStyle::Simple,
             clock_corner: Corner::TopRight,
             clock_24h: true,
@@ -330,6 +359,11 @@ mod tests {
             GapColour::White => 1,
         });
         assert_eq!(GapColour::ALL.len(), 2);
+        check(&ColourDepth::ALL, |v| match v {
+            ColourDepth::Bits16 => 0,
+            ColourDepth::Bits24 => 1,
+        });
+        assert_eq!(ColourDepth::ALL.len(), 2);
         check(&ClockStyle::ALL, |v| match v {
             ClockStyle::Off => 0,
             ClockStyle::Simple => 1,
@@ -382,6 +416,7 @@ mod tests {
             VideoPlayback::parse,
         );
         check(&GapColour::ALL, GapColour::as_str, GapColour::parse);
+        check(&ColourDepth::ALL, ColourDepth::as_str, ColourDepth::parse);
         check(&ClockStyle::ALL, ClockStyle::as_str, ClockStyle::parse);
         check(&Corner::ALL, Corner::as_str, Corner::parse);
     }
@@ -400,6 +435,7 @@ mod tests {
             all.extend(FitBackground::ALL.map(FitBackground::as_str));
             all.extend(VideoPlayback::ALL.map(VideoPlayback::as_str));
             all.extend(GapColour::ALL.map(GapColour::as_str));
+            all.extend(ColourDepth::ALL.map(ColourDepth::as_str));
             all.extend(ClockStyle::ALL.map(ClockStyle::as_str));
             all.extend(Corner::ALL.map(Corner::as_str));
             all
@@ -449,6 +485,8 @@ mod tests {
                 parses_only_its_own_name(
                     &text, VideoPlayback::as_str, VideoPlayback::parse, &VideoPlayback::ALL)?;
                 parses_only_its_own_name(&text, GapColour::as_str, GapColour::parse, &GapColour::ALL)?;
+                parses_only_its_own_name(
+                    &text, ColourDepth::as_str, ColourDepth::parse, &ColourDepth::ALL)?;
                 parses_only_its_own_name(
                     &text, ClockStyle::as_str, ClockStyle::parse, &ClockStyle::ALL)?;
                 parses_only_its_own_name(&text, Corner::as_str, Corner::parse, &Corner::ALL)?;

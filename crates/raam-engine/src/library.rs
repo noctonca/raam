@@ -35,8 +35,8 @@ use crate::stall::{self, Site, Writer};
 use crate::{Host, Paths};
 use raam_core::{clock, schedule};
 use raam_model::limits::{
-    ALBUM_PICK_DEBOUNCE, CAP_CHOICES_MB, DEFAULT_CAP_MB, LIBRARY_IDLE_WAIT, LRU_BATCH_ENFORCE,
-    LRU_BATCH_STORE, PREVIEW_SHORT_SIDE, SCAN_EVERY, SYNC_EVERY, SYNC_RETRY,
+    ALBUM_PICK_DEBOUNCE, CAP_CHOICES_MB, DEFAULT_CAP_MB, FLUSH_TIMEOUT, LIBRARY_IDLE_WAIT,
+    LRU_BATCH_ENFORCE, LRU_BATCH_STORE, PREVIEW_SHORT_SIDE, SCAN_EVERY, SYNC_EVERY, SYNC_RETRY,
 };
 use raam_model::{
     AlbumId, AssetId, CurationKey, MediaRef, Prefetch, ProviderError, RemoteId, ScaleMode,
@@ -138,6 +138,9 @@ pub enum Cmd {
     SelectAlbum(AlbumId, bool),
     /// The frame couldn't decode this clip (asset id, why).
     SetUnplayable(AssetId, String),
+    /// Answered once every writer command sent before it is done: the
+    /// writer takes them in order. A restart waits on it (`flush`).
+    Flush(Sender<()>),
     // To the library thread.
     SetCap(u32),
     ClearCache,
@@ -161,7 +164,8 @@ impl Cmd {
             | Cmd::SetServer(_)
             | Cmd::ExportCuration
             | Cmd::SelectAlbum(..)
-            | Cmd::SetUnplayable(..) => true,
+            | Cmd::SetUnplayable(..)
+            | Cmd::Flush(_) => true,
             Cmd::SetCap(_)
             | Cmd::ClearCache
             | Cmd::Rescan
@@ -263,6 +267,15 @@ impl Library {
             &self.library_tx
         };
         let _ = tx.send(cmd);
+    }
+
+    /// Waits until every writer command sent so far is done (a settings
+    /// save before a restart), at most `FLUSH_TIMEOUT`. False if the
+    /// writer didn't answer in time.
+    pub fn flush(&self) -> bool {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.send(Cmd::Flush(tx));
+        rx.recv_timeout(FLUSH_TIMEOUT).is_ok()
     }
 
     /// Changes whenever the stats do.
@@ -451,6 +464,10 @@ fn writer_loop(lib: Arc<Library>, rx: Receiver<Cmd>) {
                 lib.send(Cmd::ServerChanged);
             }
             Cmd::ExportCuration => curation_changed = true,
+            // The receiver may have given up waiting; nothing to undo.
+            Cmd::Flush(done) => {
+                let _ = done.send(());
+            }
             Cmd::SetUnplayable(asset, reason) => {
                 log::warn!("library: asset {asset} can't be played here ({reason}), left out");
                 stale_files = db::mark_unplayable(&conn, asset, &reason);
@@ -839,7 +856,8 @@ fn handle(lib: &Library, st: &mut Loop, cmd: Cmd) {
         | Cmd::SetServer(_)
         | Cmd::ExportCuration
         | Cmd::SelectAlbum(..)
-        | Cmd::SetUnplayable(..) => unreachable!("a writer command reached the library thread"),
+        | Cmd::SetUnplayable(..)
+        | Cmd::Flush(_) => unreachable!("a writer command reached the library thread"),
     }
 }
 
@@ -1422,6 +1440,66 @@ impl raam_core::app::LibraryInfo for Library {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct NoWaker;
+    impl raam_core::seams::Waker for NoWaker {
+        fn wake(&self) {}
+    }
+    struct NoSwitches;
+    impl raam_core::seams::DebugSwitches for NoSwitches {
+        fn get(&self, _: &str) -> String {
+            String::new()
+        }
+    }
+    struct NoProbe;
+    impl raam_core::seams::MediaProbe for NoProbe {
+        fn probe(&self, path: &str) -> Result<raam_model::ClipInfo, String> {
+            Err(format!("no probe for {path}"))
+        }
+        fn unplayable(&self, _: &raam_model::ClipInfo) -> Option<String> {
+            None
+        }
+    }
+
+    /// A restart waits on `flush` after sending the settings save: when it
+    /// returns, the save is in the database.
+    #[test]
+    fn flush_returns_once_the_saves_before_it_are_written() {
+        crate::install_test_clock();
+        let dir = std::env::temp_dir().join(format!("raam-flush-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = db::open(&dir.join("raam.db"), "").unwrap();
+        let lib = spawn(
+            db,
+            Paths {
+                files_dir: dir.clone(),
+                local_dir_default: dir.join("no-photos").display().to_string(),
+                curation_export: dir.join("curation.json"),
+            },
+            DEFAULT_CAP_MB,
+            Host {
+                waker: Arc::new(NoWaker),
+                switches: Arc::new(NoSwitches),
+                probe: Arc::new(NoProbe),
+                grant_storage: Arc::new(|| true),
+            },
+        );
+        let mut s = raam_model::Settings::defaults("", "");
+        s.colour_depth = raam_model::ColourDepth::Bits24;
+        lib.send(Cmd::SaveSettings {
+            rows: raam_core::store::settings_rows(&s),
+            sleep: schedule::Schedule {
+                enabled: false,
+                sleep_min: 0,
+                wake_min: 0,
+            },
+        });
+        assert!(lib.flush());
+        let mut loaded = raam_model::Settings::defaults("", "");
+        db::load_settings(&lib.db.lock().unwrap(), &mut loaded);
+        assert_eq!(loaded.colour_depth, raam_model::ColourDepth::Bits24);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Only an unreachable server is offline (raam#44): an HTTP error
     /// means the server answered, and a failure of the frame's own

@@ -38,8 +38,8 @@ use raam_core::painter::Painter;
 use raam_core::slideshow::{Pipeline, SlideshowSettings};
 use raam_core::{clock, collage, switches};
 use raam_engine::{db, fetch, library, weather};
-use raam_model::limits::LARGEST_LAYOUT;
-use raam_model::{FitBackground, GapColour, SourceKind};
+use raam_model::limits::{EGL_CONFIGS_MAX, LARGEST_LAYOUT, RELAUNCH_DELAY};
+use raam_model::{ColourDepth, FitBackground, GapColour, SourceKind};
 use std::ffi::c_void;
 use std::sync::Arc;
 use std::time::Duration;
@@ -407,6 +407,7 @@ fn android_main(app: AndroidApp) {
                     screen: (0, 0),
                     wakelock_allowed: mech.wakelock(),
                     overrides: overrides_in,
+                    chooses_colour_depth: true,
                 },
                 &mut Deps {
                     stage: None,
@@ -423,7 +424,8 @@ fn android_main(app: AndroidApp) {
             };
             // SAFETY: on the render thread, which keeps the context made
             // here current for the rest of the process; `window` is live.
-            let e = match unsafe { EglState::new(&window) } {
+            let e = match unsafe { EglState::new(&window, controller.state.settings.colour_depth) }
+            {
                 Ok(e) => e,
                 Err(err) => {
                     log::error!("EGL setup failed: {err}");
@@ -522,6 +524,7 @@ fn android_main(app: AndroidApp) {
                 screen: (egl_state.width, egl_state.height),
                 wakelock_allowed: mech.wakelock(),
                 overrides: overrides_in,
+                chooses_colour_depth: true,
             },
             &mut Deps {
                 stage: Some(Stage {
@@ -539,6 +542,9 @@ fn android_main(app: AndroidApp) {
         );
         raam_engine::run_effects(out.effects, &lib, fetch.as_deref(), weather.as_deref());
         set_music_volume(out.music_volume, power.as_ref());
+        if out.restart {
+            restart(&lib, power.as_ref());
+        }
         if out.became_visible {
             stats = Stats::default();
             last_log = clock::now();
@@ -692,6 +698,24 @@ fn android_main(app: AndroidApp) {
     log::info!("exiting");
 }
 
+/// Applies a new colour depth: the window's EGL config is chosen once, at
+/// start. The settings save ran in this pass's effects; once the writer
+/// has it, a relaunch alarm is armed and the process exits, as the panic
+/// hook does (a home app is started again by the system too).
+fn restart(lib: &library::Library, power: Option<&power::Power>) -> ! {
+    if !lib.flush() {
+        log::error!("restart: the writer didn't confirm the settings save in time");
+    }
+    let at = i64::try_from((clock::wall() + RELAUNCH_DELAY).as_millis())
+        .expect("epoch milliseconds fit i64");
+    match power.map(|p| p.set_relaunch_alarm(at)) {
+        Some(Ok(())) => log::info!("restart: relaunch in {RELAUNCH_DELAY:?}, exiting"),
+        Some(Err(e)) => log::error!("restart: no relaunch alarm ({e}), exiting"),
+        None => log::error!("restart: no power seam for a relaunch alarm, exiting"),
+    }
+    std::process::exit(0);
+}
+
 fn read_touches(app: &AndroidApp) -> Vec<Touch> {
     let mut out = Vec::new();
     match app.input_events_iter() {
@@ -744,8 +768,84 @@ struct EglState {
     height: i32,
 }
 
+/// A window+pbuffer GLES2 config with exactly `depth`'s colour sizes, or
+/// a 24-bit one if the driver has no 16-bit one (with the depth it got).
+/// eglChooseConfig sorts deeper configs first, so asking for 5/6/5 alone
+/// would hand back an 8/8/8 one: the sizes are checked here.
+///
+/// # Safety
+/// `display` is an initialised EGL display.
+unsafe fn choose_config(
+    display: EglDisplay,
+    depth: ColourDepth,
+) -> Result<(EglConfig, ColourDepth), String> {
+    let sizes = |d: ColourDepth| match d {
+        ColourDepth::Bits16 => [5, 6, 5],
+        ColourDepth::Bits24 => [8, 8, 8],
+    };
+    let tries = match depth {
+        ColourDepth::Bits16 => [ColourDepth::Bits16, ColourDepth::Bits24],
+        ColourDepth::Bits24 => [ColourDepth::Bits24, ColourDepth::Bits24],
+    };
+    for d in tries {
+        let [r, g, b] = sizes(d);
+        let attribs = [
+            EGL_SURFACE_TYPE,
+            EGL_WINDOW_BIT | EGL_PBUFFER_BIT,
+            EGL_RENDERABLE_TYPE,
+            EGL_OPENGL_ES2_BIT,
+            EGL_RED_SIZE,
+            r,
+            EGL_GREEN_SIZE,
+            g,
+            EGL_BLUE_SIZE,
+            b,
+            EGL_NONE,
+        ];
+        let mut configs: [EglConfig; EGL_CONFIGS_MAX] = [std::ptr::null_mut(); EGL_CONFIGS_MAX];
+        let mut n: EglInt = 0;
+        // SAFETY: the caller's contract (an initialised display); the list
+        // is EGL_NONE-terminated, and `configs` holds the EGL_CONFIGS_MAX
+        // entries the call is told it may fill.
+        let ok = unsafe {
+            eglChooseConfig(
+                display,
+                attribs.as_ptr(),
+                configs.as_mut_ptr(),
+                EglInt::try_from(EGL_CONFIGS_MAX).expect("a small constant"),
+                &mut n,
+            )
+        };
+        if ok == 0 {
+            continue;
+        }
+        let found = usize::try_from(n).unwrap_or(0).min(EGL_CONFIGS_MAX);
+        let exact = configs[..found].iter().copied().find(|&c| {
+            [(EGL_RED_SIZE, r), (EGL_GREEN_SIZE, g), (EGL_BLUE_SIZE, b)]
+                .iter()
+                .all(|&(attr, want)| {
+                    let mut v: EglInt = 0;
+                    // SAFETY: `c` is one of the configs just returned, and
+                    // `v` a live local for the value.
+                    unsafe { eglGetConfigAttrib(display, c, attr, &mut v) != 0 && v == want }
+                })
+        });
+        if let Some(c) = exact {
+            if d != depth {
+                log::warn!(
+                    "no {}-bit EGL config: using {}-bit",
+                    depth.as_str(),
+                    d.as_str()
+                );
+            }
+            return Ok((c, d));
+        }
+    }
+    Err("eglChooseConfig found no window+pbuffer config".into())
+}
+
 impl EglState {
-    unsafe fn new(window: &NativeWindow) -> Result<Self, String> {
+    unsafe fn new(window: &NativeWindow, depth: ColourDepth) -> Result<Self, String> {
         // SAFETY: each EGL handle is checked non-null (or the call checked
         // for success) before the next call uses it; the attribute lists are
         // EGL_NONE-terminated locals and the out-pointers live locals, all
@@ -761,26 +861,12 @@ impl EglState {
                 return Err(format!("eglInitialize failed: 0x{:x}", eglGetError()));
             }
 
-            let attribs = [
-                EGL_SURFACE_TYPE,
-                EGL_WINDOW_BIT | EGL_PBUFFER_BIT,
-                EGL_RENDERABLE_TYPE,
-                EGL_OPENGL_ES2_BIT,
-                EGL_RED_SIZE,
-                8,
-                EGL_GREEN_SIZE,
-                8,
-                EGL_BLUE_SIZE,
-                8,
-                EGL_NONE,
-            ];
-            let mut config: EglConfig = std::ptr::null_mut();
-            let mut num_config: EglInt = 0;
-            if eglChooseConfig(display, attribs.as_ptr(), &mut config, 1, &mut num_config) == 0
-                || num_config == 0
-            {
-                return Err("eglChooseConfig found no window+pbuffer config".into());
-            }
+            let (config, got) = choose_config(display, depth)?;
+            log::info!(
+                "EGL config: {}-bit window (asked {}-bit)",
+                got.as_str(),
+                depth.as_str()
+            );
             let ctx_attribs = [EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE];
             let context =
                 eglCreateContext(display, config, std::ptr::null_mut(), ctx_attribs.as_ptr());

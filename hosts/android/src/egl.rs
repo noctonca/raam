@@ -52,6 +52,12 @@ unsafe extern "C" {
         read: EglSurface,
         ctx: EglContext,
     ) -> EglBoolean;
+    pub fn eglGetConfigAttrib(
+        dpy: EglDisplay,
+        config: EglConfig,
+        attribute: EglInt,
+        value: *mut EglInt,
+    ) -> EglBoolean;
     pub fn eglSwapBuffers(dpy: EglDisplay, surface: EglSurface) -> EglBoolean;
     pub fn eglGetError() -> EglInt;
     // The window surface comes and goes with the window; a 1x1 pbuffer

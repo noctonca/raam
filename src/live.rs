@@ -533,6 +533,7 @@ impl Live {
                 screen: run.screen,
                 wakelock_allowed: false,
                 overrides: Overrides::default(),
+                chooses_colour_depth: false,
             },
             &mut Deps {
                 stage: Some(Stage {

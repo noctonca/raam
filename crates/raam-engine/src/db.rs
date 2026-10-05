@@ -26,9 +26,9 @@ use raam_core::store::transition_str;
 use raam_core::{clock, num};
 use raam_model::limits;
 use raam_model::{
-    AlbumId, AlbumRow, AssetId, ClockStyle, Corner, CurationKey, FitBackground, Focus, GapColour,
-    HiddenItem, MediaItem, MediaKind, MediaRef, RemoteId, ScaleMode, Settings, SourceKind,
-    TransitionChoice, UserId, VideoPlayback,
+    AlbumId, AlbumRow, AssetId, ClockStyle, ColourDepth, Corner, CurationKey, FitBackground, Focus,
+    GapColour, HiddenItem, MediaItem, MediaKind, MediaRef, RemoteId, ScaleMode, Settings,
+    SourceKind, TransitionChoice, UserId, VideoPlayback,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashMap;
@@ -433,6 +433,9 @@ pub fn load_settings(conn: &Connection, s: &mut Settings) -> Vec<String> {
     }
     if let Some(v) = str_of("collage.gap_colour") {
         s.gap_colour = GapColour::parse(&v).unwrap_or(s.gap_colour);
+    }
+    if let Some(v) = str_of("display.colour_depth") {
+        s.colour_depth = ColourDepth::parse(&v).unwrap_or(s.colour_depth);
     }
     if let Some(v) = str_of("overlay.clock_style") {
         s.clock_style = ClockStyle::parse(&v).unwrap_or(s.clock_style);
@@ -1683,6 +1686,7 @@ mod tests {
         s.fit_background = FitBackground::Black;
         s.collage_max = 2;
         s.gap_colour = GapColour::White;
+        s.colour_depth = ColourDepth::Bits24;
         s.clock_style = ClockStyle::Detailed;
         s.clock_corner = Corner::BottomLeft;
         s.weather_enabled = true;
@@ -1731,6 +1735,7 @@ mod tests {
         all.extend(TransitionChoice::ALL.map(|v| with(&|s| s.transition = v)));
         all.extend(FitBackground::ALL.map(|v| with(&|s| s.fit_background = v)));
         all.extend(GapColour::ALL.map(|v| with(&|s| s.gap_colour = v)));
+        all.extend(ColourDepth::ALL.map(|v| with(&|s| s.colour_depth = v)));
         all.extend(ClockStyle::ALL.map(|v| with(&|s| s.clock_style = v)));
         all.extend(Corner::ALL.map(|v| with(&|s| s.clock_corner = v)));
         all.extend(VideoPlayback::ALL.map(|v| with(&|s| s.video_playback = v)));
@@ -1860,6 +1865,7 @@ mod tests {
                 prop::sample::select(TransitionChoice::ALL.to_vec()),
                 prop::sample::select(FitBackground::ALL.to_vec()),
                 prop::sample::select(GapColour::ALL.to_vec()),
+                prop::sample::select(ColourDepth::ALL.to_vec()),
                 prop::sample::select(ClockStyle::ALL.to_vec()),
                 prop::sample::select(Corner::ALL.to_vec()),
                 prop::sample::select(VideoPlayback::ALL.to_vec()),
@@ -1874,7 +1880,7 @@ mod tests {
             let switches = prop::array::uniform6(any::<bool>());
             (named, numbers, switches).prop_map(
                 |(
-                    (transition, fit, gap, style, corner, playback),
+                    (transition, fit, gap, depth, style, corner, playback),
                     (interval, collage, cap, delay, volume),
                     [ken_burns, fill, clock_24h, weather, sound, dark],
                 )| {
@@ -1886,6 +1892,7 @@ mod tests {
                     s.fit_background = fit;
                     s.collage_max = collage;
                     s.gap_colour = gap;
+                    s.colour_depth = depth;
                     s.clock_style = style;
                     s.clock_corner = corner;
                     s.clock_24h = clock_24h;

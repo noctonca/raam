@@ -19,6 +19,7 @@ pub fn settings_rows(s: &Settings) -> Vec<(&'static str, serde_json::Value)> {
         ("display.fit_background", json!(s.fit_background.as_str())),
         ("collage.max", json!(s.collage_max)),
         ("collage.gap_colour", json!(s.gap_colour.as_str())),
+        ("display.colour_depth", json!(s.colour_depth.as_str())),
         ("overlay.clock_style", json!(s.clock_style.as_str())),
         ("overlay.clock_corner", json!(s.clock_corner.as_str())),
         ("overlay.weather", json!(s.weather_enabled)),

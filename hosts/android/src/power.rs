@@ -20,6 +20,8 @@ const SCREEN_BRIGHT_WAKE_LOCK: i32 = 0x0000_000a;
 const ACQUIRE_CAUSES_WAKEUP: i32 = 0x1000_0000;
 const ON_AFTER_RELEASE: i32 = 0x2000_0000;
 const WAKE_REQUEST_CODE: i32 = 23;
+/// Its own request code, so a relaunch never replaces the wake alarm.
+const RELAUNCH_REQUEST_CODE: i32 = 24;
 
 pub struct Power {
     vm: JavaVM,
@@ -74,7 +76,12 @@ impl Power {
         .map_err(|e| check(env, "getSystemService", e))
     }
 
-    fn wake_intent<'a>(env: &mut JNIEnv<'a>, ctx: &JObject) -> JResult<JObject<'a>> {
+    /// A PendingIntent that starts this activity, under `request_code`.
+    fn activity_intent<'a>(
+        env: &mut JNIEnv<'a>,
+        ctx: &JObject,
+        request_code: i32,
+    ) -> JResult<JObject<'a>> {
         let cls = env
             .call_method(ctx, "getClass", "()Ljava/lang/Class;", &[])
             .and_then(|v| v.l())
@@ -92,7 +99,7 @@ impl Power {
             "(Landroid/content/Context;ILandroid/content/Intent;I)Landroid/app/PendingIntent;",
             &[
                 JValue::Object(ctx),
-                JValue::Int(WAKE_REQUEST_CODE),
+                JValue::Int(request_code),
                 JValue::Object(&intent),
                 JValue::Int(FLAG_UPDATE_CURRENT),
             ],
@@ -104,8 +111,18 @@ impl Power {
     /// Relaunch this activity at `epoch_ms` (wall clock), replacing any
     /// earlier wake alarm (same PendingIntent, FLAG_UPDATE_CURRENT).
     pub fn set_wake_alarm(&self, epoch_ms: i64) -> JResult<()> {
+        self.set_alarm(epoch_ms, WAKE_REQUEST_CODE)
+    }
+
+    /// Relaunch this activity at `epoch_ms`, once: the restart that
+    /// applies a new colour depth.
+    pub fn set_relaunch_alarm(&self, epoch_ms: i64) -> JResult<()> {
+        self.set_alarm(epoch_ms, RELAUNCH_REQUEST_CODE)
+    }
+
+    fn set_alarm(&self, epoch_ms: i64, request_code: i32) -> JResult<()> {
         self.with_env(|env, ctx| {
-            let pi = Self::wake_intent(env, ctx)?;
+            let pi = Self::activity_intent(env, ctx, request_code)?;
             let am = Self::service(env, ctx, "alarm")?;
             env.call_method(
                 &am,

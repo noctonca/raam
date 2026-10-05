@@ -133,6 +133,21 @@ pub const PCM_BATCH_BYTES: usize = 35_280;
 pub const AUDIO_ALIGN_TIMEOUT: Duration = Duration::from_millis(1000);
 /// OpenSL buffer-queue depth. Chosen on the frame.
 pub const AUDIO_OUT_BUFFERS: u32 = 4;
+/// A playing decoder with no output this long has stalled, and its clip
+/// ends rather than the slideshow freezing on it. Seen once on the frame
+/// (a 60 fps clip while two downloads were probed). Chosen.
+pub const DECODER_STALL: Duration = Duration::from_secs(3);
+/// The RK decoder doesn't always send an end-of-stream buffer: once the
+/// input is all in, this long with no output also ends the pass. Chosen on
+/// the frame.
+pub const END_OF_PASS_QUIET: Duration = Duration::from_millis(600);
+/// One wait for a codec buffer, so a decode thread looks at stop and the
+/// clock between buffers. Chosen.
+pub const CODEC_DEQUEUE_WAIT: Duration = Duration::from_millis(10);
+/// The bound on a decode thread's wait for play, stop, the media clock or a
+/// free audio buffer: each is also notified, so this only caps a missed
+/// wake-up. Chosen.
+pub const PLAYER_POLL: Duration = Duration::from_millis(50);
 
 // ---- library (sync, cache) ---------------------------------------------------
 

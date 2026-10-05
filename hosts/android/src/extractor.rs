@@ -196,18 +196,23 @@ pub fn probe(path: &str) -> Result<ClipInfo, String> {
     let audio = ex
         .find_track("audio/")
         .and_then(|(_, mut f)| f.str("mime").map(str::to_string));
+    // Missing, negative or 0 (a broken header) is refused, rather than a
+    // 0x0 clip that passes `unplayable` and reaches planning.
+    let side = |key: &str| {
+        video
+            .i32(key)
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|&v| v > 0)
+            .ok_or_else(|| format!("no usable video {key}"))
+    };
+    let coded_w = side("width")?;
+    let coded_h = side("height")?;
     Ok(ClipInfo {
         mime,
-        // Missing or negative (a broken header): 0.
-        coded_w: video
-            .i32("width")
-            .and_then(|w| u32::try_from(w).ok())
-            .unwrap_or(0),
-        coded_h: video
-            .i32("height")
-            .and_then(|h| u32::try_from(h).ok())
-            .unwrap_or(0),
+        coded_w,
+        coded_h,
         rotation: video.i32("rotation-degrees").unwrap_or(0).rem_euclid(360),
+        // Missing: 0, a length not known; nothing plans by it.
         duration_us: video.i64("durationUs").unwrap_or(0),
         has_audio: audio.is_some(),
         audio,

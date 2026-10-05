@@ -120,6 +120,16 @@ impl AudioOut {
     /// `sample-rate`/`channel-count`): this path has no resampler. The
     /// player starts paused.
     pub fn new(sample_rate_hz: u32, channels: u32) -> Result<Self, String> {
+        // Both come from the clip's file: refused, never wrapped or guessed.
+        let channel_mask = match channels {
+            1 => sles::SL_SPEAKER_FRONT_CENTER,
+            2 => sles::SL_SPEAKER_FRONT_LEFT | sles::SL_SPEAKER_FRONT_RIGHT,
+            n => return Err(format!("{n} audio channels: only mono and stereo play")),
+        };
+        let millihertz = sample_rate_hz
+            .checked_mul(1000)
+            .filter(|&mhz| mhz > 0)
+            .ok_or_else(|| format!("audio sample rate {sample_rate_hz} Hz"))?;
         let engine = engine()?;
         // SAFETY: the engine and output mix live for the process; the
         // locator and format structs are locals that outlive
@@ -131,14 +141,10 @@ impl AudioOut {
                 locatorType: sles::SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE,
                 numBuffers: NUM_BUFFERS,
             };
-            let channel_mask = match channels {
-                1 => sles::SL_SPEAKER_FRONT_CENTER,
-                _ => sles::SL_SPEAKER_FRONT_LEFT | sles::SL_SPEAKER_FRONT_RIGHT,
-            };
             let mut format_pcm = sles::SLDataFormat_PCM {
                 formatType: sles::SL_DATAFORMAT_PCM,
                 numChannels: channels,
-                samplesPerSec: sample_rate_hz * 1000, // millihertz
+                samplesPerSec: millihertz,
                 bitsPerSample: sles::SL_PCMSAMPLEFORMAT_FIXED_16,
                 containerSize: sles::SL_PCMSAMPLEFORMAT_FIXED_16,
                 channelMask: channel_mask,

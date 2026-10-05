@@ -38,11 +38,29 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+/// Before the clip's second frame says otherwise, a frame lasts 1/30 s.
+const DEFAULT_FRAME_US: i64 = 33_333;
+/// A frame's measured duration is kept within 200 fps and 10 fps, so one
+/// odd timestamp can't push the loop point far.
+const FRAME_US_MIN: i64 = 5_000;
+const FRAME_US_MAX: i64 = 100_000;
+/// How often the A/V drift is logged while a clip plays with sound.
+const DRIFT_LOG_EVERY: Duration = Duration::from_secs(2);
+/// A decoder stop and release slower than this is logged as a warning.
+const SLOW_RELEASE: Duration = Duration::from_secs(1);
+/// Test-only (`debug.video.fail=hang`): how long the live decoder's
+/// release is held, as a wedged stop does.
+const HANG_HOLD: Duration = Duration::from_secs(15);
+/// Android's THREAD_PRIORITY_AUDIO. An app may raise its own threads this
+/// far (RLIMIT_NICE).
+const THREAD_PRIORITY_AUDIO: libc::c_int = -16;
+
 /// A frame later than this is dropped rather than shown late.
 use raam_model::limits::DROP_LATE_US;
 /// About 200 ms of 44.1 kHz stereo PCM per enqueue, so `Enqueue` runs a
 /// few times a second rather than once per decoded buffer.
 use raam_model::limits::PCM_BATCH_BYTES;
+use raam_model::limits::{CODEC_DEQUEUE_WAIT, DECODER_STALL, END_OF_PASS_QUIET, PLAYER_POLL};
 
 static VM: OnceLock<JavaVM> = OnceLock::new();
 
@@ -128,7 +146,8 @@ impl DecoderPhase {
             1 => DecoderPhase::FirstFrame,
             2 => DecoderPhase::Playing,
             3 => DecoderPhase::Ended,
-            _ => DecoderPhase::Failed,
+            4 => DecoderPhase::Failed,
+            v => unreachable!("decoder phase {v}: only set_phase writes it"),
         }
     }
 }
@@ -269,14 +288,10 @@ impl Shared {
                     return true;
                 }
                 let ahead = u64::try_from(media_us - now).expect("now < media_us here");
-                let wait = Duration::from_micros(ahead.min(50_000));
+                let wait = Duration::from_micros(ahead).min(PLAYER_POLL);
                 ctl = self.cond.wait_timeout(ctl, wait).unwrap().0;
             } else {
-                ctl = self
-                    .cond
-                    .wait_timeout(ctl, Duration::from_millis(50))
-                    .unwrap()
-                    .0;
+                ctl = self.cond.wait_timeout(ctl, PLAYER_POLL).unwrap().0;
             }
         }
     }
@@ -483,7 +498,8 @@ impl OpenClip for Player {
         let Some(tex) = self.texture.as_ref() else {
             return;
         };
-        let Ok(mut env) = env() else { return };
+        // The render thread is attached for good: no JNIEnv is a bug.
+        let mut env = env().unwrap_or_else(|e| panic!("render thread JNIEnv: {e}"));
         // `updateTexImage` takes the oldest queued frame, not the newest, so
         // if more than one is waiting (a 60 fps clip on a ~50 fps loop) take
         // them until the newest is on, rather than falling behind.
@@ -495,7 +511,11 @@ impl OpenClip for Player {
             }
             match tex.timestamp(&mut env) {
                 Ok(ts) if ts != self.latched && ts != 0 => self.latched = ts,
-                _ => break,
+                Ok(_) => break,
+                Err(e) => {
+                    log::error!("{e}");
+                    break;
+                }
             }
             if self.latched == want {
                 break;
@@ -504,7 +524,12 @@ impl OpenClip for Player {
         if self.latched == before {
             return;
         }
-        self.matrix = tex.transform_matrix(&mut env).unwrap_or(IDENTITY4);
+        // On an error the last matrix stays: it is this clip's, so far
+        // closer to right than the identity.
+        match tex.transform_matrix(&mut env) {
+            Ok(m) => self.matrix = m,
+            Err(e) => log::error!("{e}"),
+        }
     }
 
     /// The decode thread's phase, held back until its frame is latched:
@@ -707,7 +732,7 @@ fn video_thread(
     let mut seq: i64 = 0;
     let mut first_pts: Option<i64> = None;
     let mut last_rel: i64 = 0;
-    let mut frame_us: i64 = 33_333;
+    let mut frame_us = DEFAULT_FRAME_US;
     let mut next_drift_log = clock::now();
     let mut last_output = clock::now();
     let mut queued_in = 0u64;
@@ -747,7 +772,7 @@ fn video_thread(
                 last_output = clock::now();
             }
             if !input_eos
-                && clock::elapsed(last_output) > Duration::from_secs(3)
+                && clock::elapsed(last_output) > DECODER_STALL
                 && sh.phase() == DecoderPhase::Playing
             {
                 return Err(format!(
@@ -759,7 +784,7 @@ fn video_thread(
                 ));
             }
             if !input_eos {
-                match codec.dequeue_input_buffer(Duration::from_millis(10)) {
+                match codec.dequeue_input_buffer(CODEC_DEQUEUE_WAIT) {
                     Ok(DequeuedInputBufferResult::Buffer(mut input)) => {
                         // Negative: the extractor has no sample left.
                         match usize::try_from(ex.read_sample_data(input.buffer_mut())) {
@@ -791,7 +816,7 @@ fn video_thread(
                     Err(e) => return Err(format!("dequeue input: {e:?}")),
                 }
             }
-            match codec.dequeue_output_buffer(Duration::from_millis(10)) {
+            match codec.dequeue_output_buffer(CODEC_DEQUEUE_WAIT) {
                 Ok(DequeuedOutputBufferInfoResult::Buffer(out)) => {
                     last_output = clock::now();
                     let info = *out.info();
@@ -805,7 +830,7 @@ fn video_thread(
                         let first = *first_pts.get_or_insert(pts);
                         let rel = pts - first;
                         if rel > last_rel {
-                            frame_us = (rel - last_rel).clamp(5_000, 100_000);
+                            frame_us = (rel - last_rel).clamp(FRAME_US_MIN, FRAME_US_MAX);
                         }
                         last_rel = rel;
                         let media = sh.loop_base_us.load(Ordering::Relaxed) + rel;
@@ -829,11 +854,7 @@ fn video_thread(
                             {
                                 let mut ctl = sh.ctl.lock().unwrap();
                                 while !ctl.play && !ctl.stop {
-                                    ctl = sh
-                                        .cond
-                                        .wait_timeout(ctl, Duration::from_millis(100))
-                                        .unwrap()
-                                        .0;
+                                    ctl = sh.cond.wait_timeout(ctl, PLAYER_POLL).unwrap().0;
                                 }
                                 if ctl.stop {
                                     return Ok(());
@@ -879,7 +900,7 @@ fn video_thread(
                                         drift,
                                         sh.dropped.load(Ordering::Relaxed)
                                     );
-                                    next_drift_log = clock::now() + Duration::from_secs(2);
+                                    next_drift_log = clock::now() + DRIFT_LOG_EVERY;
                                 }
                             }
                         }
@@ -897,7 +918,7 @@ fn video_thread(
             }
             if !at_end && input_eos && sh.phase() == DecoderPhase::Playing {
                 let all_out = out_pass >= in_pass;
-                let quiet = clock::elapsed(last_output) > Duration::from_millis(600);
+                let quiet = clock::elapsed(last_output) > END_OF_PASS_QUIET;
                 if all_out || quiet {
                     log::info!(
                         "{}: end of pass without an EOS buffer from the decoder ({out_pass} of {in_pass} frames out{})",
@@ -938,11 +959,7 @@ fn video_thread(
                 // any frame not yet latched.
                 let mut ctl = sh.ctl.lock().unwrap();
                 while !ctl.stop {
-                    ctl = sh
-                        .cond
-                        .wait_timeout(ctl, Duration::from_millis(100))
-                        .unwrap()
-                        .0;
+                    ctl = sh.cond.wait_timeout(ctl, PLAYER_POLL).unwrap().0;
                 }
                 return Ok(());
             }
@@ -958,7 +975,7 @@ fn video_thread(
     // line: each call into the decoder that can block is announced first.
     let t = clock::now();
     if raam_core::switches::fail() == raam_core::switches::Fail::Hang && !sh.probe {
-        std::thread::sleep(Duration::from_secs(15));
+        std::thread::sleep(HANG_HOLD);
     }
     log::info!("{}: stopping the decoder", sh.label);
     if let Err(e) = codec.stop() {
@@ -971,7 +988,7 @@ fn video_thread(
     // Uncounted only now that the codec is gone.
     drop(slot);
     let released = clock::elapsed(t);
-    if released > Duration::from_secs(1) {
+    if released > SLOW_RELEASE {
         log::warn!(
             "{}: the decoder took {released:?} to stop and release",
             sh.label,
@@ -990,15 +1007,15 @@ fn audio_param(v: i32, what: &str) -> Result<u32, String> {
 }
 
 fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
-    // THREAD_PRIORITY_AUDIO (-16), so decoding the sound keeps up while a
+    // THREAD_PRIORITY_AUDIO, so decoding the sound keeps up while a
     // 1080p clip and the render loop load the CPU. Android lets an app
     // raise its own threads' priority this far (RLIMIT_NICE).
     // SAFETY: gettid takes nothing and can't fail.
     let tid = libc::id_t::try_from(unsafe { libc::gettid() }).expect("a thread id is positive");
     // SAFETY: a plain syscall on this thread's own id; no pointers.
-    let prio = unsafe { libc::setpriority(libc::PRIO_PROCESS, tid, -16) };
+    let prio = unsafe { libc::setpriority(libc::PRIO_PROCESS, tid, THREAD_PRIORITY_AUDIO) };
     log::info!(
-        "{}: audio thread priority -16: {}",
+        "{}: audio thread priority {THREAD_PRIORITY_AUDIO}: {}",
         sh.label,
         if prio == 0 { "set" } else { "refused" }
     );
@@ -1009,8 +1026,16 @@ fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
         ex.seek_to(start_us)?;
     }
     let mime = format.str("mime").unwrap_or("?").to_string();
-    let mut rate = audio_param(format.i32("sample-rate").unwrap_or(44100), "sample rate")?;
-    let mut channels = audio_param(format.i32("channel-count").unwrap_or(1), "channel count")?;
+    // No guess at either: a wrong rate plays at the wrong speed, and a
+    // wrong channel count as noise. Without them the clip plays silent.
+    let mut rate = audio_param(
+        format.i32("sample-rate").ok_or("no sample rate")?,
+        "sample rate",
+    )?;
+    let mut channels = audio_param(
+        format.i32("channel-count").ok_or("no channel count")?,
+        "channel count",
+    )?;
     let codec =
         MediaCodec::from_decoder_type(&mime).ok_or_else(|| format!("no decoder for {mime}"))?;
     codec
@@ -1094,7 +1119,7 @@ fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
             if ended {
                 // Drained: let what is queued play out (the video thread
                 // decides when the clip ends).
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(PLAYER_POLL);
                 continue;
             }
             // A full batch waits for a free buffer before decoding more.
@@ -1112,7 +1137,7 @@ fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
                         out.insert(o)
                     }
                 };
-                if o.enqueue(&pending, Duration::from_millis(50))? {
+                if o.enqueue(&pending, PLAYER_POLL)? {
                     pending.clear();
                     queued_batches += 1;
                     if queued_batches == 2 {
@@ -1123,7 +1148,7 @@ fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
                 continue;
             }
             if !input_eos {
-                match codec.dequeue_input_buffer(Duration::from_millis(10)) {
+                match codec.dequeue_input_buffer(CODEC_DEQUEUE_WAIT) {
                     Ok(DequeuedInputBufferResult::Buffer(mut input)) => {
                         // Negative: the extractor has no sample left.
                         match usize::try_from(ex.read_sample_data(input.buffer_mut())) {
@@ -1153,18 +1178,28 @@ fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
                     Err(e) => return Err(format!("dequeue input: {e:?}")),
                 }
             }
-            match codec.dequeue_output_buffer(Duration::from_millis(10)) {
+            match codec.dequeue_output_buffer(CODEC_DEQUEUE_WAIT) {
                 Ok(DequeuedOutputBufferInfoResult::Buffer(output)) => {
                     let info = *output.info();
                     let eos = info.flags() & (ndk_sys::AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) != 0;
                     // buffer() is the whole allocation; the PCM is
-                    // [offset, offset + size).
-                    let off = usize::try_from(info.offset()).unwrap_or(0);
-                    let sz = usize::try_from(info.size()).unwrap_or(0);
+                    // [offset, offset + size). A range outside it is a
+                    // broken decoder: the sound stops, the picture goes on.
                     let raw = output.buffer();
+                    let pcm = usize::try_from(info.offset())
+                        .ok()
+                        .zip(usize::try_from(info.size()).ok())
+                        .and_then(|(off, sz)| raw.get(off..off.checked_add(sz)?))
+                        .ok_or_else(|| {
+                            format!(
+                                "audio buffer [{}, +{}) outside its {} bytes",
+                                info.offset(),
+                                info.size(),
+                                raw.len()
+                            )
+                        })?;
                     if info.presentation_time_us() >= skip_before_us {
-                        pending
-                            .extend_from_slice(&raw[off.min(raw.len())..(off + sz).min(raw.len())]);
+                        pending.extend_from_slice(pcm);
                     }
                     let _ = codec.release_output_buffer(output, false);
                     if eos {
@@ -1182,7 +1217,7 @@ fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
                                     out = Some(o);
                                 }
                                 let o = out.as_mut().unwrap();
-                                while !o.enqueue(&pending, Duration::from_millis(50))? {
+                                while !o.enqueue(&pending, PLAYER_POLL)? {
                                     if sh.stopped() {
                                         return Ok(());
                                     }

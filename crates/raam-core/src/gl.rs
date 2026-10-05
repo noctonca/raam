@@ -640,7 +640,7 @@ impl RenderTarget {
     ///
     /// # Panics
     /// If the target can't be made (`alloc`'s error): a failure there is
-    /// fatal.
+    /// fatal. Also on a side that isn't positive.
     ///
     /// # Safety
     /// Requires a current GL context.
@@ -653,6 +653,9 @@ impl RenderTarget {
     /// Mali out of memory (seen at boot, with MemFree about 7 MB): the
     /// texture gets no storage and the FBO reports INCOMPLETE_ATTACHMENT.
     /// Whatever was created is deleted again before returning the error.
+    ///
+    /// # Panics
+    /// On a side that isn't positive: a bug upstream, not a GPU failure.
     ///
     /// # Safety
     /// Requires a current GL context.
@@ -669,15 +672,38 @@ impl RenderTarget {
         unsafe { Self::alloc(width, height) }
     }
 
+    /// # Panics
+    /// On a side that isn't positive. The callers' sizes never are (the
+    /// screen's, a tile's, at least 1 px when scaled), so one would be a
+    /// bug upstream; returned as an error, the pipeline would take it for
+    /// the GPU running out of memory and retry it every `GPU_RETRY`.
     unsafe fn alloc(width: i32, height: i32) -> Result<Self, String> {
+        assert!(
+            width > 0,
+            "render target {width}x{height}: width not positive"
+        );
+        assert!(
+            height > 0,
+            "render target {width}x{height}: height not positive"
+        );
+        // GLES2 has five error codes and WebGL a sixth (context lost), and
+        // GL keeps at most one flag for each, so this many reads clear them.
+        const GL_ERROR_CODES: usize = 6;
         // SAFETY: `new` and `try_new`, its only callers, pass on their
         // contract: a current GL context. The null pixels are GL's "storage,
         // no upload", so the driver reads nothing through them.
         unsafe {
-            for _ in 0..8 {
-                if glGetError() == GL_NO_ERROR {
+            // Nothing else reads GL's error flags, so one raised by any
+            // earlier call surfaces here first: say so, rather than clear
+            // it unseen, and keep it from being blamed on this target.
+            for _ in 0..GL_ERROR_CODES {
+                let stale = glGetError();
+                if stale == GL_NO_ERROR {
                     break;
                 }
+                log::warn!(
+                    "GL error 0x{stale:x} raised by an earlier call, found before making a {width}x{height} render target"
+                );
             }
             let mut texture = 0;
             glGenTextures(1, &mut texture);

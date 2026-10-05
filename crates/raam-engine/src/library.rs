@@ -822,7 +822,13 @@ fn handle(lib: &Library, st: &mut Loop, cmd: Cmd) {
             };
             // Not on a host with no player: nothing has changed for it.
             let stale = match lib.host.probe.no_player() {
-                Some(why) => db::mark_clips_unplayable(&conn, &why).1,
+                Some(why) => match db::mark_clips_unplayable(&conn, &why) {
+                    Ok((_, stale)) => stale,
+                    Err(e) => {
+                        log::error!("library: leaving out the clips this host can't play: {e}");
+                        Vec::new()
+                    }
+                },
                 None => Vec::new(),
             };
             drop(conn);
@@ -909,8 +915,10 @@ fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, L
     if kind == SourceKind::Immich {
         // An album un-picked while the list was downloading must not come
         // back: keep only what the albums picked now hold.
-        let picked: std::collections::HashSet<AlbumId> =
-            db::selected_albums(&conn).into_iter().collect();
+        let picked: std::collections::HashSet<AlbumId> = db::selected_albums(&conn)
+            .map_err(LibraryError::db("reading the picked albums"))?
+            .into_iter()
+            .collect();
         let listed = items.len();
         for m in &mut items {
             m.collections.retain(|c| picked.contains(c));
@@ -1007,7 +1015,9 @@ fn sync_provider(lib: &Library, provider: &mut dyn Provider) -> Result<String, L
     // A host with no player: the clips just listed are out before anything
     // can plan them or fetch them to probe.
     let (left_out, stale) = match lib.host.probe.no_player() {
-        Some(why) => db::mark_clips_unplayable(&tx, &why),
+        Some(why) => db::mark_clips_unplayable(&tx, &why).map_err(LibraryError::db(
+            "leaving out the clips this host can't play",
+        ))?,
         None => (0, Vec::new()),
     };
     tx.commit()
@@ -1461,12 +1471,11 @@ mod tests {
         }
     }
 
-    /// A restart waits on `flush` after sending the settings save: when it
-    /// returns, the save is in the database.
-    #[test]
-    fn flush_returns_once_the_saves_before_it_are_written() {
+    /// A library on a fresh database in its own temp directory, with its
+    /// threads running.
+    fn test_lib(name: &str) -> (Arc<Library>, PathBuf) {
         crate::install_test_clock();
-        let dir = std::env::temp_dir().join(format!("raam-flush-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("raam-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = db::open(&dir.join("raam.db"), "").unwrap();
         let lib = spawn(
@@ -1484,6 +1493,14 @@ mod tests {
                 grant_storage: Arc::new(|| true),
             },
         );
+        (lib, dir)
+    }
+
+    /// A restart waits on `flush` after sending the settings save: when it
+    /// returns, the save is in the database.
+    #[test]
+    fn flush_returns_once_the_saves_before_it_are_written() {
+        let (lib, dir) = test_lib("flush");
         let mut s = raam_model::Settings::defaults("", "");
         s.colour_depth = raam_model::ColourDepth::Bits24;
         lib.send(Cmd::SaveSettings {

@@ -57,7 +57,11 @@ pub fn video_decoders() -> u32 {
     VIDEO_DECODERS.load(Ordering::Acquire)
 }
 
-/// Counts one decoder in `VIDEO_DECODERS` until dropped.
+/// Counts one decoder in `VIDEO_DECODERS` until dropped. Taken in
+/// `Player::open`, before the decode thread starts, so the count holds the
+/// decoder from the moment `open` returns: the core opens another only
+/// when the count is 0.
+#[must_use = "dropping the slot uncounts the decoder"]
 struct DecoderSlot;
 
 impl DecoderSlot {
@@ -71,6 +75,16 @@ impl Drop for DecoderSlot {
     fn drop(&mut self) {
         VIDEO_DECODERS.fetch_sub(1, Ordering::AcqRel);
     }
+}
+
+/// Starts a named thread: `what` and the clip's tag ("vdec 42p" is clip 42's
+/// probe decoder). Linux keeps 15 bytes of a name, which is what a stack
+/// dump (`debuggerd -b`) and the panic hook show.
+fn spawn_named(what: &str, tag: &str, f: impl FnOnce() + Send + 'static) -> JoinHandle<()> {
+    std::thread::Builder::new()
+        .name(format!("{what} {tag}"))
+        .spawn(f)
+        .unwrap_or_else(|e| panic!("can't start the {what} thread: {e}"))
 }
 
 /// Keeps the process's JavaVM for the render thread's and the reaper's JNI.
@@ -214,6 +228,8 @@ struct Shared {
     error: Mutex<Option<PlayerError>>,
     waker: AndroidAppWaker,
     label: String,
+    /// Short, for thread names: the asset id, "p" for a probe.
+    tag: String,
     /// A probe (frame 0 only), not the live clip: the fail injection
     /// tells them apart.
     probe: bool,
@@ -299,7 +315,9 @@ pub struct Player {
 impl Player {
     /// Opens `path` onto a new external texture and starts decoding: frame 0
     /// is rendered as soon as it's decoded. `sound`: the volume, or `None`
-    /// to decode no audio at all. On the GL thread.
+    /// to decode no audio at all. `tag` names the threads (`spawn_named`).
+    /// On the GL thread.
+    #[expect(clippy::too_many_arguments, reason = "one call site, in video.rs")]
     pub fn open(
         path: &str,
         info: ClipInfo,
@@ -308,6 +326,7 @@ impl Player {
         latency_ms: i32,
         waker: AndroidAppWaker,
         label: String,
+        tag: &str,
     ) -> Result<Self, String> {
         let mut env = env()?;
         let mut oes = 0;
@@ -368,13 +387,15 @@ impl Player {
             error: Mutex::new(None),
             waker,
             label,
+            tag: tag.to_string(),
             probe,
         });
         let mut threads = Vec::new();
         {
             let (sh, p) = (shared.clone(), path.to_string());
-            threads.push(std::thread::spawn(move || {
-                if let Err(e) = video_thread(&p, window, &sh) {
+            let slot = DecoderSlot::take();
+            threads.push(spawn_named("vdec", tag, move || {
+                if let Err(e) = video_thread(&p, window, slot, &sh) {
                     sh.fail(e);
                 }
             }));
@@ -402,7 +423,8 @@ impl Player {
             return;
         }
         let (sh, p) = (self.shared.clone(), self.path.clone());
-        self.threads.push(std::thread::spawn(move || {
+        let tag = sh.tag.clone();
+        self.threads.push(spawn_named("adec", &tag, move || {
             if let Err(e) = audio_thread(&p, &sh, start_us) {
                 // The picture goes on without sound.
                 log::error!("{}: audio: {e}", sh.label);
@@ -626,7 +648,7 @@ impl OpenClip for Player {
         let threads = std::mem::take(&mut self.threads);
         let texture = self.texture.take();
         let label = self.shared.label.clone();
-        std::thread::spawn(move || {
+        drop(spawn_named("reap", &self.shared.tag, move || {
             let t = clock::now();
             for th in threads {
                 let _ = th.join();
@@ -643,7 +665,7 @@ impl OpenClip for Player {
                 "{label} torn down (threads joined in {joined:?}, all in {:?})",
                 clock::elapsed(t)
             );
-        });
+        }));
     }
 }
 
@@ -657,7 +679,14 @@ const IDENTITY4: [f32; 16] = [
 
 // ---- the decode threads ----------------------------------------------------
 
-fn video_thread(path: &str, window: NativeWindow, sh: &Shared) -> Result<(), PlayerError> {
+/// `slot` counts the decoder from `Player::open` on, and is dropped only
+/// after the codec is released.
+fn video_thread(
+    path: &str,
+    window: NativeWindow,
+    slot: DecoderSlot,
+    sh: &Shared,
+) -> Result<(), PlayerError> {
     let t0 = clock::now();
     let ex = Extractor::open(path).map_err(|e| match e {
         OpenError::File(why) => PlayerError::File(why),
@@ -668,8 +697,6 @@ fn video_thread(path: &str, window: NativeWindow, sh: &Shared) -> Result<(), Pla
         .ok_or_else(|| PlayerError::Refused("no video track".into()))?;
     ex.select_track(track).map_err(PlayerError::Refused)?;
     let mime = format.str("mime").unwrap_or("video/avc").to_string();
-    // Declared before the codec, so it's dropped (uncounted) after it.
-    let _slot = DecoderSlot::take();
     // A clip of a type with no decoder never gets here (the library's
     // probe leaves it out), so a null here is the decoder's state: a
     // mediaserver that can't make one now.
@@ -927,19 +954,30 @@ fn video_thread(path: &str, window: NativeWindow, sh: &Shared) -> Result<(), Pla
     if let Err(e) = result {
         sh.fail(PlayerError::Decoder(e));
     }
+    // A teardown that never finishes (raam#110) is found by its last log
+    // line: each call into the decoder that can block is announced first.
     let t = clock::now();
     if raam_core::switches::fail() == raam_core::switches::Fail::Hang && !sh.probe {
         std::thread::sleep(Duration::from_secs(15));
     }
-    let _ = codec.stop();
+    log::info!("{}: stopping the decoder", sh.label);
+    if let Err(e) = codec.stop() {
+        log::warn!("{}: decoder stop: {e:?}", sh.label);
+    }
+    let stopped = clock::elapsed(t);
+    log::info!("{}: decoder stopped in {stopped:?}, releasing it", sh.label);
     drop(codec);
     drop(window);
-    if clock::elapsed(t) > Duration::from_secs(1) {
+    // Uncounted only now that the codec is gone.
+    drop(slot);
+    let released = clock::elapsed(t);
+    if released > Duration::from_secs(1) {
         log::warn!(
-            "{}: the decoder took {:?} to stop and release",
+            "{}: the decoder took {released:?} to stop and release",
             sh.label,
-            clock::elapsed(t)
         );
+    } else {
+        log::info!("{}: decoder released in {released:?}", sh.label);
     }
     Ok(())
 }
@@ -1170,7 +1208,9 @@ fn audio_thread(path: &str, sh: &Shared, start_us: i64) -> Result<(), String> {
             }
         }
     })();
-    let _ = codec.stop();
+    if let Err(e) = codec.stop() {
+        log::warn!("{}: audio decoder stop: {e:?}", sh.label);
+    }
     drop(codec);
     drop(out);
     result

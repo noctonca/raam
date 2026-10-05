@@ -43,8 +43,13 @@ impl VideoPlayer for Decoders {
         if switches::fail() == Fail::Open {
             return Err("test failure (debug.video.fail=Open)".into());
         }
-        let (label, sound, latency) = match role {
-            Role::Probe => (format!("clip {asset_id} (probe)"), None, 0),
+        let (label, tag, sound, latency) = match role {
+            Role::Probe => (
+                format!("clip {asset_id} (probe)"),
+                format!("{asset_id}p"),
+                None,
+                0,
+            ),
             Role::Live { sound } => {
                 let latency = self.audio_latency_ms + self.audio_extra_ms;
                 if sound.is_some() {
@@ -54,7 +59,12 @@ impl VideoPlayer for Decoders {
                         self.audio_extra_ms
                     );
                 }
-                (format!("clip {asset_id}"), sound, latency)
+                (
+                    format!("clip {asset_id}"),
+                    asset_id.to_string(),
+                    sound,
+                    latency,
+                )
             }
         };
         Player::open(
@@ -65,6 +75,7 @@ impl VideoPlayer for Decoders {
             latency,
             self.waker.clone(),
             label,
+            &tag,
         )
     }
 
